@@ -25,11 +25,15 @@ python -m sample_factory_examples.enjoy_custom_multi_env --algo=APPO \
     --env=my_custom_multi_env_v1 --experiment=example
 """
 import os
+import shutil
 import sys
+import time
 
 import hydra
 import numpy as np
+from hydra.core.hydra_config import HydraConfig
 from omegaconf import OmegaConf
+import torch
 from sample_factory.envs.env_registry import global_env_registry
 from sample_factory.run_algorithm import run_algorithm
 from sample_factory_examples.train_custom_env_custom_model import override_default_params_func
@@ -314,9 +318,69 @@ def register_custom_components():
     register_custom_encoder('custom_env_encoder', CustomEncoder)
 
 
+def _get_hydra_output_dir():
+    """Resolve output dir across Hydra versions."""
+    hydra_cfg = HydraConfig.get()
+    output_dir = OmegaConf.select(hydra_cfg, 'runtime.output_dir')
+    if output_dir is not None:
+        return output_dir
+
+    run_dir = OmegaConf.select(hydra_cfg, 'run.dir')
+    if run_dir is not None:
+        runtime_cwd = OmegaConf.select(hydra_cfg, 'runtime.cwd')
+        if runtime_cwd is not None and not os.path.isabs(run_dir):
+            return os.path.join(runtime_cwd, run_dir)
+        return run_dir
+
+    return os.getcwd()
+
+
+def _patch_sample_factory_temp_checkpoint_filename():
+    """Patch Sample Factory checkpoint temp filename for PyTorch >= 2.4."""
+    from sample_factory.algorithms.appo import learner as appo_learner
+
+    if getattr(appo_learner.LearnerWorker, '_temp_checkpoint_pytorch24_patched', False):
+        return
+
+    def _save(self):
+        checkpoint = self._get_checkpoint_dict()
+        assert checkpoint is not None
+
+        checkpoint_dir = self.checkpoint_dir(self.cfg, self.policy_id)
+        # torch>=2.4 rejects archive file names that begin with a dot, such as the
+        # original '.temp_checkpoint.tmp', so we use a non-dot-prefixed temp name.
+        tmp_filepath = os.path.join(checkpoint_dir, 'temp_checkpoint.tmp')
+        checkpoint_name = f'checkpoint_{self.train_step:09d}_{self.env_steps}.pth'
+        filepath = os.path.join(checkpoint_dir, checkpoint_name)
+        appo_learner.log.info('Saving %s...', tmp_filepath)
+        torch.save(checkpoint, tmp_filepath)
+        appo_learner.log.info('Renaming %s to %s', tmp_filepath, filepath)
+        os.rename(tmp_filepath, filepath)
+
+        while len(self.get_checkpoints(checkpoint_dir)) > self.cfg.keep_checkpoints:
+            oldest_checkpoint = self.get_checkpoints(checkpoint_dir)[0]
+            if os.path.isfile(oldest_checkpoint):
+                appo_learner.log.debug('Removing %s', oldest_checkpoint)
+                os.remove(oldest_checkpoint)
+
+        if self.cfg.save_milestones_sec > 0:
+            if time.time() - self.last_milestone_time >= self.cfg.save_milestones_sec:
+                milestones_dir = appo_learner.ensure_dir_exists(
+                    os.path.join(checkpoint_dir, 'milestones'))
+                milestone_path = os.path.join(
+                    milestones_dir, f'{checkpoint_name}.milestone')
+                appo_learner.log.debug('Saving a milestone %s', milestone_path)
+                shutil.copy(filepath, milestone_path)
+                self.last_milestone_time = time.time()
+
+    appo_learner.LearnerWorker._save = _save
+    appo_learner.LearnerWorker._nocturne_temp_checkpoint_patch = True
+
+
 @hydra.main(config_path="../../cfgs/", config_name="config")
 def main(cfg):
     """Script entry point."""
+    _patch_sample_factory_temp_checkpoint_filename()
     register_custom_components()
     # cfg = parse_args()
     # TODO(ev) hacky renaming and restructuring, better to do this cleanly
@@ -326,8 +390,9 @@ def main(cfg):
         cfg_dict[key] = value
     # we didn't set a train directory so use the hydra one
     if cfg_dict['train_dir'] is None:
-        cfg_dict['train_dir'] = os.getcwd()
-        print(f'storing the results in {os.getcwd()}')
+        hydra_output_dir = _get_hydra_output_dir()
+        cfg_dict['train_dir'] = os.path.dirname(hydra_output_dir)
+        print(f"storing the results in {cfg_dict['train_dir']}")
     else:
         output_dir = cfg_dict['train_dir']
         print(f'storing results in {output_dir}')

@@ -1,6 +1,6 @@
 algo: APPO
-experiments_root: null 
-                 # If not None, store experiment data in the specified subfolder of train_dir. Useful for groups of experiments (e.g. gridsearch) (default: None)
+experiments_root: null
+                 # If not None, store experiment data in the specified subfolder of train_dir. Useful for groups of experiments (e.g. gridsearch). Set this to a custom name when needed (default: None)
 train_dir: null
                         # Root for all experiments (default: /private/home/eugenevinitsky/Code/nocturne/examples/train_dir)
                         # if null use the hydra default position
@@ -53,7 +53,7 @@ rollout: 20
 #    requires thatrollout == recurrence, which what you want most of the time anyway.Rollout length is independent from the episode length. Episode length
 #    can be both shorter or longer thanrollout, although for PBT training it is currently recommended that rollout << episode_len(see function
 #    finalize_trajectory in actor_worker.py) (default: 32)
-num_workers: 80 # Number of parallel environment workers. Should be less than num_envs and should divide num_envs (default: 80)
+num_workers: 3 # Number of parallel environment workers. Should be less than num_envs and should divide num_envs (default: 80)
 recurrence: 20 # Trajectory length for backpropagation through time. If recurrence=1 there is no backpropagation through time, and experience is shuffled completely
                #         randomlyFor V-trace recurrence should be equal to rollout length. (default: 32)
 use_rnn: True #     Whether to use RNN core in a policy or not (default: True)
@@ -62,7 +62,7 @@ rnn_type: gru #  {gru,lstm}
 rnn_num_layers: 1 # Number of RNN layers to use if use_rnn is True (default: 1)
 ppo_clip_ratio: 0.1 # We use unbiased clip(x, 1+e, 1/(1+e)) instead of clip(x, 1+e, 1-e) in the paper (default: 0.1)
 ppo_clip_value: 1.0 # Maximum absolute change in value estimate until it is clipped. Sensitive to value magnitude (default: 1.0)
-batch_size: 7180 # Minibatch size for SGD (default: 1024)
+batch_size: 240 # Minibatch size for SGD (default: 1024)
 num_batches_per_iteration: 1 
 # How many minibatches we collect before training on the collected experience. It is generally recommended to set this to 1 for most experiments, because
 # any higher value will increase the policy lag.But in some specific circumstances it can be beneficial to have a larger macro-batch in order to shuffle
@@ -94,7 +94,7 @@ exploration_loss: entropy
                         # divergence between the action distribution and a uniform prior approaches infinity when entropy of the distribution approaches zero, so it can prevent
                         # the pathological situations where the agent stops exploring. Empirically, symmetric KL-divergence yielded slightly better results on some problems.
                         # (default: entropy)
-max_entropy_coeff: 0.0, # Coefficient for max entropy term added directly to rewards. 0 means no max entropy term to env rewards. '
+max_entropy_coeff: 0.0  # 'Coefficient for max entropy term added directly to rewards. 0 means no max entropy term to env rewards. '
                         # Note that this is different from exploration loss (see https://arxiv.org/abs/1805.00909)'
 num_envs_per_worker: 2
                         # Number of envs on a single CPU actor, in high-throughput configurations this should be in 10-30 range for Atari/VizDoomMust be even for double-buffered
