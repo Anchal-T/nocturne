@@ -48,8 +48,11 @@ class BaseEnv(Env):
         self.scenario = self.simulation.getScenario()
         self.controlled_vehicles = self.scenario.getObjectsThatMoved()
         self.cfg = cfg
-        self.n_frames_stacked = self.cfg['subscriber'].get(
-            'n_frames_stacked', 1)
+        subscriber_cfg = self.cfg.get('subscriber', {})
+        self.n_frames_stacked = subscriber_cfg.get('n_frames_stacked', 1)
+        self.render_img_width = subscriber_cfg.get('render_img_width', 1600)
+        self.render_img_height = subscriber_cfg.get('render_img_height', 1600)
+        self.render_padding = subscriber_cfg.get('render_padding', 50.0)
         if self.n_frames_stacked > 1:
             print(
                 'WARNING: you are frame stacking and may want to turn off recurrence if it is enabled\
@@ -496,10 +499,10 @@ class BaseEnv(Env):
     def render(self, mode=None):
         """See superclass."""
         return self.scenario.getImage(
-            img_width=1600,
-            img_height=1600,
+            img_width=self.render_img_width,
+            img_height=self.render_img_height,
             draw_target_positions=True,
-            padding=50.0,
+            padding=self.render_padding,
         )
 
     def render_ego(self, mode=None):
@@ -512,9 +515,9 @@ class BaseEnv(Env):
                 view_dist=self.cfg['subscriber']['view_dist'],
                 view_angle=self.cfg['subscriber']['view_angle'],
                 head_angle=self.render_vehicle.head_angle,
-                img_width=1600,
-                img_height=1600,
-                padding=50.0,
+                img_width=self.render_img_width,
+                img_height=self.render_img_height,
+                padding=self.render_padding,
                 draw_target_position=True,
             )
 
@@ -528,9 +531,9 @@ class BaseEnv(Env):
                 view_dist=self.cfg['subscriber']['view_dist'],
                 view_angle=self.cfg['subscriber']['view_angle'],
                 head_angle=self.render_vehicle.head_angle,
-                img_width=1600,
-                img_height=1600,
-                padding=50.0,
+                img_width=self.render_img_width,
+                img_height=self.render_img_height,
+                padding=self.render_padding,
                 draw_target_position=True,
             )
 

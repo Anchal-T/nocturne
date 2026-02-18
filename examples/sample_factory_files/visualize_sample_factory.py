@@ -6,12 +6,11 @@
 import argparse
 from collections import deque
 import json
+import os
 import sys
 import time
-import os
 
 import imageio
-import matplotlib.pyplot as plt
 import numpy as np
 import torch
 
@@ -28,7 +27,16 @@ from sample_factory.utils.utils import log, AttrDict
 
 from run_sample_factory import register_custom_components
 
-from cfgs.config import PROCESSED_TRAIN_NO_TL, PROCESSED_VALID_NO_TL, PROJECT_PATH, set_display_window  # noqa: F401
+from cfgs.config import PROCESSED_VALID_NO_TL, PROJECT_PATH, set_display_window
+
+
+def positive_int(value):
+    """Return validated positive integer argument value."""
+    parsed = int(value)
+    if parsed < 1:
+        raise argparse.ArgumentTypeError(
+            f'Expected a positive integer, got {value}')
+    return parsed
 
 
 def run_eval(cfg_dict, max_num_frames=1e9):
@@ -55,6 +63,12 @@ def run_eval(cfg_dict, max_num_frames=1e9):
     cfg.num_envs = 1
     cfg.seed = np.random.randint(10000)
     cfg.scenario_path = cfg_dict.scenario_path
+
+    # Preserve backwards compatibility with older checkpoints while allowing
+    # low-memory render resolution overrides from this script.
+    cfg.subscriber = dict(getattr(cfg, 'subscriber', {}))
+    cfg.subscriber['render_img_width'] = cfg_dict.render_width
+    cfg.subscriber['render_img_height'] = cfg_dict.render_height
 
     def make_env_func(env_config):
         return create_env(cfg.env, cfg=cfg, env_config=env_config)
@@ -86,6 +100,43 @@ def run_eval(cfg_dict, max_num_frames=1e9):
     num_frames = 0
 
     last_render_start = time.time()
+    writers = {}
+
+    def open_video_writer(enabled, stream_name, filename):
+        """Create a video writer for one stream, or continue if it fails."""
+        if not enabled:
+            return
+
+        output_path = os.path.join(PROJECT_PATH, filename)
+        try:
+            writers[stream_name] = imageio.get_writer(output_path,
+                                                      fps=cfg.video_fps)
+            log.info('Recording %s stream to %s', stream_name, output_path)
+        except Exception as exc:
+            log.error(
+                'Failed to initialize %s writer at %s: %s. Continuing without this stream.',
+                stream_name, output_path, exc)
+
+    def append_frame(stream_name, frame):
+        """Append frame to writer and disable stream if write fails."""
+        if frame is None:
+            return
+
+        writer = writers.get(stream_name)
+        if writer is None:
+            return
+
+        try:
+            writer.append_data(frame)
+        except Exception as exc:
+            log.error(
+                'Failed to append frame to %s stream: %s. Disabling this stream.',
+                stream_name, exc)
+            try:
+                writer.close()
+            except Exception:
+                pass
+            writers.pop(stream_name, None)
 
     def max_frames_reached(frames):
         return max_num_frames is not None and frames > max_num_frames
@@ -99,134 +150,126 @@ def run_eval(cfg_dict, max_num_frames=1e9):
     episode_reward = np.zeros(env.num_agents)
     finished_episode = [False] * env.num_agents
 
-    if not cfg.no_render:
-        fig = plt.figure()
-        frames = []
-        ego_frames = []
-        feature_frames = []
+    try:
+        if not cfg.no_render:
+            open_video_writer(cfg.record_main, 'main', 'animation.mp4')
+            open_video_writer(cfg.record_ego, 'ego', 'animation_ego.mp4')
+            open_video_writer(cfg.record_features, 'features',
+                              'animation_feature.mp4')
 
-    with torch.no_grad():
-        while not max_frames_reached(num_frames):
-            obs_torch = AttrDict(transform_dict_observations(obs))
-            for key, x in obs_torch.items():
-                obs_torch[key] = torch.from_numpy(x).to(device).float()
+        with torch.no_grad():
+            while not max_frames_reached(num_frames):
+                obs_torch = AttrDict(transform_dict_observations(obs))
+                for key, x in obs_torch.items():
+                    obs_torch[key] = torch.from_numpy(x).to(device).float()
 
-            policy_outputs = actor_critic(obs_torch,
-                                          rnn_states,
-                                          with_action_distribution=True)
+                policy_outputs = actor_critic(obs_torch,
+                                              rnn_states,
+                                              with_action_distribution=True)
 
-            # sample actions from the distribution by default
-            actions = policy_outputs.actions
+                # sample actions from the distribution by default
+                actions = policy_outputs.actions
 
-            action_distribution = policy_outputs.action_distribution
-            if isinstance(action_distribution, ContinuousActionDistribution):
-                if not cfg.continuous_actions_sample:  # TODO: add similar option for discrete actions
-                    actions = action_distribution.means
-            if isinstance(action_distribution, CategoricalActionDistribution):
-                if not cfg.discrete_actions_sample:
-                    actions = policy_outputs['action_logits'].argmax(axis=1)
+                action_distribution = policy_outputs.action_distribution
+                if isinstance(action_distribution, ContinuousActionDistribution):
+                    if not cfg.continuous_actions_sample:  # TODO: add similar option for discrete actions
+                        actions = action_distribution.means
+                if isinstance(action_distribution, CategoricalActionDistribution):
+                    if not cfg.discrete_actions_sample:
+                        actions = policy_outputs['action_logits'].argmax(axis=1)
 
-            actions = actions.cpu().numpy()
+                actions = actions.cpu().numpy()
 
-            rnn_states = policy_outputs.rnn_states
+                rnn_states = policy_outputs.rnn_states
 
-            for _ in range(render_action_repeat):
-                if not cfg.no_render:
-                    target_delay = 1.0 / cfg.fps if cfg.fps > 0 else 0
-                    current_delay = time.time() - last_render_start
-                    time_wait = target_delay - current_delay
+                for _ in range(render_action_repeat):
+                    if not cfg.no_render:
+                        target_delay = 1.0 / cfg.fps if cfg.fps > 0 else 0
+                        current_delay = time.time() - last_render_start
+                        time_wait = target_delay - current_delay
 
-                    if time_wait > 0:
-                        # log.info('Wait time %.3f', time_wait)
-                        time.sleep(time_wait)
+                        if time_wait > 0:
+                            time.sleep(time_wait)
 
-                    last_render_start = time.time()
-                    img = env.render()
-                    frames.append(img)
-                    ego_img = env.render_ego()
-                    if ego_img is not None:
-                        ego_frames.append(ego_img)
-                    feature_img = env.render_features()
-                    if feature_img is not None:
-                        feature_frames.append(feature_img)
+                        last_render_start = time.time()
+                        main_img = env.render()
+                        should_record = (num_frames % cfg.frame_stride == 0)
+                        if should_record:
+                            append_frame('main', main_img)
 
-                obs, rew, done, infos = env.step(actions)
+                            if 'ego' in writers:
+                                append_frame('ego', env.render_ego())
+                            if 'features' in writers:
+                                append_frame('features', env.render_features())
 
-                episode_reward += rew
-                num_frames += 1
+                    obs, rew, done, infos = env.step(actions)
 
-                for agent_i, done_flag in enumerate(done):
-                    if done_flag:
-                        finished_episode[agent_i] = True
-                        episode_rewards[agent_i].append(
-                            episode_reward[agent_i])
-                        true_rewards[agent_i].append(infos[agent_i].get(
-                            'true_reward', episode_reward[agent_i]))
+                    episode_reward += rew
+                    num_frames += 1
+
+                    for agent_i, done_flag in enumerate(done):
+                        if done_flag:
+                            finished_episode[agent_i] = True
+                            episode_rewards[agent_i].append(
+                                episode_reward[agent_i])
+                            true_rewards[agent_i].append(infos[agent_i].get(
+                                'true_reward', episode_reward[agent_i]))
+                            log.info(
+                                'Episode finished for agent %d at %d frames. Reward: %.3f, true_reward: %.3f',
+                                agent_i, num_frames, episode_reward[agent_i],
+                                true_rewards[agent_i][-1])
+                            rnn_states[agent_i] = torch.zeros(
+                                [get_hidden_size(cfg)],
+                                dtype=torch.float32,
+                                device=device)
+                            episode_reward[agent_i] = 0
+
+                    # if episode terminated synchronously for all agents, pause a bit before starting a new one
+                    if all(done):
+                        if not cfg.no_render:
+                            env.render()
+                        time.sleep(0.05)
+
+                    if all(finished_episode):
+                        finished_episode = [False] * env.num_agents
+                        avg_episode_rewards_str, avg_true_reward_str = '', ''
+                        for agent_i in range(env.num_agents):
+                            avg_rew = np.mean(episode_rewards[agent_i])
+                            avg_true_rew = np.mean(true_rewards[agent_i])
+                            if not np.isnan(avg_rew):
+                                if avg_episode_rewards_str:
+                                    avg_episode_rewards_str += ', '
+                                avg_episode_rewards_str += f'#{agent_i}: {avg_rew:.3f}'
+                            if not np.isnan(avg_true_rew):
+                                if avg_true_reward_str:
+                                    avg_true_reward_str += ', '
+                                avg_true_reward_str += f'#{agent_i}: {avg_true_rew:.3f}'
+                        avg_goal = infos[0]['episode_extra_stats']['goal_achieved']
+                        avg_collisions = infos[0]['episode_extra_stats'][
+                            'collided']
+                        log.info(f'Avg goal achieved, {avg_goal}')
+                        log.info(f'Avg num collisions, {avg_collisions}')
+                        log.info('Avg episode rewards: %s, true rewards: %s',
+                                 avg_episode_rewards_str, avg_true_reward_str)
                         log.info(
-                            'Episode finished for agent %d at %d frames. Reward: %.3f, true_reward: %.3f',
-                            agent_i, num_frames, episode_reward[agent_i],
-                            true_rewards[agent_i][-1])
-                        rnn_states[agent_i] = torch.zeros(
-                            [get_hidden_size(cfg)],
-                            dtype=torch.float32,
-                            device=device)
-                        episode_reward[agent_i] = 0
-
-                # if episode terminated synchronously for all agents, pause a bit before starting a new one
-                if all(done):
-                    if not cfg.no_render:
-                        imageio.mimsave(os.path.join(PROJECT_PATH,
-                                                     'animation.mp4'),
-                                        np.array(frames),
-                                        fps=30)
-                        plt.close(fig)
-                        imageio.mimsave(os.path.join(PROJECT_PATH,
-                                                     'animation_ego.mp4'),
-                                        np.array(ego_frames),
-                                        fps=30)
-                        plt.close(fig)
-                        imageio.mimsave(os.path.join(PROJECT_PATH,
-                                                     'animation_feature.mp4'),
-                                        np.array(feature_frames),
-                                        fps=30)
-                        plt.close(fig)
-                    if not cfg.no_render:
-                        env.render()
-                    time.sleep(0.05)
-
-                if all(finished_episode):
-                    finished_episode = [False] * env.num_agents
-                    avg_episode_rewards_str, avg_true_reward_str = '', ''
-                    for agent_i in range(env.num_agents):
-                        avg_rew = np.mean(episode_rewards[agent_i])
-                        avg_true_rew = np.mean(true_rewards[agent_i])
-                        if not np.isnan(avg_rew):
-                            if avg_episode_rewards_str:
-                                avg_episode_rewards_str += ', '
-                            avg_episode_rewards_str += f'#{agent_i}: {avg_rew:.3f}'
-                        if not np.isnan(avg_true_rew):
-                            if avg_true_reward_str:
-                                avg_true_reward_str += ', '
-                            avg_true_reward_str += f'#{agent_i}: {avg_true_rew:.3f}'
-                    avg_goal = infos[0]['episode_extra_stats']['goal_achieved']
-                    avg_collisions = infos[0]['episode_extra_stats'][
-                        'collided']
-                    log.info(f'Avg goal achieved, {avg_goal}')
-                    log.info(f'Avg num collisions, {avg_collisions}')
-                    log.info('Avg episode rewards: %s, true rewards: %s',
-                             avg_episode_rewards_str, avg_true_reward_str)
-                    log.info(
-                        'Avg episode reward: %.3f, avg true_reward: %.3f',
-                        np.mean([
-                            np.mean(episode_rewards[i])
-                            for i in range(env.num_agents)
-                        ]),
-                        np.mean([
-                            np.mean(true_rewards[i])
-                            for i in range(env.num_agents)
-                        ]))
-                    return avg_goal
-    env.close()
+                            'Avg episode reward: %.3f, avg true_reward: %.3f',
+                            np.mean([
+                                np.mean(episode_rewards[i])
+                                for i in range(env.num_agents)
+                            ]),
+                            np.mean([
+                                np.mean(true_rewards[i])
+                                for i in range(env.num_agents)
+                            ]))
+                        return avg_goal
+    finally:
+        for stream_name, writer in list(writers.items()):
+            try:
+                writer.close()
+            except Exception as exc:
+                log.error('Failed to close %s writer cleanly: %s',
+                          stream_name, exc)
+        env.close()
 
 
 def main():
@@ -236,23 +279,48 @@ def main():
 
     parser = argparse.ArgumentParser()
     parser.add_argument('cfg_path', type=str)
+    parser.add_argument('--render-width', type=positive_int, default=640)
+    parser.add_argument('--render-height', type=positive_int, default=640)
+    parser.add_argument('--record-main',
+                        dest='record_main',
+                        action='store_true',
+                        default=True)
+    parser.add_argument('--no-record-main',
+                        dest='record_main',
+                        action='store_false')
+    parser.add_argument('--record-ego', action='store_true', default=False)
+    parser.add_argument('--record-features',
+                        action='store_true',
+                        default=False)
+    parser.add_argument('--video-fps', type=positive_int, default=30)
+    parser.add_argument('--frame-stride', type=positive_int, default=1)
     args = parser.parse_args()
 
     file_path = os.path.join(args.cfg_path, 'cfg.json')
     with open(file_path, 'r') as file:
         cfg_dict = json.load(file)
 
-    cfg_dict['cli_args'] = {}
+    cfg_dict['cli_args'] = vars(args)
     cfg_dict['fps'] = 0
     cfg_dict['render_action_repeat'] = None
     cfg_dict['no_render'] = False
     cfg_dict['policy_index'] = 0
     cfg_dict['record_to'] = os.path.join(os.getcwd(), '..', 'recs')
+    cfg_dict['record_main'] = args.record_main
+    cfg_dict['record_ego'] = args.record_ego
+    cfg_dict['record_features'] = args.record_features
+    cfg_dict['video_fps'] = args.video_fps
+    cfg_dict['frame_stride'] = args.frame_stride
+    cfg_dict['render_width'] = args.render_width
+    cfg_dict['render_height'] = args.render_height
     cfg_dict['continuous_actions_sample'] = True
     cfg_dict['discrete_actions_sample'] = False
     cfg_dict['remove_at_collide'] = True
     cfg_dict['remove_at_goal'] = True
     cfg_dict['scenario_path'] = PROCESSED_VALID_NO_TL
+    cfg_dict.setdefault('subscriber', {})
+    cfg_dict['subscriber']['render_img_width'] = args.render_width
+    cfg_dict['subscriber']['render_img_height'] = args.render_height
 
     class Bunch(object):
 

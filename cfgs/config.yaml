@@ -44,7 +44,7 @@ scenario:
   # initial timestep of the scenario (which ranges from timesteps 0 to 90)
   start_time: 0
   # if set to True, non-vehicle objects (eg. cyclists, pedestrians...) will be spawned
-  allow_non_vehicles: False
+  allow_non_vehicles: True
   # for an object to be included into moving_objects
   moving_threshold: 0.2  # its goal must be at least this distance from its initial position
   speed_threshold: 0.05  # its speed must be superior to this value at some point
@@ -102,7 +102,11 @@ subscriber:
   # agents in the system is less than max_num_vehicles
   keep_inactive_agents: False
   # for values greater than 1, we will stack inputs together
-  n_frames_stacked: 1
+  n_frames_stacked: 3
+  # render resolution and padding for visualization APIs (render/render_ego/render_features)
+  render_img_width: 640
+  render_img_height: 480
+  render_padding: 30.0
 
 results_dir: ${oc.env:NOCTURNE_LOG_DIR}
 
