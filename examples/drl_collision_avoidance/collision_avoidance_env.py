@@ -1,6 +1,4 @@
-import json
 import math
-import os
 from typing import Any, Dict, Optional, Tuple
 
 import gym
@@ -56,11 +54,6 @@ class CollisionAvoidanceEnv(gym.Env):
         self._max_steps = cfg.get("drl", {}).get("max_episode_steps", 400)
         self._ttz_vehicle: float = 999.0
         self._ttz_pedestrian: float = 999.0
-        self._ego_goal_path: Optional[np.ndarray] = None
-        self._ego_goal_suffix: Optional[np.ndarray] = None
-        self._trajectory_cache: Dict[
-            Tuple[str, int, bool], Dict[int, np.ndarray]
-        ] = {}
 
     def reset(self) -> np.ndarray:
         # BaseEnv reset can occasionally pick a controlled id that gets removed
@@ -75,7 +68,6 @@ class CollisionAvoidanceEnv(gym.Env):
             if ego_id in vehicle_ids:
                 self._ego_id = ego_id
                 self._step_count = 0
-                self._init_goal_reference_path()
                 self._prev_goal_dist = self._get_goal_dist()
                 return self._build_observation()
 
@@ -103,7 +95,6 @@ class CollisionAvoidanceEnv(gym.Env):
             )
 
         self._step_count = 0
-        self._init_goal_reference_path()
         self._prev_goal_dist = self._get_goal_dist()
         return self._build_observation()
 
@@ -329,136 +320,13 @@ class CollisionAvoidanceEnv(gym.Env):
 
     def _get_goal_dist(
         self,
-    ) -> float:
+    ) -> float:  # this calculates ecludian distance between the ego vehicle and its goal position, which may cause some issues if the path is not straight, to find a better approach.
         ego_veh = self._get_ego_vehicle()
         if ego_veh is None:
             return 0.0
-        path_dist = self._get_remaining_path_distance(ego_veh.position)
-        if path_dist is not None:
-            return path_dist
         goal = ego_veh.target_position
         pos = ego_veh.position
         return math.sqrt((goal.x - pos.x) ** 2 + (goal.y - pos.y) ** 2)
-
-    def _init_goal_reference_path(self) -> None:
-        self._ego_goal_path = None
-        self._ego_goal_suffix = None
-
-        if self._ego_id is None:
-            return
-
-        path_points = self._load_reference_path(self._ego_id)
-        if path_points is None or path_points.shape[0] < 2:
-            return
-
-        seg_lengths = np.linalg.norm(np.diff(path_points, axis=0), axis=1)
-        suffix = np.zeros(path_points.shape[0], dtype=np.float32)
-        if seg_lengths.size > 0:
-            suffix[:-1] = np.cumsum(seg_lengths[::-1], dtype=np.float64)[::-1]
-
-        self._ego_goal_path = path_points
-        self._ego_goal_suffix = suffix
-
-    def _load_reference_path(self, obj_id: int) -> Optional[np.ndarray]:
-        scenario_file = getattr(self.base_env, "file", None)
-        scenario_dir = self.cfg.get("scenario_path")
-        if scenario_file is None or scenario_dir is None:
-            return None
-
-        file_path = os.path.join(scenario_dir, scenario_file)
-        scenario_cfg = self.cfg.get("scenario", {})
-        start_time = int(scenario_cfg.get("start_time", 0))
-        spawn_invalid = bool(scenario_cfg.get("spawn_invalid_objects", False))
-        cache_key = (file_path, start_time, spawn_invalid)
-
-        trajectories = self._trajectory_cache.get(cache_key)
-        if trajectories is None:
-            trajectories = self._build_trajectory_cache(
-                file_path=file_path,
-                start_time=start_time,
-                spawn_invalid=spawn_invalid,
-            )
-            self._trajectory_cache[cache_key] = trajectories
-
-        return trajectories.get(obj_id)
-
-    def _build_trajectory_cache(
-        self, file_path: str, start_time: int, spawn_invalid: bool
-    ) -> Dict[int, np.ndarray]:
-        if not os.path.exists(file_path):
-            return {}
-
-        with open(file_path, "r", encoding="utf-8") as f:
-            scenario_data = json.load(f)
-
-        trajectories: Dict[int, np.ndarray] = {}
-        objects = scenario_data.get("objects", [])
-        cur_id = 0
-        for obj in objects:
-            positions = obj.get("position", [])
-            valid_mask = obj.get("valid", [])
-            if not positions or not valid_mask:
-                continue
-            if start_time < 0 or start_time >= len(valid_mask):
-                continue
-            if not spawn_invalid and not bool(valid_mask[start_time]):
-                continue
-
-            path_points = []
-            limit = min(len(positions), len(valid_mask))
-            for idx in range(start_time, limit):
-                if not bool(valid_mask[idx]):
-                    continue
-                pos = positions[idx]
-                x = pos.get("x")
-                y = pos.get("y")
-                if x is None or y is None:
-                    continue
-                x_f = float(x)
-                y_f = float(y)
-                if not np.isfinite(x_f) or not np.isfinite(y_f):
-                    continue
-                if x_f <= -9999.0 and y_f <= -9999.0:
-                    continue
-                path_points.append([x_f, y_f])
-
-            if len(path_points) >= 2:
-                trajectories[cur_id] = np.asarray(path_points, dtype=np.float32)
-            cur_id += 1
-
-        return trajectories
-
-    def _get_remaining_path_distance(self, pos) -> Optional[float]:
-        if self._ego_goal_path is None or self._ego_goal_suffix is None:
-            return None
-        path = self._ego_goal_path
-        suffix = self._ego_goal_suffix
-        if path.shape[0] < 2:
-            return None
-
-        query = np.array([float(pos.x), float(pos.y)], dtype=np.float32)
-        best_sq = float("inf")
-        best_remaining: Optional[float] = None
-        for idx in range(path.shape[0] - 1):
-            start = path[idx]
-            end = path[idx + 1]
-            segment = end - start
-            seg_len_sq = float(np.dot(segment, segment))
-            if seg_len_sq <= 1e-8:
-                continue
-
-            t = float(np.dot(query - start, segment) / seg_len_sq)
-            t = max(0.0, min(1.0, t))
-            projected = start + t * segment
-            dist_sq = float(np.dot(query - projected, query - projected))
-            if dist_sq >= best_sq:
-                continue
-
-            seg_len = float(suffix[idx] - suffix[idx + 1])
-            best_sq = dist_sq
-            best_remaining = (1.0 - t) * seg_len + float(suffix[idx + 1])
-
-        return best_remaining
 
     def _get_ego_vehicle(
         self,
