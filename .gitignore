@@ -46,3 +46,6 @@ dataset/
 configs.json
 GEMINI.md
 .github/skills/
+.github/prompts/
+outputs/
+.agents/rules/nocturne-rules.md
