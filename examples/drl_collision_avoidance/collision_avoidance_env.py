@@ -318,15 +318,46 @@ class CollisionAvoidanceEnv(gym.Env):
 
         return reward
 
-    def _get_goal_dist(
-        self,
-    ) -> float:  # this calculates ecludian distance between the ego vehicle and its goal position, which may cause some issues if the path is not straight, to find a better approach.
+    def _get_goal_dist(self) -> float:
+        """Remaining distance along the expert trajectory path.
+
+        Sums piecewise segment lengths from the ego's current position
+        through remaining expert waypoints.  Falls back to Euclidean
+        distance when expert trajectory data is unavailable.
+        """
         ego_veh = self._get_ego_vehicle()
         if ego_veh is None:
             return 0.0
-        goal = ego_veh.target_position
+
+        scenario = self.base_env.scenario
         pos = ego_veh.position
-        return math.sqrt((goal.x - pos.x) ** 2 + (goal.y - pos.y) ** 2)
+
+        # Collect remaining absolute expert waypoints
+        t = getattr(self.base_env, "step_num", self._step_count)
+        waypoints = []
+        try:
+            while True:
+                wp = scenario.expert_position(ego_veh, t)
+                waypoints.append(wp)
+                t += 1
+        except (IndexError, RuntimeError, KeyError, AttributeError):
+            pass
+
+        if len(waypoints) < 2:
+            goal = ego_veh.target_position
+            return math.sqrt((goal.x - pos.x) ** 2 + (goal.y - pos.y) ** 2)
+
+        # Current position → first waypoint
+        total = math.sqrt(
+            (waypoints[0].x - pos.x) ** 2 + (waypoints[0].y - pos.y) ** 2
+        )
+        # Sum remaining waypoint-to-waypoint segments
+        for i in range(1, len(waypoints)):
+            dx = waypoints[i].x - waypoints[i - 1].x
+            dy = waypoints[i].y - waypoints[i - 1].y
+            total += math.sqrt(dx * dx + dy * dy)
+
+        return total
 
     def _get_ego_vehicle(
         self,

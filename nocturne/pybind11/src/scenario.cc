@@ -65,6 +65,7 @@ void DefineScenario(py::module& m) {
           },
           py::arg("object"), py::arg("view_dist") = 60,
           py::arg("view_angle") = kHalfPi, py::arg("head_angle") = 0.0)
+      .def("expert_position", &Scenario::ExpertPosition)
       .def("expert_heading", &Scenario::ExpertHeading)
       .def("expert_speed", &Scenario::ExpertSpeed)
       .def("expert_velocity", &Scenario::ExpertVelocity)
