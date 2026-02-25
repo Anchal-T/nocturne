@@ -33,12 +33,16 @@ class QNetwork(nn.Module):
         extra_dim = obs_dim - grid_size
 
         self.grid_encoder = nn.Sequential(
-            nn.Linear(grid_size, hidden_layers[0]),
+            nn.Unflatten(1, (1, 25, 14)),  # Reshape flattened array back to (Channels, H, W)
+            nn.Conv2d(1, 16, kernel_size=3, stride=1, padding=1),
             nn.ReLU(),
-            nn.Linear(hidden_layers[0], hidden_layers[1]),
+            nn.MaxPool2d(2),  # Output: 16 x 12 x 7
+            nn.Conv2d(16, 32, kernel_size=3, stride=1, padding=1),
             nn.ReLU(),
-            nn.Linear(hidden_layers[1], hidden_layers[2]),
-            nn.ReLU(),
+            nn.MaxPool2d(2),  # Output: 32 x 6 x 3  
+            nn.Flatten(),
+            nn.Linear(32 * 6 * 3, hidden_layers[1]),
+            nn.ReLU()
         )
 
         self.head = nn.Sequential(
@@ -129,7 +133,7 @@ class DDQNAgent:
     def store_transition(self, state, action, reward, next_state, done):
         self.replay_buffer.push(state, action, reward, next_state, done)
 
-    def train_step(self) -> Optional[float]:
+    def train_step(self, env_steps: int = 0) -> Optional[float]:
         if len(self.replay_buffer) < self.batch_size:
             return None
 
@@ -148,7 +152,6 @@ class DDQNAgent:
         )
 
         with torch.no_grad():
-            # DDQN: online net selects action, target net evaluates
             best_actions = self.online_net(next_states_t).argmax(dim=1)
             next_q = (
                 self.target_net(next_states_t)
@@ -161,15 +164,11 @@ class DDQNAgent:
 
         self.optimizer.zero_grad()
         loss.backward()
-        # Clipping stabilizes training spikes when replay samples include large
-        # reward deltas from collisions/goal bonuses.
         nn.utils.clip_grad_norm_(self.online_net.parameters(), max_norm=10.0)
         self.optimizer.step()
 
         self.train_steps += 1
-        # Epsilon decay is tied to optimizer updates (not env steps) so changing
-        # train_freq automatically changes exploration decay speed.
-        self._decay_epsilon()
+        self._decay_epsilon(env_steps)
 
         if self.train_steps % self.target_update_freq == 0:
             self.sync_target()
@@ -179,8 +178,9 @@ class DDQNAgent:
     def sync_target(self):
         self.target_net.load_state_dict(self.online_net.state_dict())
 
-    def _decay_epsilon(self):
-        fraction = min(1.0, self.train_steps / max(1, self.epsilon_decay_steps))
+    def _decay_epsilon(self, env_steps: int = 0):
+        steps = env_steps if env_steps > 0 else self.train_steps
+        fraction = min(1.0, steps / max(1, self.epsilon_decay_steps))
         self.epsilon = self.epsilon_start + fraction * (
             self.epsilon_end - self.epsilon_start
         )

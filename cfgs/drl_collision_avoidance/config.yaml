@@ -2,9 +2,9 @@ seed: 42
 device: 'cuda:0'
 experiment: drl_collision_avoidance
 
-single_agent_mode: True
-max_num_vehicles: 1
-episode_length: 80
+single_agent_mode: False
+max_num_vehicles: 9
+episode_length: 100
 num_files: -1
 scenario_split: train
 scenario_path: null
@@ -44,7 +44,7 @@ rew_cfg:
   goal_distance_penalty: False
   goal_achieved_bonus: 100.0
   position_target: True
-  position_target_tolerance: 2.0
+  position_target_tolerance: 5.0
   speed_target: False
   speed_target_tolerance: 1.0
   heading_target: False
@@ -62,21 +62,21 @@ subscriber:
   render_padding: 30.0
 
 drl:
-  lr: 0.01
-  gamma: 0.9
+  lr: 0.0005
+  gamma: 0.99
   epsilon_start: 1.0
   epsilon_end: 0.05
-  epsilon_decay_steps: 200000
+  epsilon_decay_steps: 50000
   replay_buffer_size: 100000
   batch_size: 64
-  target_update_freq: 1000
+  target_update_freq: 500
   train_freq: 4
   min_replay_size: 1000
   hidden_layers: [128, 128, 128, 32]
-  num_episodes: 5000
+  num_episodes: 1000
   max_episode_steps: 80
   log_interval: 10
-  save_interval: 100
+  save_interval: 1000
   checkpoint_dir: checkpoints/drl_collision_avoidance
 
 occupancy_grid:
@@ -90,13 +90,14 @@ occupancy_grid:
 
 reward:
   goal_bonus: 100.0
-  collision_penalty: 50.0
+  collision_penalty: 30.0
   step_penalty: 0.1
-  progress_scale: 1.0
+  progress_scale: 5.0
   ttz_safe_threshold: 4.0
   ttz_reward_scale: 0.5
+  offroad_penalty: 5.0
 
 action_map:
-  throttle_levels: [-3.0, 0.0, 2.0]
-  steer_levels: [-0.3, 0.0, 0.3]
+  throttle_levels: [-1.0, 0.0, 2.0]
+  steer_levels: [-0.6, -0.2, 0.0, 0.2, 0.6]
 

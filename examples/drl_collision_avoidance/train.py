@@ -48,24 +48,24 @@ def main(cfg):
         obs_dim=obs_dim,
         n_actions=n_actions,
         grid_size=grid_size,
-        hidden_layers=drl_cfg.get('hidden_layers', [128, 128, 128, 32]),
-        lr=drl_cfg.get('lr', 0.01),
-        gamma=drl_cfg.get('gamma', 0.9),
-        epsilon_start=drl_cfg.get('epsilon_start', 1.0),
-        epsilon_end=drl_cfg.get('epsilon_end', 0.05),
-        epsilon_decay_steps=drl_cfg.get('epsilon_decay_steps', 200000),
-        replay_buffer_size=drl_cfg.get('replay_buffer_size', 100000),
-        batch_size=drl_cfg.get('batch_size', 64),
-        target_update_freq=drl_cfg.get('target_update_freq', 1000),
+        hidden_layers=drl_cfg['hidden_layers'],
+        lr=drl_cfg['lr'],
+        gamma=drl_cfg['gamma'],
+        epsilon_start=drl_cfg['epsilon_start'],
+        epsilon_end=drl_cfg['epsilon_end'],
+        epsilon_decay_steps=drl_cfg['epsilon_decay_steps'],
+        replay_buffer_size=drl_cfg['replay_buffer_size'],
+        batch_size=drl_cfg['batch_size'],
+        target_update_freq=drl_cfg['target_update_freq'],
         device=device,
     )
 
-    num_episodes = drl_cfg.get('num_episodes', 5000)
-    max_steps = drl_cfg.get('max_episode_steps', 400)
-    train_freq = drl_cfg.get('train_freq', 4)
-    min_replay = drl_cfg.get('min_replay_size', 1000)
-    log_interval = drl_cfg.get('log_interval', 10)
-    save_interval = drl_cfg.get('save_interval', 100)
+    num_episodes = drl_cfg['num_episodes']
+    max_steps = drl_cfg['max_episode_steps']
+    train_freq = drl_cfg['train_freq']
+    min_replay = drl_cfg['min_replay_size']
+    log_interval = drl_cfg['log_interval']
+    save_interval = drl_cfg['save_interval']
     checkpoint_dir = drl_cfg.get('checkpoint_dir', 'checkpoints/drl_collision_avoidance')
     os.makedirs(checkpoint_dir, exist_ok=True)
 
@@ -90,6 +90,7 @@ def main(cfg):
         episode_reward = 0.0
         episode_collided = False
         episode_goal = False
+        min_goal_dist = float('inf')
 
         for t in range(max_steps):
             action = agent.select_action(state)
@@ -100,10 +101,12 @@ def main(cfg):
             episode_reward += reward
             episode_collided = episode_collided or info.get('collided', False)
             episode_goal = episode_goal or info.get('goal_achieved', False)
+            gd = info.get('goal_dist', float('inf'))
+            min_goal_dist = min(min_goal_dist, gd)
 
             # DQN-style ratio: collect transitions every step, optimize periodically.
             if global_step % train_freq == 0 and len(agent.replay_buffer) >= min_replay:
-                loss = agent.train_step()
+                loss = agent.train_step(env_steps=global_step)
                 if loss is not None:
                     loss_history.append(loss)
 
@@ -129,6 +132,7 @@ def main(cfg):
                 f'Episode {episode:5d} | '
                 f'avg_reward={avg_rew:8.2f} | '
                 f'eps={agent.epsilon:.3f} | '
+                f'min_goal_dist={min_goal_dist:.1f} | '
                 f'buf={len(agent.replay_buffer):6d} | '
                 f'steps={global_step}'
             )

@@ -30,6 +30,7 @@ class CollisionAvoidanceEnv(gym.Env):
         self.progress_scale = rew_cfg.get("progress_scale", 1.0)
         self.ttz_safe_threshold = rew_cfg.get("ttz_safe_threshold", 4.0)
         self.ttz_reward_scale = rew_cfg.get("ttz_reward_scale", 0.5)
+        self.offroad_penalty = rew_cfg.get("offroad_penalty", 5.0)
 
         act_cfg = cfg.get("action_map", {})
         throttle_levels = act_cfg.get("throttle_levels", [-4.0, 0.0, 2.0])
@@ -42,7 +43,8 @@ class CollisionAvoidanceEnv(gym.Env):
         self.base_env = BaseEnv(cfg)
         self.cfg = cfg
 
-        obs_dim = self.grid_rows * self.grid_cols + 4 + 2 + 3
+        # grid(rows*cols) + ego(speed_norm, heading_norm) + goal(dist_norm, rel_heading_norm) + ttz(3)
+        obs_dim = self.grid_rows * self.grid_cols + 2 + 2 + 3
         self.observation_space = Box(
             low=-np.inf, high=np.inf, shape=(obs_dim,), dtype=np.float32
         )
@@ -115,6 +117,7 @@ class CollisionAvoidanceEnv(gym.Env):
         info["ttz_vehicle"] = self._ttz_vehicle
         info["ttz_pedestrian"] = self._ttz_pedestrian
         info["step_count"] = self._step_count
+        info["goal_dist"] = self._get_goal_dist()
 
         return obs, reward, done, info
 
@@ -204,10 +207,8 @@ class CollisionAvoidanceEnv(gym.Env):
     def _get_ego_state(self, ego_veh) -> np.ndarray:
         return np.array(
             [
-                ego_veh.position.x,
-                ego_veh.position.y,
-                ego_veh.heading,
-                ego_veh.speed,
+                ego_veh.heading / math.pi,
+                ego_veh.speed / 30.0,
             ],
             dtype=np.float32,
         )
@@ -221,7 +222,7 @@ class CollisionAvoidanceEnv(gym.Env):
         angle_to_goal = math.atan2(dy, dx)
         rel_heading = angle_to_goal - ego_veh.heading
         rel_heading = (rel_heading + math.pi) % (2 * math.pi) - math.pi
-        return np.array([dist, rel_heading], dtype=np.float32)
+        return np.array([dist / 100.0, rel_heading / math.pi], dtype=np.float32)
 
     def _get_ttz_info(self, ego_veh) -> np.ndarray:
         ego_pos = ego_veh.position
@@ -287,77 +288,37 @@ class CollisionAvoidanceEnv(gym.Env):
 
         goal_achieved = info.get("goal_achieved", False)
         collided = info.get("collided", False)
+        veh_edge = info.get("veh_edge_collision", False)
         is_terminal = goal_achieved or collided
 
-        # Sparse terminal rewards — mutually exclusive: goal takes priority.
         if goal_achieved:
             reward += self.goal_bonus
         elif collided:
             reward -= self.collision_penalty
+            if veh_edge:
+                reward -= self.offroad_penalty
 
         if not is_terminal:
-            # Step penalty: only punish surviving non-terminal steps so that
-            # reaching the goal quickly is not penalised on the final step.
             reward -= self.step_penalty
 
-            # Progress shaping: reward closing distance to goal.
             curr_dist = self._get_goal_dist()
             progress = self._prev_goal_dist - curr_dist
             reward += self.progress_scale * progress
             self._prev_goal_dist = curr_dist
 
-            # TTZ penalty: discourage being on a collision course with others.
-            # Skipped on collision terminal steps to avoid double-penalising
-            # the same event via both collision_penalty and ttz_reward_scale.
-            min_ttz = min(
-                getattr(self, "_ttz_vehicle", 999.0),
-                getattr(self, "_ttz_pedestrian", 999.0),
-            )
+            min_ttz = min(self._ttz_vehicle, self._ttz_pedestrian)
             if min_ttz < self.ttz_safe_threshold and min_ttz > 0:
                 reward -= self.ttz_reward_scale * (self.ttz_safe_threshold - min_ttz)
 
         return reward
 
     def _get_goal_dist(self) -> float:
-        """Remaining distance along the expert trajectory path.
-
-        Sums piecewise segment lengths from the ego's current position
-        through remaining expert waypoints.  Falls back to Euclidean
-        distance when expert trajectory data is unavailable.
-        """
         ego_veh = self._get_ego_vehicle()
         if ego_veh is None:
             return 0.0
-
-        scenario = self.base_env.scenario
+        goal = ego_veh.target_position
         pos = ego_veh.position
-
-        # Collect remaining absolute expert waypoints
-        t = getattr(self.base_env, "step_num", self._step_count)
-        waypoints = []
-        try:
-            while True:
-                wp = scenario.expert_position(ego_veh, t)
-                waypoints.append(wp)
-                t += 1
-        except (IndexError, RuntimeError, KeyError, AttributeError):
-            pass
-
-        if len(waypoints) < 2:
-            goal = ego_veh.target_position
-            return math.sqrt((goal.x - pos.x) ** 2 + (goal.y - pos.y) ** 2)
-
-        # Current position → first waypoint
-        total = math.sqrt(
-            (waypoints[0].x - pos.x) ** 2 + (waypoints[0].y - pos.y) ** 2
-        )
-        # Sum remaining waypoint-to-waypoint segments
-        for i in range(1, len(waypoints)):
-            dx = waypoints[i].x - waypoints[i - 1].x
-            dy = waypoints[i].y - waypoints[i - 1].y
-            total += math.sqrt(dx * dx + dy * dy)
-
-        return total
+        return math.sqrt((goal.x - pos.x) ** 2 + (goal.y - pos.y) ** 2)
 
     def _get_ego_vehicle(
         self,
