@@ -49,3 +49,4 @@ GEMINI.md
 .github/prompts/
 outputs/
 .agents/rules/nocturne-rules.md
+.agents

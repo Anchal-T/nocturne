@@ -130,8 +130,30 @@ class DDQNAgent:
             q_values = self.online_net(state_t)
             return q_values.argmax(dim=1).item()
 
+    def select_action_batch(self, states: np.ndarray) -> np.ndarray:
+        batch_size = states.shape[0]
+        actions = np.zeros(batch_size, dtype=int)
+        
+        random_mask = np.random.rand(batch_size) < self.epsilon
+        
+        if random_mask.any():
+            actions[random_mask] = np.random.randint(0, self.n_actions, size=random_mask.sum())
+            
+        greedy_mask = ~random_mask
+        if greedy_mask.any():
+            with torch.no_grad():
+                states_t = torch.FloatTensor(states[greedy_mask]).to(self.device)
+                q_values = self.online_net(states_t)
+                actions[greedy_mask] = q_values.argmax(dim=1).cpu().numpy()
+                
+        return actions
+
     def store_transition(self, state, action, reward, next_state, done):
         self.replay_buffer.push(state, action, reward, next_state, done)
+
+    def store_transition_batch(self, states, actions, rewards, next_states, dones):
+        for i in range(len(states)):
+            self.replay_buffer.push(states[i], actions[i], rewards[i], next_states[i], dones[i])
 
     def train_step(self, env_steps: int = 0) -> Optional[float]:
         if len(self.replay_buffer) < self.batch_size:

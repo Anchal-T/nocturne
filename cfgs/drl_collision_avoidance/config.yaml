@@ -73,11 +73,14 @@ drl:
   train_freq: 4
   min_replay_size: 1000
   hidden_layers: [128, 128, 128, 32]
-  num_episodes: 1000
+  num_episodes: 10000
   max_episode_steps: 80
   log_interval: 10
   save_interval: 1000
   checkpoint_dir: checkpoints/drl_collision_avoidance
+  num_envs: 10
+  vec_env_mode: async   # async | sync | dummy
+  train_in_background: true
 
 occupancy_grid:
   rows: 25
