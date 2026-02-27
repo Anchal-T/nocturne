@@ -321,10 +321,16 @@ class AsyncSubprocVecEnv:
         print(f"[AsyncSubprocVecEnv] All {self.n_envs} workers ready.")
 
     def get_obs(self, env_ids=None):
-        """Read current observations from shared memory (zero-copy)."""
+        """Read current observations from shared memory.
+
+        Returns a view of the shared buffer when ``env_ids`` is None, and a
+        copy when ``env_ids`` is provided (numpy fancy-indexing always copies).
+        Callers that need a persistent snapshot should ``.copy()`` the result
+        themselves.
+        """
         if env_ids is None:
-            return self._obs_buf.copy()
-        return self._obs_buf[np.asarray(env_ids, dtype=np.int64)].copy()
+            return self._obs_buf
+        return self._obs_buf[np.asarray(env_ids, dtype=np.int64)]
 
     def step_async(self, actions, env_ids=None):
         """Send actions to workers without waiting (non-blocking)."""

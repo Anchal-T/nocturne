@@ -1,6 +1,6 @@
 """Training script with Sample Factory-style async architecture.
 
-Architecture (matching Sample Factory's APPO pattern for DDQN):
+Architecture:
 
     ┌─────────────┐                            ┌──────────────────┐
     │  Actor 0    │──pipe──┐                   │   Learner Thread │
@@ -19,11 +19,14 @@ Architecture (matching Sample Factory's APPO pattern for DDQN):
        ▲ experience decorrelation
 
 Usage:
-    # Full async (default)
-    python -m examples.drl_collision_avoidance.train drl.num_envs=10
+    #parallelism
+    python -m examples.drl_collision_avoidance.train drl.num_workers=5 drl.num_envs_per_worker=2
 
     # Sync (for debugging)
-    python -m examples.drl_collision_avoidance.train drl.vec_env_mode=sync drl.num_envs=4
+    python -m examples.drl_collision_avoidance.train drl.vec_env_mode=sync drl.num_workers=2 drl.num_envs_per_worker=2
+
+    # Legacy total env count (backward-compatible)
+    python -m examples.drl_collision_avoidance.train drl.num_envs=10
 
     # Single-process sequential (for debugging)
     python -m examples.drl_collision_avoidance.train drl.vec_env_mode=dummy drl.num_envs=1
@@ -62,6 +65,45 @@ def _make_env_fn(cfg_dict, env_index):
         env_cfg['seed'] = cfg_dict.get('seed', 42) + env_index * 1000
         return CollisionAvoidanceEnv(env_cfg)
     return _thunk
+
+
+def _resolve_parallel_env_config(drl_cfg):
+    """Resolve SF-style parallel knobs with backward-compatible legacy fallback."""
+    legacy_num_envs_cfg = drl_cfg.get('num_envs')
+    workers_cfg = drl_cfg.get('num_workers')
+    envs_per_worker_cfg = drl_cfg.get('num_envs_per_worker')
+    uses_sf_knobs = workers_cfg is not None or envs_per_worker_cfg is not None
+
+    def _to_int(name, value):
+        try:
+            return int(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f'{name} must be an integer, got {value!r}') from exc
+
+    if uses_sf_knobs:
+        num_workers = _to_int('drl.num_workers', workers_cfg) if workers_cfg is not None else 1
+        num_envs_per_worker = _to_int('drl.num_envs_per_worker', envs_per_worker_cfg) if envs_per_worker_cfg is not None else 1
+        total_envs = num_workers * num_envs_per_worker
+        if (
+            legacy_num_envs_cfg is not None
+            and _to_int('drl.num_envs', legacy_num_envs_cfg) != total_envs
+        ):
+            print(
+                '[ParallelConfig] Ignoring drl.num_envs because '
+                'drl.num_workers/num_envs_per_worker are set: '
+                f'{num_workers} x {num_envs_per_worker} = {total_envs}'
+            )
+    else:
+        total_envs = _to_int('drl.num_envs', legacy_num_envs_cfg) if legacy_num_envs_cfg is not None else 8
+        num_workers = total_envs
+        num_envs_per_worker = 1
+
+    if num_workers < 1 or num_envs_per_worker < 1:
+        raise ValueError('drl.num_workers and drl.num_envs_per_worker must be >= 1')
+    if total_envs < 1:
+        raise ValueError('Total number of environments must be >= 1')
+
+    return num_workers, num_envs_per_worker, total_envs
 
 
 # ---------------------------------------------------------------------------
@@ -162,6 +204,11 @@ class BackgroundLearner:
 @hydra.main(config_path="../../cfgs/drl_collision_avoidance", config_name="config")
 def main(cfg):
     set_display_window()
+    # Keep the main-process PyTorch thread pool to 1 so it doesn't fight the
+    # env subprocesses for CPU cores. Workers set the same flag via their
+    # env-factory thunks.
+    os.environ['OMP_NUM_THREADS'] = '1'
+    torch.set_num_threads(1)
     cfg_dict = _make_cfg_dict(cfg)
 
     from examples.drl_collision_avoidance.ddqn_agent import DDQNAgent
@@ -172,7 +219,7 @@ def main(cfg):
 
     cfg_dict = apply_scenario_path_defaults(cfg_dict, default_split='train')
     drl_cfg = cfg_dict.get('drl', {})
-    num_envs = drl_cfg.get('num_envs', 8)
+    num_workers, num_envs_per_worker, num_envs = _resolve_parallel_env_config(drl_cfg)
     vec_env_mode = str(drl_cfg.get('vec_env_mode', 'async')).lower()
     train_in_bg = drl_cfg.get('train_in_background', True)
 
@@ -194,12 +241,17 @@ def main(cfg):
     n_actions = vec_env.action_space.n
     bg_label = 'BackgroundLearner' if train_in_bg else 'SyncLearner'
     print(f"\n{'='*60}")
-    print(f"Training: {num_envs} actors ({VecEnvCls.__name__}) + {bg_label}")
+    print(
+        f"Training: {num_workers} workers x {num_envs_per_worker} envs/worker "
+        f"= {num_envs} envs ({VecEnvCls.__name__}) + {bg_label}"
+    )
     print(f"obs_dim={obs_dim} | n_actions={n_actions}")
     print(f"{'='*60}\n")
 
     grid_cfg = cfg_dict.get('occupancy_grid', {})
-    grid_size = grid_cfg.get('rows', 25) * grid_cfg.get('cols', 14)
+    grid_rows = grid_cfg.get('rows', 25)
+    grid_cols = grid_cfg.get('cols', 14)
+    grid_size = grid_rows * grid_cols
 
     # --- Build learner agent ---
     device = cfg_dict.get('device', 'cpu')
@@ -220,6 +272,8 @@ def main(cfg):
         batch_size=drl_cfg['batch_size'],
         target_update_freq=drl_cfg['target_update_freq'],
         device=device,
+        grid_rows=grid_rows,
+        grid_cols=grid_cols,
     )
 
     # --- Training parameters ---
@@ -273,6 +327,12 @@ def main(cfg):
                     continue
                 prev_obs = current_obs[ready_ids]
                 prev_actions = current_actions[ready_ids]
+                # Re-dispatch envs immediately so they step concurrently with
+                # the learner submit and episode bookkeeping below.
+                current_obs[ready_ids] = next_obs
+                next_actions = agent.select_action_batch(next_obs)
+                current_actions[ready_ids] = next_actions
+                vec_env.step_async(next_actions, env_ids=ready_ids)
                 global_step += len(ready_ids)
             else:
                 ready_ids = np.arange(num_envs, dtype=np.int64)
@@ -339,14 +399,7 @@ def main(cfg):
                     if episodes_completed >= num_episodes:
                         break
 
-            if vec_env_mode == 'async':
-                current_obs[ready_ids] = next_obs
-                if episodes_completed >= num_episodes or not running:
-                    continue
-                next_actions = agent.select_action_batch(next_obs)
-                current_actions[ready_ids] = next_actions
-                vec_env.step_async(next_actions, env_ids=ready_ids)
-            else:
+            if vec_env_mode != 'async':
                 obs = next_obs
 
     finally:

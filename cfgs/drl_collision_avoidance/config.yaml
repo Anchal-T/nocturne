@@ -78,7 +78,9 @@ drl:
   log_interval: 10
   save_interval: 1000
   checkpoint_dir: checkpoints/drl_collision_avoidance
-  num_envs: 4
+  num_workers: null
+  num_envs_per_worker: null
+  num_envs: 4           # legacy fallback when SF-style knobs are unset
   vec_env_mode: async   # async | sync | dummy
   train_in_background: true
 
