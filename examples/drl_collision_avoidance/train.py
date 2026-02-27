@@ -77,32 +77,36 @@ class BackgroundLearner:
 
     def __init__(self, agent, train_freq, min_replay, maxsize=128):
         self.agent = agent
-        self.train_freq = train_freq
+        self.train_freq = max(1, int(train_freq))
         self.min_replay = min_replay
         self._queue = queue.Queue(maxsize=maxsize)
         self._stop = threading.Event()
         self._steps_ingested = 0
+        self._next_train_step = min_replay
         self._train_steps_done = 0
         self._latest_loss = None
+        self._last_queue_full_warn = 0.0
         self._lock = threading.Lock()
         self._thread = threading.Thread(target=self._run, daemon=True, name="LearnerThread")
         self._thread.start()
 
     def submit(self, states, actions, rewards, next_states, dones):
-        """Non-blocking enqueue of a transition batch from the main thread."""
+        """Backpressure-aware enqueue of a transition batch from the main thread."""
         try:
-            self._queue.put_nowait((states, actions, rewards, next_states, dones))
+            self._queue.put((states, actions, rewards, next_states, dones), timeout=0.1)
+            return True
         except queue.Full:
-            pass  # backpressure: replay buffer already has plenty of data
+            now = time.time()
+            if now - self._last_queue_full_warn >= 5.0:
+                print("[BackgroundLearner] queue full, dropping transition batch")
+                self._last_queue_full_warn = now
+            return False
 
     def _run(self):
         while not self._stop.is_set():
             try:
                 batch = self._queue.get(timeout=0.02)
             except queue.Empty:
-                # Even without new data, keep training if buffer is big enough
-                if self._steps_ingested >= self.min_replay:
-                    self._do_train_step()
                 continue
 
             states, actions, rewards, next_states, dones = batch
@@ -110,15 +114,24 @@ class BackgroundLearner:
             self._steps_ingested += len(states)
 
             # Run training steps at the configured frequency
-            if self._steps_ingested >= self.min_replay:
-                self._do_train_step()
+            while self._steps_ingested >= self._next_train_step:
+                if not self._do_train_step():
+                    break
+                self._next_train_step += self.train_freq
 
     def _do_train_step(self):
         loss = self.agent.train_step(env_steps=self._steps_ingested)
-        if loss is not None:
-            with self._lock:
-                self._latest_loss = loss
-                self._train_steps_done += 1
+        if loss is None:
+            return False
+
+        sync_inference = getattr(self.agent, 'sync_inference_net', None)
+        if callable(sync_inference):
+            sync_inference()
+
+        with self._lock:
+            self._latest_loss = loss
+            self._train_steps_done += 1
+        return True
 
     @property
     def latest_loss(self):
@@ -248,38 +261,46 @@ def main(cfg):
     print("Collecting experience...\n")
 
     try:
+        if vec_env_mode == 'async':
+            current_obs = obs.copy()
+            current_actions = agent.select_action_batch(current_obs)
+            vec_env.step_async(current_actions)
+
         while episodes_completed < num_episodes and running:
-            # 1. Batched action selection (GPU inference in main process)
-            actions = agent.select_action_batch(obs)
+            if vec_env_mode == 'async':
+                ready_ids, next_obs, rewards, dones, infos = vec_env.step_wait(min_ready=1)
+                if len(ready_ids) == 0:
+                    continue
+                prev_obs = current_obs[ready_ids]
+                prev_actions = current_actions[ready_ids]
+                global_step += len(ready_ids)
+            else:
+                ready_ids = np.arange(num_envs, dtype=np.int64)
+                prev_obs = obs
+                prev_actions = agent.select_action_batch(obs)
+                next_obs, rewards, dones, infos = vec_env.step(prev_actions)
+                global_step += num_envs
 
-            # 2. Step all envs (async workers write obs to shared mem)
-            next_obs, rewards, dones, infos = vec_env.step(actions)
-            global_step += num_envs
-
-            # 3. Push transitions to learner
             dones_f32 = dones.astype(np.float32)
             if learner is not None:
-                learner.submit(obs, actions, rewards, next_obs, dones_f32)
+                learner.submit(prev_obs, prev_actions, rewards, next_obs, dones_f32)
             else:
-                # Synchronous training fallback
-                agent.store_transition_batch(obs, actions, rewards, next_obs, dones_f32)
+                agent.store_transition_batch(prev_obs, prev_actions, rewards, next_obs, dones_f32)
                 if len(agent.replay_buffer) >= min_replay and global_step % train_freq == 0:
                     agent.train_step(env_steps=global_step)
 
-            # 4. Track per-env episode stats
-            episode_rewards += rewards
-            episode_lengths += 1
+            episode_rewards[ready_ids] += rewards
+            episode_lengths[ready_ids] += 1
 
-            for i in range(num_envs):
-                if dones[i]:
+            for local_idx, env_idx in enumerate(ready_ids):
+                if dones[local_idx]:
                     episodes_completed += 1
-                    ep_reward = episode_rewards[i]
-                    ep_length = int(episode_lengths[i])
-                    info = infos[i]
+                    ep_reward = episode_rewards[env_idx]
+                    ep_length = int(episode_lengths[env_idx])
+                    info = infos[local_idx]
 
                     reward_history.append(ep_reward)
 
-                    # TensorBoard logging
                     if writer is not None:
                         loss_val = learner.latest_loss if learner else None
                         writer.add_scalar('train/episode_reward', ep_reward, episodes_completed)
@@ -290,7 +311,6 @@ def main(cfg):
                         if loss_val is not None:
                             writer.add_scalar('train/loss', loss_val, episodes_completed)
 
-                    # Console logging
                     if episodes_completed % log_interval == 0:
                         avg_rew = np.mean(reward_history[-log_interval:])
                         elapsed = max(time.time() - start_time, 1e-3)
@@ -308,20 +328,26 @@ def main(cfg):
                             f'fps={fps}'
                         )
 
-                    # Checkpointing
                     if episodes_completed % save_interval == 0:
                         path = os.path.join(checkpoint_dir, f'ddqn_ep{episodes_completed}.pth')
                         agent.save(path)
                         print(f'  → Saved checkpoint: {path}')
 
-                    # Reset per-env counters (obs auto-reset by vec_env)
-                    episode_rewards[i] = 0.0
-                    episode_lengths[i] = 0
+                    episode_rewards[env_idx] = 0.0
+                    episode_lengths[env_idx] = 0
 
                     if episodes_completed >= num_episodes:
                         break
 
-            obs = next_obs
+            if vec_env_mode == 'async':
+                current_obs[ready_ids] = next_obs
+                if episodes_completed >= num_episodes or not running:
+                    continue
+                next_actions = agent.select_action_batch(next_obs)
+                current_actions[ready_ids] = next_actions
+                vec_env.step_async(next_actions, env_ids=ready_ids)
+            else:
+                obs = next_obs
 
     finally:
         elapsed = time.time() - start_time

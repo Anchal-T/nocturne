@@ -11,14 +11,14 @@ def test_ddqn_forward_and_train():
     import torch
     import numpy as np
 
-    agent = DDQNAgent(obs_dim=357, n_actions=15, grid_size=350, device='cpu')
-    state = torch.randn(1, 357)
+    agent = DDQNAgent(obs_dim=359, n_actions=15, grid_size=350, device='cpu')
+    state = torch.randn(1, 359)
     q = agent.online_net(state)
     assert q.shape == (1, 15), f'Expected (1,15) got {q.shape}'
 
     for _ in range(100):
-        s = np.random.randn(357).astype(np.float32)
-        ns = np.random.randn(357).astype(np.float32)
+        s = np.random.randn(359).astype(np.float32)
+        ns = np.random.randn(359).astype(np.float32)
         agent.store_transition(s, np.random.randint(15), np.random.randn(), ns, 0.0)
 
     loss = agent.train_step()
@@ -86,13 +86,13 @@ def test_env_interface():
             'occupancy_grid': {
                 'rows': 25, 'cols': 14,
                 'forward_dist': 20.0, 'backward_dist': 5.0, 'lateral_dist': 7.0,
-                'vru_weight': 2.0, 'vehicle_weight': 1.0,
+                'vru_weight': 2.0, 'vehicle_weight': 1.0, 'road_edge_weight': 3.0,
             },
             'reward': {
-                'goal_bonus': 100.0, 'collision_penalty': 50.0,
-                'step_penalty': 0.1, 'progress_scale': 1.0,
+                'goal_bonus': 100.0, 'collision_penalty': 0.0,
+                'step_penalty': 0.0, 'progress_scale': 0.5,
                 'ttz_safe_threshold': 4.0, 'ttz_reward_scale': 0.5,
-                'offroad_penalty': 5.0,
+                'offroad_penalty': 5.0, 'heading_scale': 0.3,
             },
             'action_map': {
                 'throttle_levels': [-1.0, 0.0, 2.0],
@@ -103,7 +103,7 @@ def test_env_interface():
 
         env = CollisionAvoidanceEnv(cfg)
         obs = env.reset()
-        expected_dim = 25 * 14 + 2 + 2 + 3
+        expected_dim = 25 * 14 + 4 + 2 + 3
         assert obs.shape == (expected_dim,), f'Expected ({expected_dim},) got {obs.shape}'
         assert env.action_space.n == 15
 

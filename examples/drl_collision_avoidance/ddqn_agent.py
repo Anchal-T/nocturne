@@ -1,4 +1,5 @@
 import random
+import threading
 from collections import deque
 from typing import List, Optional, Tuple
 
@@ -116,7 +117,12 @@ class DDQNAgent:
         self.target_net = QNetwork(obs_dim, n_actions, grid_size, hidden_layers).to(
             self.device
         )
+        self.inference_net = QNetwork(obs_dim, n_actions, grid_size, hidden_layers).to(
+            self.device
+        )
+        self.inference_lock = threading.Lock()
         self.sync_target()
+        self.sync_inference_net()
 
         self.optimizer = optim.Adam(self.online_net.parameters(), lr=lr)
         self.replay_buffer = ReplayBuffer(replay_buffer_size)
@@ -127,7 +133,8 @@ class DDQNAgent:
             return random.randrange(self.n_actions)
         with torch.no_grad():
             state_t = torch.FloatTensor(state).unsqueeze(0).to(self.device)
-            q_values = self.online_net(state_t)
+            with self.inference_lock:
+                q_values = self.inference_net(state_t)
             return q_values.argmax(dim=1).item()
 
     def select_action_batch(self, states: np.ndarray) -> np.ndarray:
@@ -143,7 +150,8 @@ class DDQNAgent:
         if greedy_mask.any():
             with torch.no_grad():
                 states_t = torch.FloatTensor(states[greedy_mask]).to(self.device)
-                q_values = self.online_net(states_t)
+                with self.inference_lock:
+                    q_values = self.inference_net(states_t)
                 actions[greedy_mask] = q_values.argmax(dim=1).cpu().numpy()
                 
         return actions
@@ -200,6 +208,10 @@ class DDQNAgent:
     def sync_target(self):
         self.target_net.load_state_dict(self.online_net.state_dict())
 
+    def sync_inference_net(self):
+        with self.inference_lock:
+            self.inference_net.load_state_dict(self.online_net.state_dict())
+
     def _decay_epsilon(self, env_steps: int = 0):
         steps = env_steps if env_steps > 0 else self.train_steps
         fraction = min(1.0, steps / max(1, self.epsilon_decay_steps))
@@ -232,9 +244,13 @@ class DDQNAgent:
                 self.target_net = QNetwork(
                     self.obs_dim, self.n_actions, self.target_net.grid_size, ckpt_hl
                 ).to(self.device)
+                self.inference_net = QNetwork(
+                    self.obs_dim, self.n_actions, self.inference_net.grid_size, ckpt_hl
+                ).to(self.device)
                 self.optimizer = optim.Adam(self.online_net.parameters(), lr=self.optimizer.param_groups[0]["lr"])
         self.online_net.load_state_dict(checkpoint["online_net"])
         self.target_net.load_state_dict(checkpoint["target_net"])
+        self.sync_inference_net()
         self.optimizer.load_state_dict(checkpoint["optimizer"])
         self.train_steps = checkpoint["train_steps"]
         self.epsilon = checkpoint["epsilon"]

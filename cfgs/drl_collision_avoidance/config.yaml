@@ -3,8 +3,8 @@ device: 'cuda:0'
 experiment: drl_collision_avoidance
 
 single_agent_mode: False
-max_num_vehicles: 9
-episode_length: 100
+max_num_vehicles: 1
+episode_length: 80
 num_files: -1
 scenario_split: train
 scenario_path: null
@@ -74,11 +74,11 @@ drl:
   min_replay_size: 1000
   hidden_layers: [128, 128, 128, 32]
   num_episodes: 10000
-  max_episode_steps: 80
+  max_episode_steps: 90
   log_interval: 10
   save_interval: 1000
   checkpoint_dir: checkpoints/drl_collision_avoidance
-  num_envs: 10
+  num_envs: 4
   vec_env_mode: async   # async | sync | dummy
   train_in_background: true
 
@@ -90,17 +90,19 @@ occupancy_grid:
   lateral_dist: 7.0
   vru_weight: 2.0
   vehicle_weight: 1.0
+  road_edge_weight: 3.0
 
 reward:
   goal_bonus: 100.0
-  collision_penalty: 30.0
-  step_penalty: 0.1
-  progress_scale: 5.0
+  collision_penalty: 0.0
+  step_penalty: 0.0
+  progress_scale: 0.5
   ttz_safe_threshold: 4.0
   ttz_reward_scale: 0.5
   offroad_penalty: 5.0
+  heading_scale: 0.3
 
 action_map:
   throttle_levels: [-1.0, 0.0, 2.0]
-  steer_levels: [-0.6, -0.2, 0.0, 0.2, 0.6]
+  steer_levels: [-0.7, -0.2, 0.0, 0.2, 0.6]
 

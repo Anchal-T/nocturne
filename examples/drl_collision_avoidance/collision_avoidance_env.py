@@ -5,6 +5,7 @@ import gym
 import numpy as np
 from gym.spaces import Box, Discrete
 
+import nocturne
 from nocturne.envs.base_env import BaseEnv
 
 
@@ -22,15 +23,17 @@ class CollisionAvoidanceEnv(gym.Env):
         self.lateral_dist = grid_cfg.get("lateral_dist", 7.0)
         self.vru_weight = grid_cfg.get("vru_weight", 2.0)
         self.vehicle_weight = grid_cfg.get("vehicle_weight", 1.0)
+        self.road_edge_weight = grid_cfg.get("road_edge_weight", 3.0)
 
         rew_cfg = cfg.get("reward", {})
         self.goal_bonus = rew_cfg.get("goal_bonus", 100.0)
-        self.collision_penalty = rew_cfg.get("collision_penalty", 50.0)
-        self.step_penalty = rew_cfg.get("step_penalty", 0.1)
-        self.progress_scale = rew_cfg.get("progress_scale", 1.0)
+        self.collision_penalty = rew_cfg.get("collision_penalty", 0.0)
+        self.step_penalty = rew_cfg.get("step_penalty", 0.0)
+        self.progress_scale = rew_cfg.get("progress_scale", 0.5)
         self.ttz_safe_threshold = rew_cfg.get("ttz_safe_threshold", 4.0)
         self.ttz_reward_scale = rew_cfg.get("ttz_reward_scale", 0.5)
         self.offroad_penalty = rew_cfg.get("offroad_penalty", 5.0)
+        self.heading_scale = rew_cfg.get("heading_scale", 0.3)
 
         act_cfg = cfg.get("action_map", {})
         throttle_levels = act_cfg.get("throttle_levels", [-4.0, 0.0, 2.0])
@@ -43,8 +46,8 @@ class CollisionAvoidanceEnv(gym.Env):
         self.base_env = BaseEnv(cfg)
         self.cfg = cfg
 
-        # grid(rows*cols) + ego(speed_norm, heading_norm) + goal(dist_norm, rel_heading_norm) + ttz(3)
-        obs_dim = self.grid_rows * self.grid_cols + 2 + 2 + 3
+        # grid(rows*cols) + ego(heading, speed, heading_err, speed_err) + goal(dist, rel_heading) + ttz(3)
+        obs_dim = self.grid_rows * self.grid_cols + 4 + 2 + 3
         self.observation_space = Box(
             low=-np.inf, high=np.inf, shape=(obs_dim,), dtype=np.float32
         )
@@ -181,6 +184,14 @@ class CollisionAvoidanceEnv(gym.Env):
                 obj, ego_pos, cos_h, sin_h, cell_long, cell_lat, grid, self.vru_weight
             )
 
+        for road_line in self.base_env.scenario.getRoadLines():
+            if road_line.road_type == nocturne.RoadType.ROAD_EDGE:
+                for pt in road_line.geometry_points():
+                    self._project_point_to_grid(
+                        pt, ego_pos, cos_h, sin_h,
+                        cell_long, cell_lat, grid, self.road_edge_weight,
+                    )
+
         return grid
 
     def _project_to_grid(
@@ -204,11 +215,34 @@ class CollisionAvoidanceEnv(gym.Env):
         col = max(0, min(col, self.grid_cols - 1))
         grid[row, col] = max(grid[row, col], weight)
 
+    def _project_point_to_grid(
+        self, pt, ego_pos, cos_h, sin_h, cell_long, cell_lat, grid, weight
+    ):
+        dx = pt.x - ego_pos.x
+        dy = pt.y - ego_pos.y
+        local_x = dx * cos_h + dy * sin_h
+        local_y = -dx * sin_h + dy * cos_h
+
+        if local_x < -self.backward_dist or local_x > self.forward_dist:
+            return
+        if abs(local_y) > self.lateral_dist:
+            return
+
+        row = int((self.forward_dist - local_x) / cell_long)
+        col = int((local_y + self.lateral_dist) / cell_lat)
+        row = max(0, min(row, self.grid_rows - 1))
+        col = max(0, min(col, self.grid_cols - 1))
+        grid[row, col] = max(grid[row, col], weight)
+
     def _get_ego_state(self, ego_veh) -> np.ndarray:
+        heading_err = self._get_heading_error(ego_veh)
+        speed_err = (ego_veh.speed - ego_veh.target_speed) / 30.0
         return np.array(
             [
                 ego_veh.heading / math.pi,
                 ego_veh.speed / 30.0,
+                heading_err / math.pi,
+                speed_err,
             ],
             dtype=np.float32,
         )
@@ -282,6 +316,13 @@ class CollisionAvoidanceEnv(gym.Env):
             return 999.0
         return dist / closing_speed
 
+    def _get_heading_error(self, ego_veh) -> float:
+        goal = ego_veh.target_position
+        pos = ego_veh.position
+        angle_to_goal = math.atan2(goal.y - pos.y, goal.x - pos.x)
+        err = angle_to_goal - ego_veh.heading
+        return (err + math.pi) % (2 * math.pi) - math.pi
+
     def _compute_reward(self, rew_dict, info_dict, done_dict) -> float:
         reward = 0.0
         info = info_dict.get(self._ego_id, {})
@@ -293,7 +334,8 @@ class CollisionAvoidanceEnv(gym.Env):
 
         if goal_achieved:
             reward += self.goal_bonus
-        elif collided:
+
+        if collided:
             reward -= self.collision_penalty
             if veh_edge:
                 reward -= self.offroad_penalty
@@ -305,6 +347,11 @@ class CollisionAvoidanceEnv(gym.Env):
             progress = self._prev_goal_dist - curr_dist
             reward += self.progress_scale * progress
             self._prev_goal_dist = curr_dist
+
+            ego_veh = self._get_ego_vehicle()
+            if ego_veh is not None:
+                heading_err = abs(self._get_heading_error(ego_veh))
+                reward += self.heading_scale * (1.0 - heading_err / math.pi)
 
             min_ttz = min(self._ttz_vehicle, self._ttz_pedestrian)
             if min_ttz < self.ttz_safe_threshold and min_ttz > 0:

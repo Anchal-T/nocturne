@@ -12,8 +12,11 @@ PPO ``env_wrappers.py``:
 
 import os
 import ctypes
+import time
 import multiprocessing as mp
+import multiprocessing.shared_memory
 from multiprocessing import Process, Pipe
+from multiprocessing.connection import wait
 from multiprocessing.sharedctypes import RawArray
 
 import numpy as np
@@ -100,8 +103,9 @@ def _async_worker(
 
     # Attach to shared memory buffer for this worker's observation
     obs_size = int(np.prod(obs_shape))
+    shm = multiprocessing.shared_memory.SharedMemory(name=obs_shm_name)
     shm_arr = np.frombuffer(
-        mp.shared_memory.SharedMemory(name=obs_shm_name).buf,
+        shm.buf,
         dtype=obs_dtype,
     ).reshape(-1)
     worker_slice = slice(worker_id * obs_size, (worker_id + 1) * obs_size)
@@ -114,31 +118,42 @@ def _async_worker(
     obs = env.reset()
     for _ in range(decorrelation_steps):
         action = env.action_space.sample()
-        obs, _, done, _ = env.step(action)
+        try:
+            obs, _, done, _ = env.step(action)
+        except Exception:
+            done = True
         if done:
             obs = env.reset()
     _write_obs(obs)
 
-    while True:
-        cmd, data = remote.recv()
-        if cmd == 'step':
-            obs, reward, done, info = env.step(data)
-            if done:
+    try:
+        while True:
+            cmd, data = remote.recv()
+            if cmd == 'step':
+                try:
+                    obs, reward, done, info = env.step(data)
+                except Exception:
+                    obs = env.reset()
+                    reward, done, info = 0.0, True, {}
+                if done:
+                    obs = env.reset()
+                _write_obs(obs)
+                remote.send((reward, done, info))
+            elif cmd == 'reset':
                 obs = env.reset()
-            _write_obs(obs)
-            remote.send((reward, done, info))
-        elif cmd == 'reset':
-            obs = env.reset()
-            _write_obs(obs)
-            remote.send(True)
-        elif cmd == 'get_spaces':
-            remote.send((env.observation_space, env.action_space))
-        elif cmd == 'close':
-            env.close()
-            remote.close()
-            break
-        else:
-            raise NotImplementedError(f"Unknown command: {cmd}")
+                _write_obs(obs)
+                remote.send(True)
+            elif cmd == 'get_spaces':
+                remote.send((env.observation_space, env.action_space))
+            elif cmd == 'close':
+                env.close()
+                remote.close()
+                break
+            else:
+                raise NotImplementedError(f"Unknown command: {cmd}")
+    finally:
+        del shm_arr
+        shm.close()
 
 
 # ---------------------------------------------------------------------------
@@ -251,6 +266,7 @@ class AsyncSubprocVecEnv:
     def __init__(self, env_fns, decorrelation_base=20):
         self.n_envs = len(env_fns)
         self.closed = False
+        self._pending_envs = set()
 
         # Probe observation space from a temporary env
         tmp_env = env_fns[0]()
@@ -265,6 +281,7 @@ class AsyncSubprocVecEnv:
         total_floats = self.n_envs * obs_size
         self._shm = mp.shared_memory.SharedMemory(create=True, size=total_floats * 4)
         self._obs_buf = np.frombuffer(self._shm.buf, dtype=obs_dtype).reshape(self.n_envs, *obs_shape)
+        self._obs_shape = obs_shape
 
         # Assign CPU cores round-robin
         try:
@@ -274,6 +291,7 @@ class AsyncSubprocVecEnv:
 
         # Spawn async workers
         self.remotes, self.work_remotes = zip(*[Pipe() for _ in range(self.n_envs)])
+        self._remote_to_id = {}
         self.processes = []
 
         print(f"[AsyncSubprocVecEnv] Initializing {self.n_envs} workers...")
@@ -292,6 +310,7 @@ class AsyncSubprocVecEnv:
 
         for wr in self.work_remotes:
             wr.close()
+        self._remote_to_id = {remote: i for i, remote in enumerate(self.remotes)}
 
         # Wait for all workers to finish init (they wrote their obs to shared mem)
         for i, remote in enumerate(self.remotes):
@@ -301,28 +320,93 @@ class AsyncSubprocVecEnv:
 
         print(f"[AsyncSubprocVecEnv] All {self.n_envs} workers ready.")
 
-    def get_obs(self):
+    def get_obs(self, env_ids=None):
         """Read current observations from shared memory (zero-copy)."""
-        return self._obs_buf.copy()
+        if env_ids is None:
+            return self._obs_buf.copy()
+        return self._obs_buf[np.asarray(env_ids, dtype=np.int64)].copy()
 
-    def step_async(self, actions):
-        """Send actions to all workers without waiting (non-blocking)."""
-        for remote, action in zip(self.remotes, actions):
-            remote.send(('step', action))
+    def step_async(self, actions, env_ids=None):
+        """Send actions to workers without waiting (non-blocking)."""
+        if env_ids is None:
+            env_ids = np.arange(self.n_envs, dtype=np.int64)
+        else:
+            env_ids = np.asarray(env_ids, dtype=np.int64).reshape(-1)
 
-    def step_wait(self):
-        """Wait for all workers and return results. Observations come from shared memory."""
-        results = [remote.recv() for remote in self.remotes]
-        rewards, dones, infos = zip(*results)
-        obs = self.get_obs()
-        return obs, np.array(rewards, dtype=np.float32), np.array(dones, dtype=bool), list(infos)
+        if np.isscalar(actions):
+            actions = [actions]
+        else:
+            actions = list(actions)
+
+        if len(actions) != len(env_ids):
+            raise ValueError(f"Expected {len(env_ids)} actions, got {len(actions)}")
+
+        for env_id, action in zip(env_ids.tolist(), actions):
+            if env_id in self._pending_envs:
+                raise RuntimeError(f"Env {env_id} already has a pending step")
+            self.remotes[env_id].send(('step', action))
+            self._pending_envs.add(env_id)
+
+    def step_wait(self, min_ready=1, timeout=None):
+        """Wait for at least ``min_ready`` pending workers and return only those results."""
+        if min_ready < 1:
+            raise ValueError("min_ready must be >= 1")
+        if not self._pending_envs:
+            empty_ids = np.empty((0,), dtype=np.int64)
+            empty_obs = np.empty((0, *self._obs_shape), dtype=self._obs_buf.dtype)
+            empty_rewards = np.empty((0,), dtype=np.float32)
+            empty_dones = np.empty((0,), dtype=bool)
+            return empty_ids, empty_obs, empty_rewards, empty_dones, []
+
+        target_ready = min(min_ready, len(self._pending_envs))
+        deadline = None if timeout is None else (time.monotonic() + timeout)
+
+        ready_ids, rewards, dones, infos = [], [], [], []
+        while len(ready_ids) < target_ready and self._pending_envs:
+            pending_remotes = [self.remotes[i] for i in self._pending_envs]
+            wait_timeout = None
+            if deadline is not None:
+                wait_timeout = max(0.0, deadline - time.monotonic())
+                if wait_timeout == 0.0:
+                    break
+            ready_remotes = wait(pending_remotes, timeout=wait_timeout)
+            if not ready_remotes:
+                break
+            for remote in ready_remotes:
+                env_id = self._remote_to_id[remote]
+                reward, done, info = remote.recv()
+                self._pending_envs.discard(env_id)
+                ready_ids.append(env_id)
+                rewards.append(reward)
+                dones.append(done)
+                infos.append(info)
+
+        if not ready_ids:
+            empty_ids = np.empty((0,), dtype=np.int64)
+            empty_obs = np.empty((0, *self._obs_shape), dtype=self._obs_buf.dtype)
+            empty_rewards = np.empty((0,), dtype=np.float32)
+            empty_dones = np.empty((0,), dtype=bool)
+            return empty_ids, empty_obs, empty_rewards, empty_dones, []
+
+        ready_ids = np.array(ready_ids, dtype=np.int64)
+        obs = self.get_obs(ready_ids)
+        return (
+            ready_ids,
+            obs,
+            np.array(rewards, dtype=np.float32),
+            np.array(dones, dtype=bool),
+            infos,
+        )
 
     def step(self, actions):
         """Convenience: step_async + step_wait."""
         self.step_async(actions)
-        return self.step_wait()
+        env_ids, obs, rewards, dones, infos = self.step_wait(min_ready=self.n_envs)
+        order = np.argsort(env_ids)
+        return obs[order], rewards[order], dones[order], [infos[i] for i in order]
 
     def reset(self):
+        self._pending_envs.clear()
         for remote in self.remotes:
             remote.send(('reset', None))
         for remote in self.remotes:
@@ -341,6 +425,10 @@ class AsyncSubprocVecEnv:
             p.join(timeout=5)
             if p.is_alive():
                 p.terminate()
+        # Release the numpy view BEFORE closing the shared memory segment,
+        # otherwise SharedMemory.__del__ raises BufferError because the
+        # memoryview exported to _obs_buf is still alive.
+        del self._obs_buf
         try:
             self._shm.close()
             self._shm.unlink()
