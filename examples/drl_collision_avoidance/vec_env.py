@@ -22,9 +22,7 @@ from multiprocessing.sharedctypes import RawArray
 import numpy as np
 
 
-# ---------------------------------------------------------------------------
-# Serialization helper (identical to PPO env_wrappers.py)
-# ---------------------------------------------------------------------------
+# Serialization helper
 class CloudpickleWrapper:
     """Serialize env factory functions with cloudpickle for subprocess pickling."""
 
@@ -43,9 +41,7 @@ class CloudpickleWrapper:
         return self.fn()
 
 
-# ---------------------------------------------------------------------------
 # Worker functions
-# ---------------------------------------------------------------------------
 def _worker(remote, parent_remote, env_fn_wrapper):
     """Basic synchronous subprocess worker (for SubprocVecEnv)."""
     parent_remote.close()
@@ -152,8 +148,12 @@ def _async_worker(
             else:
                 raise NotImplementedError(f"Unknown command: {cmd}")
     finally:
-        del shm_arr
-        shm.close()
+        _write_obs = None
+        shm_arr = None
+        try:
+            shm.close()
+        except BufferError:
+            pass
 
 
 # ---------------------------------------------------------------------------
@@ -320,17 +320,17 @@ class AsyncSubprocVecEnv:
 
         print(f"[AsyncSubprocVecEnv] All {self.n_envs} workers ready.")
 
-    def get_obs(self, env_ids=None):
+    def get_obs(self, env_ids=None, copy=True):
         """Read current observations from shared memory.
 
-        Returns a view of the shared buffer when ``env_ids`` is None, and a
-        copy when ``env_ids`` is provided (numpy fancy-indexing always copies).
-        Callers that need a persistent snapshot should ``.copy()`` the result
-        themselves.
+        By default this returns copies so callers cannot keep exported
+        pointers to shared memory alive past shutdown. Set ``copy=False``
+        only for transient, read-only access.
         """
         if env_ids is None:
-            return self._obs_buf
-        return self._obs_buf[np.asarray(env_ids, dtype=np.int64)]
+            return self._obs_buf.copy() if copy else self._obs_buf
+        obs = self._obs_buf[np.asarray(env_ids, dtype=np.int64)]
+        return obs.copy() if copy else obs
 
     def step_async(self, actions, env_ids=None):
         """Send actions to workers without waiting (non-blocking)."""
@@ -395,7 +395,7 @@ class AsyncSubprocVecEnv:
             return empty_ids, empty_obs, empty_rewards, empty_dones, []
 
         ready_ids = np.array(ready_ids, dtype=np.int64)
-        obs = self.get_obs(ready_ids)
+        obs = self.get_obs(ready_ids, copy=False)
         return (
             ready_ids,
             obs,
@@ -417,29 +417,48 @@ class AsyncSubprocVecEnv:
             remote.send(('reset', None))
         for remote in self.remotes:
             remote.recv()
-        return self.get_obs()
+        return self.get_obs(copy=True)
 
     def close(self):
         if self.closed:
             return
+        self._pending_envs.clear()
         for remote in self.remotes:
             try:
                 remote.send(('close', None))
-            except BrokenPipeError:
+            except (BrokenPipeError, EOFError, OSError):
                 pass
         for p in self.processes:
             p.join(timeout=5)
             if p.is_alive():
                 p.terminate()
-        # Release the numpy view BEFORE closing the shared memory segment,
-        # otherwise SharedMemory.__del__ raises BufferError because the
-        # memoryview exported to _obs_buf is still alive.
-        del self._obs_buf
-        try:
-            self._shm.close()
-            self._shm.unlink()
-        except Exception:
-            pass
+
+        for remote in self.remotes:
+            try:
+                remote.close()
+            except Exception:
+                pass
+
+        # Release the numpy view BEFORE touching the shared memory segment.
+        if hasattr(self, '_obs_buf'):
+            del self._obs_buf
+
+        shm = getattr(self, '_shm', None)
+        self._shm = None
+        if shm is not None:
+            try:
+                shm.unlink()
+            except FileNotFoundError:
+                pass
+            except Exception:
+                pass
+
+            try:
+                shm.close()
+            except BufferError:
+                pass
+            except Exception:
+                pass
         self.closed = True
 
     def __del__(self):

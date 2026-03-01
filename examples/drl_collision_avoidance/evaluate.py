@@ -24,9 +24,21 @@ def evaluate(checkpoint_path: str, scenario_path: Optional[str] = None,
     env = CollisionAvoidanceEnv(cfg)
     obs_dim = env.observation_space.shape[0]
     n_actions = env.action_space.n
-    grid_size = cfg['occupancy_grid']['rows'] * cfg['occupancy_grid']['cols']
+    grid_cfg = cfg.get('occupancy_grid', {})
+    grid_rows = int(grid_cfg['rows'])
+    grid_cols = int(grid_cfg['cols'])
+    grid_size = grid_rows * grid_cols
+    drl_cfg = cfg.get('drl', {})
 
-    agent = DDQNAgent(obs_dim=obs_dim, n_actions=n_actions, grid_size=grid_size, device='cpu')
+    agent = DDQNAgent(
+        obs_dim=obs_dim,
+        n_actions=n_actions,
+        grid_size=grid_size,
+        hidden_layers=drl_cfg.get('hidden_layers'),
+        device='cpu',
+        grid_rows=grid_rows,
+        grid_cols=grid_cols,
+    )
     agent.load(checkpoint_path)
     agent.epsilon = 0.0
 

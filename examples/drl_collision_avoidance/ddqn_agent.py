@@ -262,7 +262,12 @@ class DDQNAgent:
             ckpt_hl = checkpoint["hidden_layers"]
             ckpt_rows = checkpoint.get("grid_rows", self.grid_rows)
             ckpt_cols = checkpoint.get("grid_cols", self.grid_cols)
-            if ckpt_hl != self.online_net.hidden_layers:
+            needs_rebuild = (
+                ckpt_hl != self.online_net.hidden_layers
+                or ckpt_rows != self.grid_rows
+                or ckpt_cols != self.grid_cols
+            )
+            if needs_rebuild:
                 self.online_net = QNetwork(
                     self.obs_dim, self.n_actions, self.online_net.grid_size, ckpt_hl,
                     ckpt_rows, ckpt_cols,
@@ -276,6 +281,8 @@ class DDQNAgent:
                     ckpt_rows, ckpt_cols,
                 ).to(self.device)
                 self.optimizer = optim.Adam(self.online_net.parameters(), lr=self.optimizer.param_groups[0]["lr"])
+            self.grid_rows = ckpt_rows
+            self.grid_cols = ckpt_cols
         self.online_net.load_state_dict(checkpoint["online_net"])
         self.target_net.load_state_dict(checkpoint["target_net"])
         self.sync_inference_net()

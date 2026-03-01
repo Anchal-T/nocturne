@@ -38,7 +38,7 @@ rew_cfg:
   shared_reward: False
   goal_tolerance: 2.0
   reward_scaling: 1.0
-  collision_penalty: 50.0
+  collision_penalty: 1000.0
   shaped_goal_distance: False
   shaped_goal_distance_scaling: 0.0
   goal_distance_penalty: False
@@ -62,32 +62,32 @@ subscriber:
   render_padding: 30.0
 
 drl:
-  lr: 0.0005
-  gamma: 0.99
-  epsilon_start: 1.0
+  lr: 1
+  gamma : 10.0
+  epsilon_start: 0.9
   epsilon_end: 0.05
-  epsilon_decay_steps: 50000
-  replay_buffer_size: 100000
-  batch_size: 64
+  epsilon_decay_steps: 500000
+  replay_buffer_size: 1000000
+  batch_size: 128
   target_update_freq: 500
   train_freq: 4
   min_replay_size: 1000
-  hidden_layers: [128, 128, 128, 32]
-  num_episodes: 10000
-  max_episode_steps: 90
+  hidden_layers: [512, 512, 256, 32]
+  num_episodes: 1000
+  max_episode_steps: 80
   log_interval: 10
   save_interval: 1000
   checkpoint_dir: checkpoints/drl_collision_avoidance
   num_workers: null
   num_envs_per_worker: null
-  num_envs: 4           # legacy fallback when SF-style knobs are unset
+  num_envs: 4          
   vec_env_mode: async   # async | sync | dummy
   train_in_background: true
 
 occupancy_grid:
-  rows: 25
-  cols: 14
-  forward_dist: 20.0
+  rows: 10
+  cols: 5
+  forward_dist: 10.0
   backward_dist: 5.0
   lateral_dist: 7.0
   vru_weight: 2.0
@@ -95,16 +95,16 @@ occupancy_grid:
   road_edge_weight: 3.0
 
 reward:
-  goal_bonus: 100.0
-  collision_penalty: 0.0
+  goal_bonus: 10000.0
+  collision_penalty: 1000.0
   step_penalty: 0.0
-  progress_scale: 0.5
-  ttz_safe_threshold: 4.0
+  progress_scale: 0.9
+  ttz_safe_threshold: 0.0
   ttz_reward_scale: 0.5
-  offroad_penalty: 5.0
+  offroad_penalty: 500.0
   heading_scale: 0.3
 
 action_map:
   throttle_levels: [-1.0, 0.0, 2.0]
-  steer_levels: [-0.7, -0.2, 0.0, 0.2, 0.6]
+  steer_levels: [-0.7, -0.2, 0.0, 0.2, 0.7]
 
