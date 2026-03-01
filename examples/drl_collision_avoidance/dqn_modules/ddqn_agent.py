@@ -8,7 +8,6 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 
-
 class DDQNAgent:
     def __init__(
         self,
@@ -42,9 +41,6 @@ class DDQNAgent:
         self.epsilon_end = epsilon_end
         self.epsilon_decay_steps = epsilon_decay_steps
 
-        def _make_net():
-            return QNetwork(obs_dim, n_actions, grid_size, hidden_layers, grid_rows, grid_cols).to(self.device)
-
         self.online_net = _make_net()
         self.target_net = _make_net()
         self.inference_net = _make_net()
@@ -55,6 +51,9 @@ class DDQNAgent:
         self.optimizer = optim.Adam(self.online_net.parameters(), lr=lr)
         self.replay_buffer = ReplayBuffer(replay_buffer_size)
         self.train_steps = 0
+
+        def _make_net():
+            return QNetwork(obs_dim, n_actions, grid_size, hidden_layers, grid_rows, grid_cols).to(self.device)
 
     def select_action(self, state: np.ndarray) -> int:
         if random.random() < self.epsilon:

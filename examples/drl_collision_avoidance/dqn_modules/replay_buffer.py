@@ -97,3 +97,38 @@ class ReplayBuffer:
 
     def __len__(self) -> int:
         return self.size
+
+# this network is for dueling ddqn, although I am not sure of ddqn, but yeah to be changed later, but dueling is to stay
+class Network(nn.Module):
+    def __init__(self, in_dim : int, out_dim : int, hidden_dim : int):
+        super().__init__()
+        
+        self.feature_layer = nn.Sequential(
+            nn.Linear(in_dim, 128),
+            nn.ReLU(),
+        )
+
+        self.advantage_layer = nn.Sequential(
+            nn.Linear(128, 128),
+            nn.ReLU(),
+            nn.Linear(128, out_dim),
+        )
+
+        self.advantage_layer = nn.Sequential(
+            nn.Linear(128, 128),
+            nn.ReLU(),
+            nn.Linear(128, out_dim),
+        )
+
+        self.value_layer = nn.Sequential(
+            nn.Linear(128, 128),
+            nn.ReLU(),
+            nn.Linear(128, 32),
+        )
+
+    def forward(self, x : torch.Tensor) -> torch.Tensor:
+        features = self.feature_layer(x)
+        advantages = self.advantage_layer(features)
+        value = self.value_layer(features)
+        q_values = value + (advantages - advantages.mean(dim=1, keepdim=True))
+        return q_values
