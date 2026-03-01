@@ -117,7 +117,7 @@ class DDQNAgent:
         replay_buffer_size: int = 100000,
         batch_size: int = 64,
         target_update_freq: int = 1000,
-        device: str = "cpu",
+        device: str = "cuda:0 if torch.cuda.is_available() else cpu",
         grid_rows: int = 25,
         grid_cols: int = 14,
     ):
