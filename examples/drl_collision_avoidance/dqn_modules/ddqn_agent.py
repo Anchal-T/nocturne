@@ -1,6 +1,6 @@
 import random
 import threading
-from typing import List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -34,6 +34,12 @@ class DDQNAgent:
         beta_start = 0.4,
         beta_frames = 100000,
         per_epsilon = 1e-6,
+        grad_accum_steps: int = 1,
+        max_grad_norm: float = 10.0,
+        use_torch_compile: bool = False,
+        compile_mode: str = "reduce-overhead",
+        inference_sync_interval: int = 4,
+        profile_cuda: bool = False,
     ):
         self.obs_dim = obs_dim
         self.n_actions = n_actions
@@ -52,7 +58,19 @@ class DDQNAgent:
 
         self._use_amp = self.device.type == "cuda"
         self._scaler = torch.amp.GradScaler(enabled=self._use_amp)
-        self.grad_accum_steps = 1
+        self.grad_accum_steps = max(1, int(grad_accum_steps))
+        self.max_grad_norm = float(max_grad_norm)
+        self.inference_sync_interval = max(1, int(inference_sync_interval))
+        self.profile_cuda = bool(profile_cuda)
+        self._last_profile_log_step = 0
+        self.compile_mode = str(compile_mode)
+        self._compile_enabled = (
+            bool(use_torch_compile)
+            and self.device.type == "cuda"
+            and hasattr(torch, "compile")
+        )
+        if bool(use_torch_compile) and self.device.type == "cuda" and not hasattr(torch, "compile"):
+            print("[DDQNAgent] torch.compile unavailable in this PyTorch build; continuing without compile.")
 
         def _make_net() -> QNetwork:
             return QNetwork(
@@ -68,17 +86,15 @@ class DDQNAgent:
         self.online_net = _make_net()
         self.target_net = _make_net()
         self.inference_net = _make_net()
-
-        if self.device.type == "cuda":
-            self.online_net = nn.DataParallel(self.online_net)
-            self.target_net = nn.DataParallel(self.target_net)
-            self.inference_net = nn.DataParallel(self.inference_net)
+        self.online_net, self.target_net, self.inference_net = self._maybe_compile_all(
+            self.online_net, self.target_net, self.inference_net
+        )
 
         self.inference_lock = threading.Lock()
         self.sync_target()
         self.sync_inference_net()
 
-        self.optimizer = optim.Adam(self.online_net.parameters(), lr=lr)
+        self.optimizer = self._build_optimizer(lr)
 
         self.replay_buffer = ReplayBuffer(
             obs_dim=obs_dim,
@@ -105,11 +121,85 @@ class DDQNAgent:
                 "weights" : torch.zeros(batch_size, pin_memory=True),
             }
 
+    def _maybe_compile_all(
+        self, online: nn.Module, target: nn.Module, inference: nn.Module
+    ) -> Tuple[nn.Module, nn.Module, nn.Module]:
+        if not self._compile_enabled:
+            return online, target, inference
+        try:
+            # Keep inference net eager: async actor path can hit FX tracing conflicts
+            # with dynamo-optimized callables in some PyTorch builds.
+            return (
+                torch.compile(online, mode=self.compile_mode),
+                torch.compile(target, mode=self.compile_mode),
+                inference,
+            )
+        except Exception as exc:
+            print(f"[DDQNAgent] torch.compile failed ({exc}); continuing in eager mode.")
+            self._compile_enabled = False
+            return online, target, inference
+
+    def _build_optimizer(self, lr: float) -> optim.Optimizer:
+        kwargs = {"lr": float(lr)}
+        if self.device.type == "cuda":
+            kwargs["fused"] = True
+        try:
+            return optim.Adam(self.online_net.parameters(), **kwargs)
+        except TypeError:
+            kwargs.pop("fused", None)
+            return optim.Adam(self.online_net.parameters(), **kwargs)
+
     @staticmethod
     def _unwrap_module(module: nn.Module) -> nn.Module:
         if isinstance(module, nn.DataParallel):
-            return module.module
+            module = module.module
+        orig_mod = getattr(module, "_orig_mod", None)
+        if orig_mod is not None:
+            module = orig_mod
         return module
+
+    @staticmethod
+    def _strip_known_prefixes(state_dict: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+        out = dict(state_dict)
+        changed = True
+        while changed and out:
+            changed = False
+            for prefix in ("module.", "_orig_mod."):
+                if all(key.startswith(prefix) for key in out):
+                    out = {key[len(prefix):]: value for key, value in out.items()}
+                    changed = True
+        return out
+
+    @staticmethod
+    def _add_prefix(state_dict: Dict[str, torch.Tensor], prefix: str) -> Dict[str, torch.Tensor]:
+        return {f"{prefix}{key}": value for key, value in state_dict.items()}
+
+    def _load_state_dict_flexible(self, module: nn.Module, state_dict: Dict[str, torch.Tensor], name: str) -> None:
+        base = self._strip_known_prefixes(state_dict)
+        candidates = [state_dict, base]
+        candidates.append(self._add_prefix(base, "_orig_mod."))
+        candidates.append(self._add_prefix(base, "module."))
+        last_error = None
+        for candidate in candidates:
+            try:
+                module.load_state_dict(candidate, strict=True)
+                return
+            except RuntimeError as exc:
+                last_error = exc
+        raise RuntimeError(f"Failed to load {name} state dict across known key formats: {last_error}")
+
+    def _maybe_log_cuda_profile(self) -> None:
+        if not (self.profile_cuda and self.device.type == "cuda"):
+            return
+        if self.train_steps - self._last_profile_log_step < 200:
+            return
+        self._last_profile_log_step = self.train_steps
+        allocated = torch.cuda.memory_allocated(self.device) / (1024 ** 2)
+        reserved = torch.cuda.memory_reserved(self.device) / (1024 ** 2)
+        print(
+            f"[CUDA] step={self.train_steps} mem_alloc={allocated:.1f}MiB "
+            f"mem_reserved={reserved:.1f}MiB"
+        )
 
     def select_action(self, state: np.ndarray) -> int:
         if random.random() < self.epsilon:
@@ -162,7 +252,10 @@ class DDQNAgent:
             pb = self._pin_buffers
             pb["obs"].copy_(torch.from_numpy(batch["obs"]))
             pb["next_obs"].copy_(torch.from_numpy(batch["next_obs"]))
-            pb["acts"].copy_(torch.from_numpy(batch["acts"].astype(np.int64)))
+            acts_np = batch["acts"]
+            if acts_np.dtype != np.int64:
+                acts_np = acts_np.astype(np.int64, copy=False)
+            pb["acts"].copy_(torch.from_numpy(acts_np))
             pb["rews"].copy_(torch.from_numpy(batch["rews"]))
             pb["dones"].copy_(torch.from_numpy(batch["done"]))
             pb["weights"].copy_(torch.from_numpy(batch["weights"]))
@@ -208,7 +301,7 @@ class DDQNAgent:
 
         if self._grad_accum_counter >= self.grad_accum_steps:
             self._scaler.unscale_(self.optimizer)
-            nn.utils.clip_grad_norm_(self.online_net.parameters(), max_norm=10.0)
+            nn.utils.clip_grad_norm_(self.online_net.parameters(), max_norm=self.max_grad_norm)
             self._scaler.step(self.optimizer)
             self._scaler.update()
             self.optimizer.zero_grad(set_to_none=True)   # faster than zero_grad()
@@ -217,22 +310,30 @@ class DDQNAgent:
         with torch.no_grad():
             new_priorities = td_errors.abs().cpu().numpy()
         self.replay_buffer.update_priorities(batch["indices"], new_priorities)
-
-        self.sync_inference_net()
         self.train_steps += 1
+        self.replay_buffer.update_beta(env_steps)
         self._decay_epsilon(env_steps)
 
+        sync_inference = (self.train_steps % self.inference_sync_interval) == 0
         if self.train_steps % self.target_update_freq == 0:
             self.sync_target()
+            sync_inference = True
+
+        if sync_inference:
+            self.sync_inference_net()
+
+        self._maybe_log_cuda_profile()
 
         return float(loss.item())
 
     def sync_target(self):
-        self.target_net.load_state_dict(self.online_net.state_dict())
+        online_state = self._unwrap_module(self.online_net).state_dict()
+        self._load_state_dict_flexible(self.target_net, online_state, "target_sync")
 
     def sync_inference_net(self):
         with self.inference_lock:
-            self.inference_net.load_state_dict(self.online_net.state_dict())
+            online_state = self._unwrap_module(self.online_net).state_dict()
+            self._load_state_dict_flexible(self.inference_net, online_state, "inference_sync")
 
     def _decay_epsilon(self, env_steps: int):
         if env_steps <= 0:
@@ -244,10 +345,11 @@ class DDQNAgent:
 
     def save(self, path: str):
         online_base = self._unwrap_module(self.online_net)
+        target_base = self._unwrap_module(self.target_net)
         torch.save(
             {
-                "online_net": self.online_net.state_dict(),
-                "target_net": self.target_net.state_dict(),
+                "online_net": online_base.state_dict(),
+                "target_net": target_base.state_dict(),
                 "optimizer": self.optimizer.state_dict(),
                 "train_steps": self.train_steps,
                 "epsilon": self.epsilon,
@@ -297,16 +399,16 @@ class DDQNAgent:
                     self.obs_dim, self.n_actions, ckpt_grid, ckpt_hl,
                     ckpt_rows, ckpt_cols, ckpt_dueling,
                 ).to(self.device)
-                if self.device.type == "cuda":
-                    self.online_net = nn.DataParallel(self.online_net)
-                    self.target_net = nn.DataParallel(self.target_net)
-                    self.inference_net = nn.DataParallel(self.inference_net)
-                self.optimizer = optim.Adam(self.online_net.parameters(), lr=self.optimizer.param_groups[0]["lr"])
+                self.online_net, self.target_net, self.inference_net = self._maybe_compile_all(
+                    self.online_net, self.target_net, self.inference_net
+                )
+                self.optimizer = self._build_optimizer(self.optimizer.param_groups[0]["lr"])
+                online_base = self._unwrap_module(self.online_net)
             self.grid_rows = ckpt_rows
             self.grid_cols = ckpt_cols
             self.dueling = ckpt_dueling
-        self.online_net.load_state_dict(checkpoint["online_net"])
-        self.target_net.load_state_dict(checkpoint["target_net"])
+        self._load_state_dict_flexible(self.online_net, checkpoint["online_net"], "online_net")
+        self._load_state_dict_flexible(self.target_net, checkpoint["target_net"], "target_net")
         self.sync_inference_net()
         self.optimizer.load_state_dict(checkpoint["optimizer"])
         self.train_steps = checkpoint["train_steps"]

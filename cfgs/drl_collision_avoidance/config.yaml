@@ -62,28 +62,36 @@ subscriber:
   render_padding: 30.0
 
 drl:
-  lr: 1
-  gamma : 10.0
+  lr: 0.01
+  gamma : 0.99
   dueling: true
   epsilon_start: 0.9
   epsilon_end: 0.05
-  epsilon_decay_steps: 500000
+  epsilon_decay_steps: 1000000
   replay_buffer_size: 1000000
-  batch_size: 128
-  target_update_freq: 500
+  batch_size: 512
+  target_update_freq: 1000
   train_freq: 4
-  min_replay_size: 1000
+  min_replay_size: 5000
   hidden_layers: [512, 512, 256, 32]
   num_episodes: 1000
   max_episode_steps: 80
   log_interval: 10
   save_interval: 1000
   checkpoint_dir: checkpoints/drl_collision_avoidance
-  num_workers: null
-  num_envs_per_worker: null
+  num_workers: 2
+  num_envs_per_worker: 1
   num_envs: 4          
   vec_env_mode: async   # async | sync | dummy
   train_in_background: true
+  use_torch_compile: true
+  compile_mode: reduce-overhead
+  use_tf32: true
+  cudnn_benchmark: true
+  inference_sync_interval: 16
+  grad_accum_steps: 1
+  max_grad_norm: 10.0
+  profile_cuda: true
   alpha: 0.6
   beta_start: 0.4
   beta_frames: 100000

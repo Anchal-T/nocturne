@@ -166,10 +166,6 @@ class BackgroundLearner:
         if loss is None:
             return False
 
-        sync_inference = getattr(self.agent, 'sync_inference_net', None)
-        if callable(sync_inference):
-            sync_inference()
-
         with self._lock:
             self._latest_loss = loss
             self._train_steps_done += 1
@@ -257,6 +253,14 @@ def main(cfg):
     device = cfg_dict.get('device', 'cpu')
     if device.startswith('cuda') and not torch.cuda.is_available():
         device = 'cpu'
+    if device.startswith('cuda'):
+        use_tf32 = bool(drl_cfg.get('use_tf32', True))
+        cudnn_benchmark = bool(drl_cfg.get('cudnn_benchmark', True))
+        if hasattr(torch, "set_float32_matmul_precision"):
+            torch.set_float32_matmul_precision("high")
+        torch.backends.cuda.matmul.allow_tf32 = use_tf32
+        torch.backends.cudnn.allow_tf32 = use_tf32
+        torch.backends.cudnn.benchmark = cudnn_benchmark
 
     agent = DDQNAgent(
         obs_dim=obs_dim,
@@ -279,6 +283,12 @@ def main(cfg):
         beta_start=drl_cfg.get('beta_start', drl_cfg.get('per_beta_start', 0.4)),
         beta_frames=drl_cfg.get('beta_frames', drl_cfg.get('per_beta_frames', 100000)),
         per_epsilon=drl_cfg.get('per_epsilon', 1e-6),
+        grad_accum_steps=drl_cfg.get('grad_accum_steps', 1),
+        max_grad_norm=drl_cfg.get('max_grad_norm', 10.0),
+        use_torch_compile=bool(drl_cfg.get('use_torch_compile', True)),
+        compile_mode=str(drl_cfg.get('compile_mode', 'reduce-overhead')),
+        inference_sync_interval=drl_cfg.get('inference_sync_interval', 4),
+        profile_cuda=bool(drl_cfg.get('profile_cuda', False)),
     )
 
     # --- Training parameters ---
