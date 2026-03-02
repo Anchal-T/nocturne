@@ -64,6 +64,7 @@ subscriber:
 drl:
   lr: 1
   gamma : 10.0
+  dueling: true
   epsilon_start: 0.9
   epsilon_end: 0.05
   epsilon_decay_steps: 500000

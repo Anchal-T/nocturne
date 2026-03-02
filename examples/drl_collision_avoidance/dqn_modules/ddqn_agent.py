@@ -1,12 +1,14 @@
 import random
 import threading
-from collections import deque
-from typing import List, Optional, Tuple
+from typing import List, Optional
 
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
+
+from .q_network import QNetwork
+from .replay_buffer import ReplayBuffer
 
 class DDQNAgent:
     def __init__(
@@ -23,9 +25,10 @@ class DDQNAgent:
         replay_buffer_size: int = 100000,
         batch_size: int = 64,
         target_update_freq: int = 1000,
-        device: str = "cuda:0 if torch.cuda.is_available() else cpu",
+        device: str = "cpu",
         grid_rows: int = 25,
         grid_cols: int = 14,
+        dueling: bool = True,
     ):
         self.obs_dim = obs_dim
         self.n_actions = n_actions
@@ -35,11 +38,23 @@ class DDQNAgent:
         self.device = torch.device(device)
         self.grid_rows = grid_rows
         self.grid_cols = grid_cols
+        self.dueling = bool(dueling)
 
         self.epsilon = epsilon_start
         self.epsilon_start = epsilon_start
         self.epsilon_end = epsilon_end
         self.epsilon_decay_steps = epsilon_decay_steps
+
+        def _make_net() -> QNetwork:
+            return QNetwork(
+                obs_dim=obs_dim,
+                n_actions=n_actions,
+                grid_size=grid_size,
+                hidden_layers=hidden_layers,
+                grid_rows=grid_rows,
+                grid_cols=grid_cols,
+                dueling=self.dueling,
+            ).to(self.device)
 
         self.online_net = _make_net()
         self.target_net = _make_net()
@@ -49,11 +64,14 @@ class DDQNAgent:
         self.sync_inference_net()
 
         self.optimizer = optim.Adam(self.online_net.parameters(), lr=lr)
-        self.replay_buffer = ReplayBuffer(replay_buffer_size)
+        self.replay_buffer = ReplayBuffer(
+            obs_dim=obs_dim,
+            size=replay_buffer_size,
+            batch_size=batch_size,
+            n_step=1,
+            gamma=gamma,
+        )
         self.train_steps = 0
-
-        def _make_net():
-            return QNetwork(obs_dim, n_actions, grid_size, hidden_layers, grid_rows, grid_cols).to(self.device)
 
     def select_action(self, state: np.ndarray) -> int:
         if random.random() < self.epsilon:
@@ -84,18 +102,27 @@ class DDQNAgent:
         return actions
 
     def store_transition(self, state, action, reward, next_state, done):
-        self.replay_buffer.push(state, action, reward, next_state, done)
+        self.replay_buffer.store(
+            np.asarray(state, dtype=np.float32),
+            int(action),
+            float(reward),
+            np.asarray(next_state, dtype=np.float32),
+            bool(done),
+        )
 
     def store_transition_batch(self, states, actions, rewards, next_states, dones):
-        self.replay_buffer.buffer.extend(zip(states, actions, rewards, next_states, dones))
+        self.replay_buffer.store_batch(states, actions, rewards, next_states, dones)
 
     def train_step(self, env_steps: int = 0) -> Optional[float]:
         if len(self.replay_buffer) < self.batch_size:
             return None
 
-        states, actions, rewards, next_states, dones = self.replay_buffer.sample(
-            self.batch_size
-        )
+        batch = self.replay_buffer.sample_batch()
+        states = batch["obs"]
+        actions = batch["acts"].astype(np.int64)
+        rewards = batch["rews"]
+        next_states = batch["next_obs"]
+        dones = batch["done"]
 
         states_t = torch.FloatTensor(states).to(self.device)
         actions_t = torch.LongTensor(actions).to(self.device)
@@ -122,6 +149,7 @@ class DDQNAgent:
         loss.backward()
         nn.utils.clip_grad_norm_(self.online_net.parameters(), max_norm=1.0)
         self.optimizer.step()
+        self.sync_inference_net()
 
         self.train_steps += 1
         self._decay_epsilon(env_steps)
@@ -155,8 +183,10 @@ class DDQNAgent:
                 "train_steps": self.train_steps,
                 "epsilon": self.epsilon,
                 "hidden_layers": self.online_net.hidden_layers,
+                "grid_size": self.online_net.grid_size,
                 "grid_rows": self.grid_rows,
                 "grid_cols": self.grid_cols,
+                "dueling": self.online_net.dueling,
             },
             path,
         )
@@ -166,29 +196,41 @@ class DDQNAgent:
         # If the checkpoint stores architecture, rebuild networks to match before loading weights.
         if "hidden_layers" in checkpoint:
             ckpt_hl = checkpoint["hidden_layers"]
+            ckpt_grid = checkpoint.get("grid_size", self.online_net.grid_size)
             ckpt_rows = checkpoint.get("grid_rows", self.grid_rows)
             ckpt_cols = checkpoint.get("grid_cols", self.grid_cols)
+            ckpt_dueling = checkpoint.get("dueling")
+            if ckpt_dueling is None:
+                keys = checkpoint["online_net"].keys()
+                if any(k.startswith("head.") for k in keys):
+                    ckpt_dueling = False
+                else:
+                    ckpt_dueling = True
+            ckpt_dueling = bool(ckpt_dueling)
             needs_rebuild = (
                 ckpt_hl != self.online_net.hidden_layers
+                or ckpt_grid != self.online_net.grid_size
                 or ckpt_rows != self.grid_rows
                 or ckpt_cols != self.grid_cols
+                or ckpt_dueling != self.online_net.dueling
             )
             if needs_rebuild:
                 self.online_net = QNetwork(
-                    self.obs_dim, self.n_actions, self.online_net.grid_size, ckpt_hl,
-                    ckpt_rows, ckpt_cols,
+                    self.obs_dim, self.n_actions, ckpt_grid, ckpt_hl,
+                    ckpt_rows, ckpt_cols, ckpt_dueling,
                 ).to(self.device)
                 self.target_net = QNetwork(
-                    self.obs_dim, self.n_actions, self.target_net.grid_size, ckpt_hl,
-                    ckpt_rows, ckpt_cols,
+                    self.obs_dim, self.n_actions, ckpt_grid, ckpt_hl,
+                    ckpt_rows, ckpt_cols, ckpt_dueling,
                 ).to(self.device)
                 self.inference_net = QNetwork(
-                    self.obs_dim, self.n_actions, self.inference_net.grid_size, ckpt_hl,
-                    ckpt_rows, ckpt_cols,
+                    self.obs_dim, self.n_actions, ckpt_grid, ckpt_hl,
+                    ckpt_rows, ckpt_cols, ckpt_dueling,
                 ).to(self.device)
                 self.optimizer = optim.Adam(self.online_net.parameters(), lr=self.optimizer.param_groups[0]["lr"])
             self.grid_rows = ckpt_rows
             self.grid_cols = ckpt_cols
+            self.dueling = ckpt_dueling
         self.online_net.load_state_dict(checkpoint["online_net"])
         self.target_net.load_state_dict(checkpoint["target_net"])
         self.sync_inference_net()

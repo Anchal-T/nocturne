@@ -211,7 +211,7 @@ def main(cfg):
     torch.set_num_threads(1)
     cfg_dict = _make_cfg_dict(cfg)
 
-    from examples.drl_collision_avoidance.ddqn_agent import DDQNAgent
+    from examples.drl_collision_avoidance.dqn_modules.ddqn_agent import DDQNAgent
     from examples.drl_collision_avoidance.scenario_utils import apply_scenario_path_defaults
     from examples.drl_collision_avoidance.vec_env import (
         AsyncSubprocVecEnv, SubprocVecEnv, DummyVecEnv,
@@ -274,6 +274,7 @@ def main(cfg):
         device=device,
         grid_rows=grid_rows,
         grid_cols=grid_cols,
+        dueling=bool(drl_cfg.get('dueling', True)),
     )
 
     # --- Training parameters ---

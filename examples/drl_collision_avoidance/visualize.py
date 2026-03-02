@@ -21,7 +21,7 @@ def visualize(checkpoint_path: str, scenario_path: Optional[str] = None,
     set_display_window()
 
     from examples.drl_collision_avoidance.collision_avoidance_env import CollisionAvoidanceEnv
-    from examples.drl_collision_avoidance.ddqn_agent import DDQNAgent
+    from examples.drl_collision_avoidance.dqn_modules.ddqn_agent import DDQNAgent
 
     cfg = load_config(
         scenario_path=scenario_path,
@@ -48,6 +48,7 @@ def visualize(checkpoint_path: str, scenario_path: Optional[str] = None,
         device='cpu',
         grid_rows=grid_rows,
         grid_cols=grid_cols,
+        dueling=bool(drl_cfg.get('dueling', True)),
     )
     agent.load(checkpoint_path)
     agent.epsilon = 0.0

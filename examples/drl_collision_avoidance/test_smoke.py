@@ -7,7 +7,7 @@ from cfgs.config import PROJECT_PATH, set_display_window
 
 
 def test_ddqn_forward_and_train():
-    from examples.drl_collision_avoidance.ddqn_agent import DDQNAgent
+    from examples.drl_collision_avoidance.dqn_modules.ddqn_agent import DDQNAgent
     import torch
     import numpy as np
 
