@@ -84,6 +84,10 @@ drl:
   num_envs: 4          
   vec_env_mode: async   # async | sync | dummy
   train_in_background: true
+  alpha: 0.6
+  beta_start: 0.4
+  beta_frames: 100000
+  per_epsilon: 1e-6
 
 occupancy_grid:
   rows: 10

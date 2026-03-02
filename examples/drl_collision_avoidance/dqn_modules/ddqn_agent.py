@@ -29,6 +29,10 @@ class DDQNAgent:
         grid_rows: int = 25,
         grid_cols: int = 14,
         dueling: bool = True,
+        alpha = 0.6,
+        beta_start = 0.4,
+        beta_frames = 100000,
+        per_epsilon = 1e-6,
     ):
         self.obs_dim = obs_dim
         self.n_actions = n_actions
@@ -70,6 +74,10 @@ class DDQNAgent:
             batch_size=batch_size,
             n_step=1,
             gamma=gamma,
+            alpha=alpha,
+            beta_start=beta_start,
+            beta_frames=beta_frames,
+            epsilon=per_epsilon,
         )
         self.train_steps = 0
 
@@ -123,12 +131,15 @@ class DDQNAgent:
         rewards = batch["rews"]
         next_states = batch["next_obs"]
         dones = batch["done"]
+        weights = batch["weights"]
+        indices = batch["indices"]
 
         states_t = torch.FloatTensor(states).to(self.device)
         actions_t = torch.LongTensor(actions).to(self.device)
         rewards_t = torch.FloatTensor(rewards).to(self.device)
         next_states_t = torch.FloatTensor(next_states).to(self.device)
         dones_t = torch.FloatTensor(dones).to(self.device)
+        weights_t = torch.FloatTensor(weights).to(self.device)
 
         current_q = (
             self.online_net(states_t).gather(1, actions_t.unsqueeze(1)).squeeze(1)
@@ -143,7 +154,8 @@ class DDQNAgent:
             )
             target_q = rewards_t + self.gamma * next_q * (1.0 - dones_t)
 
-        loss = nn.functional.smooth_l1_loss(current_q, target_q)
+        td_errors = target_q - current_q
+        loss = (weights_t * nn.functional.smooth_l1_loss(current_q, target_q, reduction="none")).mean()
 
         self.optimizer.zero_grad()
         loss.backward()
@@ -156,6 +168,11 @@ class DDQNAgent:
 
         if self.train_steps % self.target_update_freq == 0:
             self.sync_target()
+
+        self.replay_buffer.update_priorities(
+            indices, td_errors.abs().detach().cpu().numpy()
+        )
+        self.replay_buffer.update_beta(env_steps)   # anneal β
 
         return loss.item()
 

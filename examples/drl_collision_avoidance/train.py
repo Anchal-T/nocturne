@@ -275,6 +275,10 @@ def main(cfg):
         grid_rows=grid_rows,
         grid_cols=grid_cols,
         dueling=bool(drl_cfg.get('dueling', True)),
+        alpha=drl_cfg.get('alpha', drl_cfg.get('per_alpha', 0.7)),
+        beta_start=drl_cfg.get('beta_start', drl_cfg.get('per_beta_start', 0.4)),
+        beta_frames=drl_cfg.get('beta_frames', drl_cfg.get('per_beta_frames', 100000)),
+        per_epsilon=drl_cfg.get('per_epsilon', 1e-6),
     )
 
     # --- Training parameters ---

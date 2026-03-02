@@ -3,6 +3,8 @@ from typing import Deque, Dict, Tuple
 
 import numpy as np
 
+from .sum_tree import SumTree
+
 
 class ReplayBuffer:
     """Numpy replay buffer with optional n-step return aggregation."""
@@ -14,6 +16,10 @@ class ReplayBuffer:
         batch_size: int = 32,
         n_step: int = 1,
         gamma: float = 0.99,
+        alpha: float = 0.6,
+        beta_start: float = 0.4,
+        beta_frames: int = 100000,
+        epsilon: float = 1e-6,
     ):
         if n_step < 1:
             raise ValueError(f"n_step must be >= 1, got {n_step}")
@@ -33,6 +39,14 @@ class ReplayBuffer:
         self.n_step_buffer: Deque[Tuple[np.ndarray, int, float, np.ndarray, bool]] = deque(
             maxlen=self.n_step
         )
+        self.sum_tree = SumTree(capacity=size)  
+        self.alpha = alpha
+        self.beta = beta_start
+        self.beta_start = beta_start
+        self.beta_frames = beta_frames
+        self.epsilon = max(float(epsilon), 1e-8)
+        self.max_priority = 1.0
+        self.max_priority_cap = 1e6
 
     def _insert_transition(
         self,
@@ -73,6 +87,9 @@ class ReplayBuffer:
         n_rew, n_next_obs, n_done = self._get_n_step_info(self.n_step_buffer, self.gamma)
         first_obs, first_act = self.n_step_buffer[0][:2]
         self._insert_transition(first_obs, first_act, n_rew, n_next_obs, n_done)
+
+        self.sum_tree.add(self.max_priority)
+
         return self.n_step_buffer[0]
 
     def store_batch(self, states, actions, rewards, next_states, dones) -> None:
@@ -91,15 +108,89 @@ class ReplayBuffer:
                 f"Cannot sample batch of size {bs} from buffer with {self.size} elements"
             )
 
-        indices = np.random.choice(self.size, size=bs, replace=False)
-        return {
-            "obs": self.obs_buf[indices],
-            "next_obs": self.next_obs_buf[indices],
-            "acts": self.acts_buf[indices],
-            "rews": self.rews_buf[indices],
-            "done": self.done_buf[indices],
-            "indices": indices,
-        }
+        total_priority = float(self.sum_tree.total())
+        if not np.isfinite(total_priority) or total_priority <= 0.0:
+            indices = np.random.choice(self.size, size=bs, replace=False)
+            batch = self.sample_batch_from_idxs(indices)
+            batch["indices"] = np.asarray(indices, dtype=np.int64)
+            batch["weights"] = np.ones(bs, dtype=np.float32)
+            return batch
+
+        segment = total_priority / bs
+        data_indices = []
+        weights = np.zeros(bs, dtype=np.float32)
+        s_max = np.nextafter(total_priority, 0.0)
+        min_prob = self.epsilon / max(total_priority, self.epsilon)
+
+        for i in range(bs):
+            s = np.random.uniform(segment * i, segment * (i + 1))
+            s = min(max(float(s), 0.0), s_max)
+            _, priority, data_idx = self.sum_tree.get(s)
+            if data_idx < 0 or data_idx >= self.size:
+                data_idx = np.random.randint(0, self.size)
+                priority = self.epsilon
+            data_indices.append(int(data_idx))
+
+            priority = float(priority)
+            if not np.isfinite(priority) or priority <= 0.0:
+                priority = self.epsilon
+
+            prob = max(priority / total_priority, min_prob)
+            w = (self.size * prob) ** (-self.beta)
+            weights[i] = w if np.isfinite(w) else 1.0
+
+        weights_max = float(np.max(weights))
+        if np.isfinite(weights_max) and weights_max > 0.0:
+            weights /= weights_max
+        else:
+            weights.fill(1.0)
+        weights = np.nan_to_num(weights, nan=1.0, posinf=1.0, neginf=1.0)
+
+        indices = np.array(data_indices, dtype=np.int64)
+        batch = self.sample_batch_from_idxs(indices)
+
+        batch["indices"] = indices          # for later priority update
+        batch["weights"] = weights          # importance-sampling weights
+        return batch
+
+    def update_priorities(self, indices: np.ndarray, td_errors: np.ndarray):
+        """Call this after every train_step with absolute TD errors."""
+        if len(indices) == 0:
+            return
+
+        priorities = np.abs(np.asarray(td_errors, dtype=np.float32)) + self.epsilon
+        priorities = np.nan_to_num(
+            priorities,
+            nan=self.max_priority,
+            posinf=self.max_priority_cap,
+            neginf=self.epsilon,
+        )
+        priorities = np.clip(priorities, self.epsilon, self.max_priority_cap) ** self.alpha
+        priorities = np.nan_to_num(
+            priorities,
+            nan=self.max_priority,
+            posinf=self.max_priority_cap,
+            neginf=self.epsilon,
+        )
+        priorities = np.clip(priorities, self.epsilon, self.max_priority_cap)
+
+        max_prio = float(np.max(priorities))
+        if not np.isfinite(max_prio) or max_prio <= 0.0:
+            max_prio = self.epsilon
+        self.max_priority = min(max(self.max_priority, max_prio), self.max_priority_cap)
+
+        for idx, prio in zip(indices, priorities):
+            if idx < 0 or idx >= self.sum_tree.capacity:
+                continue
+            tree_idx = idx + self.sum_tree.capacity - 1
+            self.sum_tree.update(tree_idx, float(prio))
+
+    def update_beta(self, env_steps: int):
+        """Anneal beta (call every train_step)."""
+        if self.beta_frames <= 0:
+            return
+        fraction = min(1.0, env_steps / self.beta_frames)
+        self.beta = self.beta_start + fraction * (1.0 - self.beta_start)    
 
     def sample(self, batch_size: int = None):
         batch = self.sample_batch(batch_size=batch_size)
