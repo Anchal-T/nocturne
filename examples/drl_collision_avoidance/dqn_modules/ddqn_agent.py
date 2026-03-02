@@ -5,6 +5,7 @@ from typing import List, Optional
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.optim as optim
 
 from .q_network import QNetwork
@@ -49,6 +50,10 @@ class DDQNAgent:
         self.epsilon_end = epsilon_end
         self.epsilon_decay_steps = epsilon_decay_steps
 
+        self._use_amp = self.device.type == "cuda"
+        self._scaler = torch.amp.GradScaler(enabled=self._use_amp)
+        self.grad_accum_steps = 1
+
         def _make_net() -> QNetwork:
             return QNetwork(
                 obs_dim=obs_dim,
@@ -63,11 +68,18 @@ class DDQNAgent:
         self.online_net = _make_net()
         self.target_net = _make_net()
         self.inference_net = _make_net()
+
+        if self.device.type == "cuda":
+            self.online_net = nn.DataParallel(self.online_net)
+            self.target_net = nn.DataParallel(self.target_net)
+            self.inference_net = nn.DataParallel(self.inference_net)
+
         self.inference_lock = threading.Lock()
         self.sync_target()
         self.sync_inference_net()
 
         self.optimizer = optim.Adam(self.online_net.parameters(), lr=lr)
+
         self.replay_buffer = ReplayBuffer(
             obs_dim=obs_dim,
             size=replay_buffer_size,
@@ -80,6 +92,24 @@ class DDQNAgent:
             epsilon=per_epsilon,
         )
         self.train_steps = 0
+        self._grad_accum_counter = 0
+
+        self._pin_buffers : Optional[dict] = None  # for optional pre-allocation of CUDA-pinned buffers to speed up batch sampling
+        if self.device.type == "cuda":
+            self._pin_buffers = {
+                "obs" : torch.zeros(batch_size, obs_dim, pin_memory=True),
+                "next_obs" : torch.zeros(batch_size, obs_dim, pin_memory=True),
+                "acts" : torch.zeros(batch_size, dtype =torch.long, pin_memory=True),
+                "rews" : torch.zeros(batch_size, pin_memory=True),
+                "dones" : torch.zeros(batch_size, pin_memory=True),
+                "weights" : torch.zeros(batch_size, pin_memory=True),
+            }
+
+    @staticmethod
+    def _unwrap_module(module: nn.Module) -> nn.Module:
+        if isinstance(module, nn.DataParallel):
+            return module.module
+        return module
 
     def select_action(self, state: np.ndarray) -> int:
         if random.random() < self.epsilon:
@@ -126,55 +156,76 @@ class DDQNAgent:
             return None
 
         batch = self.replay_buffer.sample_batch()
-        states = batch["obs"]
-        actions = batch["acts"].astype(np.int64)
-        rewards = batch["rews"]
-        next_states = batch["next_obs"]
-        dones = batch["done"]
-        weights = batch["weights"]
-        indices = batch["indices"]
 
-        states_t = torch.FloatTensor(states).to(self.device)
-        actions_t = torch.LongTensor(actions).to(self.device)
-        rewards_t = torch.FloatTensor(rewards).to(self.device)
-        next_states_t = torch.FloatTensor(next_states).to(self.device)
-        dones_t = torch.FloatTensor(dones).to(self.device)
-        weights_t = torch.FloatTensor(weights).to(self.device)
+        if self._pin_buffers is not None:
+            # Reuse pinned buffers to avoid re-allocation
+            pb = self._pin_buffers
+            pb["obs"].copy_(torch.from_numpy(batch["obs"]))
+            pb["next_obs"].copy_(torch.from_numpy(batch["next_obs"]))
+            pb["acts"].copy_(torch.from_numpy(batch["acts"].astype(np.int64)))
+            pb["rews"].copy_(torch.from_numpy(batch["rews"]))
+            pb["dones"].copy_(torch.from_numpy(batch["done"]))
+            pb["weights"].copy_(torch.from_numpy(batch["weights"]))
 
-        current_q = (
-            self.online_net(states_t).gather(1, actions_t.unsqueeze(1)).squeeze(1)
-        )
+            obs_t      = pb["obs"].to(self.device, non_blocking=True)
+            next_obs_t = pb["next_obs"].to(self.device, non_blocking=True)
+            acts_t     = pb["acts"].to(self.device, non_blocking=True)
+            rews_t     = pb["rews"].to(self.device, non_blocking=True)
+            dones_t    = pb["dones"].to(self.device, non_blocking=True)
+            weights_t  = pb["weights"].to(self.device, non_blocking=True)
+        else:
+            obs_t      = torch.FloatTensor(batch["obs"]).to(self.device)
+            next_obs_t = torch.FloatTensor(batch["next_obs"]).to(self.device)
+            acts_t     = torch.LongTensor(batch["acts"]).to(self.device)
+            rews_t     = torch.FloatTensor(batch["rews"]).to(self.device)
+            dones_t    = torch.FloatTensor(batch["done"]).to(self.device)
+            weights_t  = torch.FloatTensor(batch["weights"]).to(self.device)
 
-        with torch.no_grad():
-            best_actions = self.online_net(next_states_t).argmax(dim=1)
-            next_q = (
-                self.target_net(next_states_t)
-                .gather(1, best_actions.unsqueeze(1))
+        self.online_net.train()
+        with torch.amp.autocast(device_type=self.device.type, enabled=self._use_amp):
+            current_q = (
+                self.online_net(obs_t)
+                .gather(1, acts_t.unsqueeze(1))
                 .squeeze(1)
             )
-            target_q = rewards_t + self.gamma * next_q * (1.0 - dones_t)
+            with torch.no_grad():
+                # DDQN: online selects action, target evaluates it
+                best_acts = self.online_net(next_obs_t).argmax(dim=1)
+                next_q    = (
+                    self.target_net(next_obs_t)
+                    .gather(1, best_acts.unsqueeze(1))
+                    .squeeze(1)
+                )
+                target_q = rews_t + self.gamma * next_q * (1.0 - dones_t)
 
-        td_errors = target_q - current_q
-        loss = (weights_t * nn.functional.smooth_l1_loss(current_q, target_q, reduction="none")).mean()
+            td_errors = current_q - target_q                          # (B,)
+            # IS-weighted Huber loss
+            loss = (weights_t * F.huber_loss(current_q, target_q, reduction='none')).mean()
 
-        self.optimizer.zero_grad()
-        loss.backward()
-        nn.utils.clip_grad_norm_(self.online_net.parameters(), max_norm=1.0)
-        self.optimizer.step()
+        scale = 1.0 / self.grad_accum_steps
+        self._scaler.scale(loss * scale).backward()
+        self._grad_accum_counter += 1
+
+        if self._grad_accum_counter >= self.grad_accum_steps:
+            self._scaler.unscale_(self.optimizer)
+            nn.utils.clip_grad_norm_(self.online_net.parameters(), max_norm=10.0)
+            self._scaler.step(self.optimizer)
+            self._scaler.update()
+            self.optimizer.zero_grad(set_to_none=True)   # faster than zero_grad()
+            self._grad_accum_counter = 0
+
+        with torch.no_grad():
+            new_priorities = td_errors.abs().cpu().numpy()
+        self.replay_buffer.update_priorities(batch["indices"], new_priorities)
+
         self.sync_inference_net()
-
         self.train_steps += 1
         self._decay_epsilon(env_steps)
 
         if self.train_steps % self.target_update_freq == 0:
             self.sync_target()
 
-        self.replay_buffer.update_priorities(
-            indices, td_errors.abs().detach().cpu().numpy()
-        )
-        self.replay_buffer.update_beta(env_steps)   # anneal β
-
-        return loss.item()
+        return float(loss.item())
 
     def sync_target(self):
         self.target_net.load_state_dict(self.online_net.state_dict())
@@ -192,6 +243,7 @@ class DDQNAgent:
         )
 
     def save(self, path: str):
+        online_base = self._unwrap_module(self.online_net)
         torch.save(
             {
                 "online_net": self.online_net.state_dict(),
@@ -199,21 +251,22 @@ class DDQNAgent:
                 "optimizer": self.optimizer.state_dict(),
                 "train_steps": self.train_steps,
                 "epsilon": self.epsilon,
-                "hidden_layers": self.online_net.hidden_layers,
-                "grid_size": self.online_net.grid_size,
+                "hidden_layers": online_base.hidden_layers,
+                "grid_size": online_base.grid_size,
                 "grid_rows": self.grid_rows,
                 "grid_cols": self.grid_cols,
-                "dueling": self.online_net.dueling,
+                "dueling": online_base.dueling,
             },
             path,
         )
 
     def load(self, path: str):
         checkpoint = torch.load(path, map_location=self.device, weights_only=False)
+        online_base = self._unwrap_module(self.online_net)
         # If the checkpoint stores architecture, rebuild networks to match before loading weights.
         if "hidden_layers" in checkpoint:
             ckpt_hl = checkpoint["hidden_layers"]
-            ckpt_grid = checkpoint.get("grid_size", self.online_net.grid_size)
+            ckpt_grid = checkpoint.get("grid_size", online_base.grid_size)
             ckpt_rows = checkpoint.get("grid_rows", self.grid_rows)
             ckpt_cols = checkpoint.get("grid_cols", self.grid_cols)
             ckpt_dueling = checkpoint.get("dueling")
@@ -225,11 +278,11 @@ class DDQNAgent:
                     ckpt_dueling = True
             ckpt_dueling = bool(ckpt_dueling)
             needs_rebuild = (
-                ckpt_hl != self.online_net.hidden_layers
-                or ckpt_grid != self.online_net.grid_size
+                ckpt_hl != online_base.hidden_layers
+                or ckpt_grid != online_base.grid_size
                 or ckpt_rows != self.grid_rows
                 or ckpt_cols != self.grid_cols
-                or ckpt_dueling != self.online_net.dueling
+                or ckpt_dueling != online_base.dueling
             )
             if needs_rebuild:
                 self.online_net = QNetwork(
@@ -244,6 +297,10 @@ class DDQNAgent:
                     self.obs_dim, self.n_actions, ckpt_grid, ckpt_hl,
                     ckpt_rows, ckpt_cols, ckpt_dueling,
                 ).to(self.device)
+                if self.device.type == "cuda":
+                    self.online_net = nn.DataParallel(self.online_net)
+                    self.target_net = nn.DataParallel(self.target_net)
+                    self.inference_net = nn.DataParallel(self.inference_net)
                 self.optimizer = optim.Adam(self.online_net.parameters(), lr=self.optimizer.param_groups[0]["lr"])
             self.grid_rows = ckpt_rows
             self.grid_cols = ckpt_cols
