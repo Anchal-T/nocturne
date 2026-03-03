@@ -1,5 +1,6 @@
 import random
 import threading
+from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
@@ -11,7 +12,114 @@ import torch.optim as optim
 from .q_network import QNetwork
 from .replay_buffer import ReplayBuffer
 
+
+@dataclass
+class DDQNAgentConfig:
+    grid_size: int = 350
+    hidden_layers: Optional[List[int]] = None
+    lr: float = 0.01
+    gamma: float = 0.9
+    epsilon_start: float = 1.0
+    epsilon_end: float = 0.05
+    epsilon_decay_steps: int = 200000
+    replay_buffer_size: int = 100000
+    batch_size: int = 64
+    target_update_freq: int = 1000
+    device: str = "cpu"
+    grid_rows: int = 25
+    grid_cols: int = 14
+    dueling: bool = True
+    alpha: float = 0.6
+    beta_start: float = 0.4
+    beta_frames: int = 100000
+    per_epsilon: float = 1e-6
+    grad_accum_steps: int = 1
+    max_grad_norm: float = 10.0
+    use_torch_compile: bool = False
+    compile_mode: str = "reduce-overhead"
+    inference_sync_interval: int = 4
+    profile_cuda: bool = False
+
+    @classmethod
+    def from_drl_cfg(
+        cls,
+        drl_cfg: Dict,
+        *,
+        grid_size: int,
+        grid_rows: int,
+        grid_cols: int,
+        device: str,
+    ) -> "DDQNAgentConfig":
+        defaults = cls(
+            grid_size=grid_size,
+            grid_rows=grid_rows,
+            grid_cols=grid_cols,
+            device=device,
+        )
+        return cls(
+            grid_size=grid_size,
+            hidden_layers=drl_cfg.get("hidden_layers", defaults.hidden_layers),
+            lr=drl_cfg.get("lr", defaults.lr),
+            gamma=drl_cfg.get("gamma", defaults.gamma),
+            epsilon_start=drl_cfg.get("epsilon_start", defaults.epsilon_start),
+            epsilon_end=drl_cfg.get("epsilon_end", defaults.epsilon_end),
+            epsilon_decay_steps=drl_cfg.get("epsilon_decay_steps", defaults.epsilon_decay_steps),
+            replay_buffer_size=drl_cfg.get("replay_buffer_size", defaults.replay_buffer_size),
+            batch_size=drl_cfg.get("batch_size", defaults.batch_size),
+            target_update_freq=drl_cfg.get("target_update_freq", defaults.target_update_freq),
+            device=device,
+            grid_rows=grid_rows,
+            grid_cols=grid_cols,
+            dueling=bool(drl_cfg.get("dueling", defaults.dueling)),
+            alpha=drl_cfg.get("alpha", drl_cfg.get("per_alpha", defaults.alpha)),
+            beta_start=drl_cfg.get("beta_start", drl_cfg.get("per_beta_start", defaults.beta_start)),
+            beta_frames=drl_cfg.get("beta_frames", drl_cfg.get("per_beta_frames", defaults.beta_frames)),
+            per_epsilon=drl_cfg.get("per_epsilon", defaults.per_epsilon),
+            grad_accum_steps=drl_cfg.get("grad_accum_steps", defaults.grad_accum_steps),
+            max_grad_norm=drl_cfg.get("max_grad_norm", defaults.max_grad_norm),
+            use_torch_compile=bool(drl_cfg.get("use_torch_compile", defaults.use_torch_compile)),
+            compile_mode=str(drl_cfg.get("compile_mode", defaults.compile_mode)),
+            inference_sync_interval=drl_cfg.get("inference_sync_interval", defaults.inference_sync_interval),
+            profile_cuda=bool(drl_cfg.get("profile_cuda", defaults.profile_cuda)),
+        )
+
 class DDQNAgent:
+    @classmethod
+    def from_config(
+        cls,
+        obs_dim: int,
+        n_actions: int,
+        config: DDQNAgentConfig,
+    ) -> "DDQNAgent":
+        return cls(
+            obs_dim=obs_dim,
+            n_actions=n_actions,
+            grid_size=config.grid_size,
+            hidden_layers=config.hidden_layers,
+            lr=config.lr,
+            gamma=config.gamma,
+            epsilon_start=config.epsilon_start,
+            epsilon_end=config.epsilon_end,
+            epsilon_decay_steps=config.epsilon_decay_steps,
+            replay_buffer_size=config.replay_buffer_size,
+            batch_size=config.batch_size,
+            target_update_freq=config.target_update_freq,
+            device=config.device,
+            grid_rows=config.grid_rows,
+            grid_cols=config.grid_cols,
+            dueling=config.dueling,
+            alpha=config.alpha,
+            beta_start=config.beta_start,
+            beta_frames=config.beta_frames,
+            per_epsilon=config.per_epsilon,
+            grad_accum_steps=config.grad_accum_steps,
+            max_grad_norm=config.max_grad_norm,
+            use_torch_compile=config.use_torch_compile,
+            compile_mode=config.compile_mode,
+            inference_sync_interval=config.inference_sync_interval,
+            profile_cuda=config.profile_cuda,
+        )
+
     def __init__(
         self,
         obs_dim: int,
@@ -130,8 +238,8 @@ class DDQNAgent:
             # Keep inference net eager: async actor path can hit FX tracing conflicts
             # with dynamo-optimized callables in some PyTorch builds.
             return (
-                torch.compile(online, mode=self.compile_mode),
-                torch.compile(target, mode=self.compile_mode),
+                torch.compile(online, mode=self.compile_mode),  # type: ignore
+                torch.compile(target, mode=self.compile_mode),  # type: ignore
                 inference,
             )
         except Exception as exc:
@@ -143,11 +251,8 @@ class DDQNAgent:
         kwargs = {"lr": float(lr)}
         if self.device.type == "cuda":
             kwargs["fused"] = True
-        try:
-            return optim.Adam(self.online_net.parameters(), **kwargs)
-        except TypeError:
-            kwargs.pop("fused", None)
-            return optim.Adam(self.online_net.parameters(), **kwargs)
+        return optim.Adam(self.online_net.parameters(), **kwargs)
+        
 
     @staticmethod
     def _unwrap_module(module: nn.Module) -> nn.Module:
@@ -275,7 +380,7 @@ class DDQNAgent:
             weights_t  = torch.FloatTensor(batch["weights"]).to(self.device)
 
         self.online_net.train()
-        with torch.amp.autocast(device_type=self.device.type, enabled=self._use_amp):
+        with torch.amp.autocast(device_type=self.device.type, enabled=self._use_amp): #type : ignore
             current_q = (
                 self.online_net(obs_t)
                 .gather(1, acts_t.unsqueeze(1))

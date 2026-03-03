@@ -38,6 +38,7 @@ import sys
 import time
 import threading
 import queue
+from typing import Any, Dict, cast
 
 import hydra
 import numpy as np
@@ -49,10 +50,15 @@ from cfgs.config import set_display_window
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 
 
-def _make_cfg_dict(cfg):
+def _make_cfg_dict(cfg) -> Dict[str, Any]:
     if hasattr(cfg, '_content'):
-        return OmegaConf.to_container(cfg, resolve=True)
-    return dict(cfg)
+        cfg_dict = OmegaConf.to_container(cfg, resolve=True)
+    else:
+        cfg_dict = dict(cfg)
+
+    if not isinstance(cfg_dict, dict):
+        raise TypeError(f'Expected mapping-like cfg, got {type(cfg_dict).__name__}')
+    return cast(Dict[str, Any], cfg_dict)
 
 
 def _make_env_fn(cfg_dict, env_index):
@@ -106,9 +112,6 @@ def _resolve_parallel_env_config(drl_cfg):
     return num_workers, num_envs_per_worker, total_envs
 
 
-# ---------------------------------------------------------------------------
-# Background Learner Thread (mirrors SF's train_in_background_thread)
-# ---------------------------------------------------------------------------
 class BackgroundLearner:
     """Runs gradient updates in a background thread, never blocking env stepping.
 
@@ -193,63 +196,7 @@ class BackgroundLearner:
         self._stop.set()
         self._thread.join(timeout=5.0)
 
-
-# ---------------------------------------------------------------------------
-# Main training loop
-# ---------------------------------------------------------------------------
-@hydra.main(config_path="../../cfgs/drl_collision_avoidance", config_name="config")
-def main(cfg):
-    set_display_window()
-    # Keep the main-process PyTorch thread pool to 1 so it doesn't fight the
-    # env subprocesses for CPU cores. Workers set the same flag via their
-    # env-factory thunks.
-    os.environ['OMP_NUM_THREADS'] = '1'
-    torch.set_num_threads(1)
-    cfg_dict = _make_cfg_dict(cfg)
-
-    from examples.drl_collision_avoidance.dqn_modules.ddqn_agent import DDQNAgent
-    from examples.drl_collision_avoidance.scenario_utils import apply_scenario_path_defaults
-    from examples.drl_collision_avoidance.vec_env import (
-        AsyncSubprocVecEnv, SubprocVecEnv, DummyVecEnv,
-    )
-
-    cfg_dict = apply_scenario_path_defaults(cfg_dict, default_split='train')
-    drl_cfg = cfg_dict.get('drl', {})
-    num_workers, num_envs_per_worker, num_envs = _resolve_parallel_env_config(drl_cfg)
-    vec_env_mode = str(drl_cfg.get('vec_env_mode', 'async')).lower()
-    train_in_bg = drl_cfg.get('train_in_background', True)
-
-    # --- Build vectorized environment ---
-    env_fns = [_make_env_fn(cfg_dict, i) for i in range(num_envs)]
-
-    vec_env_classes = {
-        'async': AsyncSubprocVecEnv,
-        'sync': SubprocVecEnv,
-        'dummy': DummyVecEnv,
-    }
-    VecEnvCls = vec_env_classes.get(vec_env_mode)
-    if VecEnvCls is None:
-        raise ValueError(f"Unknown vec_env_mode={vec_env_mode!r}, expected one of {list(vec_env_classes)}")
-
-    vec_env = VecEnvCls(env_fns)
-
-    obs_dim = vec_env.observation_space.shape[0]
-    n_actions = vec_env.action_space.n
-    bg_label = 'BackgroundLearner' if train_in_bg else 'SyncLearner'
-    print(f"\n{'='*60}")
-    print(
-        f"Training: {num_workers} workers x {num_envs_per_worker} envs/worker "
-        f"= {num_envs} envs ({VecEnvCls.__name__}) + {bg_label}"
-    )
-    print(f"obs_dim={obs_dim} | n_actions={n_actions}")
-    print(f"{'='*60}\n")
-
-    grid_cfg = cfg_dict.get('occupancy_grid', {})
-    grid_rows = grid_cfg.get('rows', 25)
-    grid_cols = grid_cfg.get('cols', 14)
-    grid_size = grid_rows * grid_cols
-
-    # --- Build learner agent ---
+def _resolve_training_device(cfg_dict, drl_cfg):
     device = cfg_dict.get('device', 'cpu')
     if device.startswith('cuda') and not torch.cuda.is_available():
         device = 'cpu'
@@ -261,37 +208,203 @@ def main(cfg):
         torch.backends.cuda.matmul.allow_tf32 = use_tf32
         torch.backends.cudnn.allow_tf32 = use_tf32
         torch.backends.cudnn.benchmark = cudnn_benchmark
+    return device
 
-    agent = DDQNAgent(
-        obs_dim=obs_dim,
-        n_actions=n_actions,
-        grid_size=grid_size,
-        hidden_layers=drl_cfg['hidden_layers'],
-        lr=drl_cfg['lr'],
-        gamma=drl_cfg['gamma'],
-        epsilon_start=drl_cfg['epsilon_start'],
-        epsilon_end=drl_cfg['epsilon_end'],
-        epsilon_decay_steps=drl_cfg['epsilon_decay_steps'],
-        replay_buffer_size=drl_cfg['replay_buffer_size'],
-        batch_size=drl_cfg['batch_size'],
-        target_update_freq=drl_cfg['target_update_freq'],
-        device=device,
-        grid_rows=grid_rows,
-        grid_cols=grid_cols,
-        dueling=bool(drl_cfg.get('dueling', True)),
-        alpha=drl_cfg.get('alpha', drl_cfg.get('per_alpha', 0.7)),
-        beta_start=drl_cfg.get('beta_start', drl_cfg.get('per_beta_start', 0.4)),
-        beta_frames=drl_cfg.get('beta_frames', drl_cfg.get('per_beta_frames', 100000)),
-        per_epsilon=drl_cfg.get('per_epsilon', 1e-6),
-        grad_accum_steps=drl_cfg.get('grad_accum_steps', 1),
-        max_grad_norm=drl_cfg.get('max_grad_norm', 10.0),
-        use_torch_compile=bool(drl_cfg.get('use_torch_compile', True)),
-        compile_mode=str(drl_cfg.get('compile_mode', 'reduce-overhead')),
-        inference_sync_interval=drl_cfg.get('inference_sync_interval', 4),
-        profile_cuda=bool(drl_cfg.get('profile_cuda', False)),
+
+def _build_vec_env(cfg_dict, num_envs, vec_env_mode):
+    from examples.drl_collision_avoidance.vec_env import (
+        AsyncSubprocVecEnv,
+        DummyVecEnv,
+        SubprocVecEnv,
     )
 
-    # --- Training parameters ---
+    env_fns = [_make_env_fn(cfg_dict, i) for i in range(num_envs)]
+    vec_env_classes = {
+        'async': AsyncSubprocVecEnv,
+        'sync': SubprocVecEnv,
+        'dummy': DummyVecEnv,
+    }
+    vec_env_cls = vec_env_classes.get(vec_env_mode)
+    if vec_env_cls is None:
+        raise ValueError(f"Unknown vec_env_mode={vec_env_mode!r}, expected one of {list(vec_env_classes)}")
+
+    return vec_env_cls(env_fns), vec_env_cls
+
+
+def _build_agent(cfg_dict, drl_cfg, obs_dim, n_actions):
+    from examples.drl_collision_avoidance.dqn_modules.ddqn_agent import DDQNAgent, DDQNAgentConfig
+
+    grid_cfg = cfg_dict.get('occupancy_grid', {})
+    grid_rows = grid_cfg.get('rows', 25)
+    grid_cols = grid_cfg.get('cols', 14)
+    grid_size = grid_rows * grid_cols
+    device = _resolve_training_device(cfg_dict, drl_cfg)
+
+    agent_cfg = DDQNAgentConfig.from_drl_cfg(
+        drl_cfg,
+        grid_size=grid_size,
+        grid_rows=grid_rows,
+        grid_cols=grid_cols,
+        device=device,
+    )
+    return DDQNAgent.from_config(obs_dim=obs_dim, n_actions=n_actions, config=agent_cfg)
+
+
+def _print_training_header(num_workers, num_envs_per_worker, num_envs, vec_env_cls, train_in_bg, obs_dim, n_actions):
+    bg_label = 'BackgroundLearner' if train_in_bg else 'SyncLearner'
+    print(f"\n{'='*60}")
+    print(
+        f"Training: {num_workers} workers x {num_envs_per_worker} envs/worker "
+        f"= {num_envs} envs ({vec_env_cls.__name__}) + {bg_label}"
+    )
+    print(f"obs_dim={obs_dim} | n_actions={n_actions}")
+    print(f"{'='*60}\n")
+
+
+def _run_training_loop(
+    vec_env,
+    vec_env_mode,
+    agent,
+    learner,
+    num_envs,
+    num_episodes,
+    min_replay,
+    train_freq,
+    log_interval,
+    save_interval,
+    checkpoint_dir,
+    writer,
+    start_time,
+    running_state,
+):
+    episode_rewards = np.zeros(num_envs, dtype=np.float64)
+    episode_lengths = np.zeros(num_envs, dtype=np.int64)
+    episodes_completed = 0
+    global_step = 0
+    reward_history = []
+
+    obs = vec_env.reset()
+    print("Collecting experience...\n")
+
+    current_obs = obs.copy()
+    current_actions = agent.select_action_batch(current_obs)
+    if vec_env_mode == 'async':
+        vec_env.step_async(current_actions)
+
+    while episodes_completed < num_episodes and running_state['running']:
+        if vec_env_mode == 'async':
+            ready_ids, next_obs, rewards, dones, infos = vec_env.step_wait(min_ready=1)
+            if len(ready_ids) == 0:
+                continue
+
+            assert current_obs is not None and current_actions is not None
+            prev_obs = current_obs[ready_ids]
+            prev_actions = current_actions[ready_ids]
+            current_obs[ready_ids] = next_obs
+            next_actions = agent.select_action_batch(next_obs)
+            current_actions[ready_ids] = next_actions
+            vec_env.step_async(next_actions, env_ids=ready_ids)
+            global_step += len(ready_ids)
+        else:
+            ready_ids = np.arange(num_envs, dtype=np.int64)
+            prev_obs = obs
+            prev_actions = agent.select_action_batch(obs)
+            next_obs, rewards, dones, infos = vec_env.step(prev_actions)
+            global_step += num_envs
+
+        dones_f32 = dones.astype(np.float32)
+        if learner is not None:
+            learner.submit(prev_obs, prev_actions, rewards, next_obs, dones_f32)
+        else:
+            agent.store_transition_batch(prev_obs, prev_actions, rewards, next_obs, dones_f32)
+            if len(agent.replay_buffer) >= min_replay and global_step % train_freq == 0:
+                agent.train_step(env_steps=global_step)
+
+        episode_rewards[ready_ids] += rewards
+        episode_lengths[ready_ids] += 1
+
+        for local_idx, env_idx in enumerate(ready_ids):
+            if dones[local_idx]:
+                episodes_completed += 1
+                ep_reward = episode_rewards[env_idx]
+                ep_length = int(episode_lengths[env_idx])
+                info = infos[local_idx]
+                reward_history.append(ep_reward)
+
+                if writer is not None:
+                    loss_val = learner.latest_loss if learner else None
+                    writer.add_scalar('train/episode_reward', ep_reward, episodes_completed)
+                    writer.add_scalar('train/episode_length', ep_length, episodes_completed)
+                    writer.add_scalar('train/epsilon', agent.epsilon, episodes_completed)
+                    writer.add_scalar('train/collided', float(info.get('collided', False)), episodes_completed)
+                    writer.add_scalar('train/goal_achieved', float(info.get('goal_achieved', False)), episodes_completed)
+                    if loss_val is not None:
+                        writer.add_scalar('train/loss', loss_val, episodes_completed)
+
+                if episodes_completed % log_interval == 0:
+                    avg_rew = np.mean(reward_history[-log_interval:])
+                    elapsed = max(time.time() - start_time, 1e-3)
+                    fps = int(global_step / elapsed)
+                    buf_sz = learner.buffer_size if learner else len(agent.replay_buffer)
+                    train_steps = learner.train_steps if learner else agent.train_steps
+                    print(
+                        f'Episode {episodes_completed:5d} | '
+                        f'avg_reward={avg_rew:8.2f} | '
+                        f'eps={agent.epsilon:.3f} | '
+                        f'goal_dist={info.get("goal_dist", float("inf")):.1f} | '
+                        f'buf={buf_sz:6d} | '
+                        f'env_steps={global_step} | '
+                        f'train_steps={train_steps} | '
+                        f'fps={fps}'
+                    )
+
+                if episodes_completed % save_interval == 0:
+                    path = os.path.join(checkpoint_dir, f'ddqn_ep{episodes_completed}.pth')
+                    agent.save(path)
+                    print(f'  → Saved checkpoint: {path}')
+
+                episode_rewards[env_idx] = 0.0
+                episode_lengths[env_idx] = 0
+
+                if episodes_completed >= num_episodes:
+                    break
+
+        if vec_env_mode != 'async':
+            obs = next_obs
+
+    return episodes_completed, global_step
+
+
+@hydra.main(config_path="../../cfgs/drl_collision_avoidance", config_name="config")
+def main(cfg):
+    set_display_window()
+    os.environ['OMP_NUM_THREADS'] = '1'
+    torch.set_num_threads(1)
+    cfg_dict = _make_cfg_dict(cfg)
+
+    from examples.drl_collision_avoidance.scenario_utils import apply_scenario_path_defaults
+
+    cfg_dict = apply_scenario_path_defaults(cfg_dict, default_split='train')
+    drl_cfg = cfg_dict.get('drl', {})
+    num_workers, num_envs_per_worker, num_envs = _resolve_parallel_env_config(drl_cfg)
+    vec_env_mode = str(drl_cfg.get('vec_env_mode', 'async')).lower()
+    train_in_bg = drl_cfg.get('train_in_background', True)
+
+    vec_env, vec_env_cls = _build_vec_env(cfg_dict, num_envs, vec_env_mode)
+    obs_dim = vec_env.observation_space.shape[0]
+    n_actions = vec_env.action_space.n
+    _print_training_header(
+        num_workers,
+        num_envs_per_worker,
+        num_envs,
+        vec_env_cls,
+        train_in_bg,
+        obs_dim,
+        n_actions,
+    )
+
+    agent = _build_agent(cfg_dict, drl_cfg, obs_dim, n_actions)
+
     num_episodes = drl_cfg['num_episodes']
     train_freq = drl_cfg['train_freq']
     min_replay = drl_cfg['min_replay_size']
@@ -301,122 +414,40 @@ def main(cfg):
     os.makedirs(checkpoint_dir, exist_ok=True)
 
     writer = _make_writer(checkpoint_dir)
+    running_state = {'running': True}
 
-    # --- Graceful shutdown ---
-    running = True
     def _signal_handler(sig, frame):
-        nonlocal running
         print('\nKeyboard interrupt detected, exiting...')
-        running = False
+        running_state['running'] = False
+
     signal.signal(signal.SIGINT, _signal_handler)
 
-    # --- Per-env episode trackers ---
-    episode_rewards = np.zeros(num_envs, dtype=np.float64)
-    episode_lengths = np.zeros(num_envs, dtype=np.int64)
-
-    episodes_completed = 0
-    global_step = 0
-    reward_history = []
-    start_time = time.time()
-
-    # --- Start background learner if enabled ---
     learner = None
     if train_in_bg:
         learner = BackgroundLearner(agent, train_freq, min_replay)
         print("Background learner thread started.")
 
-    # --- Initial reset ---
-    obs = vec_env.reset()  # (num_envs, obs_dim)
-    print("Collecting experience...\n")
+    start_time = time.time()
+    episodes_completed = 0
+    global_step = 0
 
     try:
-        if vec_env_mode == 'async':
-            current_obs = obs.copy()
-            current_actions = agent.select_action_batch(current_obs)
-            vec_env.step_async(current_actions)
-
-        while episodes_completed < num_episodes and running:
-            if vec_env_mode == 'async':
-                ready_ids, next_obs, rewards, dones, infos = vec_env.step_wait(min_ready=1)
-                if len(ready_ids) == 0:
-                    continue
-                prev_obs = current_obs[ready_ids]
-                prev_actions = current_actions[ready_ids]
-                # Re-dispatch envs immediately so they step concurrently with
-                # the learner submit and episode bookkeeping below.
-                current_obs[ready_ids] = next_obs
-                next_actions = agent.select_action_batch(next_obs)
-                current_actions[ready_ids] = next_actions
-                vec_env.step_async(next_actions, env_ids=ready_ids)
-                global_step += len(ready_ids)
-            else:
-                ready_ids = np.arange(num_envs, dtype=np.int64)
-                prev_obs = obs
-                prev_actions = agent.select_action_batch(obs)
-                next_obs, rewards, dones, infos = vec_env.step(prev_actions)
-                global_step += num_envs
-
-            dones_f32 = dones.astype(np.float32)
-            if learner is not None:
-                learner.submit(prev_obs, prev_actions, rewards, next_obs, dones_f32)
-            else:
-                agent.store_transition_batch(prev_obs, prev_actions, rewards, next_obs, dones_f32)
-                if len(agent.replay_buffer) >= min_replay and global_step % train_freq == 0:
-                    agent.train_step(env_steps=global_step)
-
-            episode_rewards[ready_ids] += rewards
-            episode_lengths[ready_ids] += 1
-
-            for local_idx, env_idx in enumerate(ready_ids):
-                if dones[local_idx]:
-                    episodes_completed += 1
-                    ep_reward = episode_rewards[env_idx]
-                    ep_length = int(episode_lengths[env_idx])
-                    info = infos[local_idx]
-
-                    reward_history.append(ep_reward)
-
-                    if writer is not None:
-                        loss_val = learner.latest_loss if learner else None
-                        writer.add_scalar('train/episode_reward', ep_reward, episodes_completed)
-                        writer.add_scalar('train/episode_length', ep_length, episodes_completed)
-                        writer.add_scalar('train/epsilon', agent.epsilon, episodes_completed)
-                        writer.add_scalar('train/collided', float(info.get('collided', False)), episodes_completed)
-                        writer.add_scalar('train/goal_achieved', float(info.get('goal_achieved', False)), episodes_completed)
-                        if loss_val is not None:
-                            writer.add_scalar('train/loss', loss_val, episodes_completed)
-
-                    if episodes_completed % log_interval == 0:
-                        avg_rew = np.mean(reward_history[-log_interval:])
-                        elapsed = max(time.time() - start_time, 1e-3)
-                        fps = int(global_step / elapsed)
-                        buf_sz = learner.buffer_size if learner else len(agent.replay_buffer)
-                        train_steps = learner.train_steps if learner else agent.train_steps
-                        print(
-                            f'Episode {episodes_completed:5d} | '
-                            f'avg_reward={avg_rew:8.2f} | '
-                            f'eps={agent.epsilon:.3f} | '
-                            f'goal_dist={info.get("goal_dist", float("inf")):.1f} | '
-                            f'buf={buf_sz:6d} | '
-                            f'env_steps={global_step} | '
-                            f'train_steps={train_steps} | '
-                            f'fps={fps}'
-                        )
-
-                    if episodes_completed % save_interval == 0:
-                        path = os.path.join(checkpoint_dir, f'ddqn_ep{episodes_completed}.pth')
-                        agent.save(path)
-                        print(f'  → Saved checkpoint: {path}')
-
-                    episode_rewards[env_idx] = 0.0
-                    episode_lengths[env_idx] = 0
-
-                    if episodes_completed >= num_episodes:
-                        break
-
-            if vec_env_mode != 'async':
-                obs = next_obs
-
+        episodes_completed, global_step = _run_training_loop(
+            vec_env=vec_env,
+            vec_env_mode=vec_env_mode,
+            agent=agent,
+            learner=learner,
+            num_envs=num_envs,
+            num_episodes=num_episodes,
+            min_replay=min_replay,
+            train_freq=train_freq,
+            log_interval=log_interval,
+            save_interval=save_interval,
+            checkpoint_dir=checkpoint_dir,
+            writer=writer,
+            start_time=start_time,
+            running_state=running_state,
+        )
     finally:
         elapsed = time.time() - start_time
         print(f'\nTraining finished after {elapsed:.1f}s. Cleaning up...')
@@ -440,7 +471,7 @@ def main(cfg):
 
 def _make_writer(log_dir: str):
     try:
-        from torch.utils.tensorboard import SummaryWriter
+        from torch.utils.tensorboard.writer import SummaryWriter
         return SummaryWriter(log_dir=os.path.join(log_dir, 'tb_logs'))
     except ImportError:
         print('TensorBoard not available — logging to console only.')
