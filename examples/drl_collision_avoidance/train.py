@@ -261,6 +261,160 @@ def _print_training_header(num_workers, num_envs_per_worker, num_envs, vec_env_c
     print(f"{'='*60}\n")
 
 
+def _collect_transition_batch(
+    vec_env,
+    vec_env_mode,
+    obs,
+    current_obs,
+    current_actions,
+    num_envs,
+    agent,
+):
+    if vec_env_mode == 'async':
+        ready_ids, next_obs, rewards, dones, infos = vec_env.step_wait(min_ready=1)
+        if len(ready_ids) == 0:
+            return None, obs, current_obs, current_actions, 0
+
+        prev_obs = current_obs[ready_ids]
+        prev_actions = current_actions[ready_ids]
+        current_obs[ready_ids] = next_obs
+        next_actions = agent.select_action_batch(next_obs)
+        current_actions[ready_ids] = next_actions
+        vec_env.step_async(next_actions, env_ids=ready_ids)
+
+        return (
+            (ready_ids, prev_obs, prev_actions, next_obs, rewards, dones, infos),
+            obs,
+            current_obs,
+            current_actions,
+            len(ready_ids),
+        )
+
+    ready_ids = np.arange(num_envs, dtype=np.int64)
+    prev_obs = obs
+    prev_actions = agent.select_action_batch(obs)
+    next_obs, rewards, dones, infos = vec_env.step(prev_actions)
+    return (
+        (ready_ids, prev_obs, prev_actions, next_obs, rewards, dones, infos),
+        next_obs,
+        current_obs,
+        current_actions,
+        num_envs,
+    )
+
+
+def _submit_or_train_batch(learner, agent, prev_obs, prev_actions, rewards, next_obs, dones, min_replay, train_freq, global_step):
+    dones_f32 = dones.astype(np.float32)
+    if learner is not None:
+        learner.submit(prev_obs, prev_actions, rewards, next_obs, dones_f32)
+        return
+
+    agent.store_transition_batch(prev_obs, prev_actions, rewards, next_obs, dones_f32)
+    if len(agent.replay_buffer) >= min_replay and global_step % train_freq == 0:
+        agent.train_step(env_steps=global_step)
+
+
+def _write_episode_metrics(writer, learner, agent, ep_reward, ep_length, info, episodes_completed):
+    if writer is None:
+        return
+    loss_val = learner.latest_loss if learner else None
+    writer.add_scalar('train/episode_reward', ep_reward, episodes_completed)
+    writer.add_scalar('train/episode_length', ep_length, episodes_completed)
+    writer.add_scalar('train/epsilon', agent.epsilon, episodes_completed)
+    writer.add_scalar('train/collided', float(info.get('collided', False)), episodes_completed)
+    writer.add_scalar('train/goal_achieved', float(info.get('goal_achieved', False)), episodes_completed)
+    if loss_val is not None:
+        writer.add_scalar('train/loss', loss_val, episodes_completed)
+
+
+def _maybe_print_episode_log(
+    episodes_completed,
+    log_interval,
+    reward_history,
+    start_time,
+    global_step,
+    learner,
+    agent,
+    info,
+):
+    if episodes_completed % log_interval != 0:
+        return
+
+    avg_rew = np.mean(reward_history[-log_interval:])
+    elapsed = max(time.time() - start_time, 1e-3)
+    fps = int(global_step / elapsed)
+    buf_sz = learner.buffer_size if learner else len(agent.replay_buffer)
+    train_steps = learner.train_steps if learner else agent.train_steps
+    print(
+        f'Episode {episodes_completed:5d} | '
+        f'avg_reward={avg_rew:8.2f} | '
+        f'eps={agent.epsilon:.3f} | '
+        f'goal_dist={info.get("goal_dist", float("inf")):.1f} | '
+        f'buf={buf_sz:6d} | '
+        f'env_steps={global_step} | '
+        f'train_steps={train_steps} | '
+        f'fps={fps}'
+    )
+
+
+def _maybe_save_checkpoint(episodes_completed, save_interval, checkpoint_dir, agent):
+    if episodes_completed % save_interval != 0:
+        return
+    path = os.path.join(checkpoint_dir, f'ddqn_ep{episodes_completed}.pth')
+    agent.save(path)
+    print(f'  → Saved checkpoint: {path}')
+
+
+def _process_done_episodes(
+    ready_ids,
+    dones,
+    infos,
+    episode_rewards,
+    episode_lengths,
+    episodes_completed,
+    reward_history,
+    writer,
+    learner,
+    agent,
+    log_interval,
+    save_interval,
+    checkpoint_dir,
+    global_step,
+    start_time,
+    num_episodes,
+):
+    for local_idx, env_idx in enumerate(ready_ids):
+        if not dones[local_idx]:
+            continue
+
+        episodes_completed += 1
+        ep_reward = episode_rewards[env_idx]
+        ep_length = int(episode_lengths[env_idx])
+        info = infos[local_idx]
+        reward_history.append(ep_reward)
+
+        _write_episode_metrics(writer, learner, agent, ep_reward, ep_length, info, episodes_completed)
+        _maybe_print_episode_log(
+            episodes_completed=episodes_completed,
+            log_interval=log_interval,
+            reward_history=reward_history,
+            start_time=start_time,
+            global_step=global_step,
+            learner=learner,
+            agent=agent,
+            info=info,
+        )
+        _maybe_save_checkpoint(episodes_completed, save_interval, checkpoint_dir, agent)
+
+        episode_rewards[env_idx] = 0.0
+        episode_lengths[env_idx] = 0
+
+        if episodes_completed >= num_episodes:
+            break
+
+    return episodes_completed
+
+
 def _run_training_loop(
     vec_env,
     vec_env_mode,
@@ -292,85 +446,54 @@ def _run_training_loop(
         vec_env.step_async(current_actions)
 
     while episodes_completed < num_episodes and running_state['running']:
-        if vec_env_mode == 'async':
-            ready_ids, next_obs, rewards, dones, infos = vec_env.step_wait(min_ready=1)
-            if len(ready_ids) == 0:
-                continue
+        step_batch, obs, current_obs, current_actions, step_size = _collect_transition_batch(
+            vec_env=vec_env,
+            vec_env_mode=vec_env_mode,
+            obs=obs,
+            current_obs=current_obs,
+            current_actions=current_actions,
+            num_envs=num_envs,
+            agent=agent,
+        )
+        if step_batch is None:
+            continue
 
-            assert current_obs is not None and current_actions is not None
-            prev_obs = current_obs[ready_ids]
-            prev_actions = current_actions[ready_ids]
-            current_obs[ready_ids] = next_obs
-            next_actions = agent.select_action_batch(next_obs)
-            current_actions[ready_ids] = next_actions
-            vec_env.step_async(next_actions, env_ids=ready_ids)
-            global_step += len(ready_ids)
-        else:
-            ready_ids = np.arange(num_envs, dtype=np.int64)
-            prev_obs = obs
-            prev_actions = agent.select_action_batch(obs)
-            next_obs, rewards, dones, infos = vec_env.step(prev_actions)
-            global_step += num_envs
+        ready_ids, prev_obs, prev_actions, next_obs, rewards, dones, infos = step_batch
+        global_step += step_size
 
-        dones_f32 = dones.astype(np.float32)
-        if learner is not None:
-            learner.submit(prev_obs, prev_actions, rewards, next_obs, dones_f32)
-        else:
-            agent.store_transition_batch(prev_obs, prev_actions, rewards, next_obs, dones_f32)
-            if len(agent.replay_buffer) >= min_replay and global_step % train_freq == 0:
-                agent.train_step(env_steps=global_step)
+        _submit_or_train_batch(
+            learner=learner,
+            agent=agent,
+            prev_obs=prev_obs,
+            prev_actions=prev_actions,
+            rewards=rewards,
+            next_obs=next_obs,
+            dones=dones,
+            min_replay=min_replay,
+            train_freq=train_freq,
+            global_step=global_step,
+        )
 
         episode_rewards[ready_ids] += rewards
         episode_lengths[ready_ids] += 1
-
-        for local_idx, env_idx in enumerate(ready_ids):
-            if dones[local_idx]:
-                episodes_completed += 1
-                ep_reward = episode_rewards[env_idx]
-                ep_length = int(episode_lengths[env_idx])
-                info = infos[local_idx]
-                reward_history.append(ep_reward)
-
-                if writer is not None:
-                    loss_val = learner.latest_loss if learner else None
-                    writer.add_scalar('train/episode_reward', ep_reward, episodes_completed)
-                    writer.add_scalar('train/episode_length', ep_length, episodes_completed)
-                    writer.add_scalar('train/epsilon', agent.epsilon, episodes_completed)
-                    writer.add_scalar('train/collided', float(info.get('collided', False)), episodes_completed)
-                    writer.add_scalar('train/goal_achieved', float(info.get('goal_achieved', False)), episodes_completed)
-                    if loss_val is not None:
-                        writer.add_scalar('train/loss', loss_val, episodes_completed)
-
-                if episodes_completed % log_interval == 0:
-                    avg_rew = np.mean(reward_history[-log_interval:])
-                    elapsed = max(time.time() - start_time, 1e-3)
-                    fps = int(global_step / elapsed)
-                    buf_sz = learner.buffer_size if learner else len(agent.replay_buffer)
-                    train_steps = learner.train_steps if learner else agent.train_steps
-                    print(
-                        f'Episode {episodes_completed:5d} | '
-                        f'avg_reward={avg_rew:8.2f} | '
-                        f'eps={agent.epsilon:.3f} | '
-                        f'goal_dist={info.get("goal_dist", float("inf")):.1f} | '
-                        f'buf={buf_sz:6d} | '
-                        f'env_steps={global_step} | '
-                        f'train_steps={train_steps} | '
-                        f'fps={fps}'
-                    )
-
-                if episodes_completed % save_interval == 0:
-                    path = os.path.join(checkpoint_dir, f'ddqn_ep{episodes_completed}.pth')
-                    agent.save(path)
-                    print(f'  → Saved checkpoint: {path}')
-
-                episode_rewards[env_idx] = 0.0
-                episode_lengths[env_idx] = 0
-
-                if episodes_completed >= num_episodes:
-                    break
-
-        if vec_env_mode != 'async':
-            obs = next_obs
+        episodes_completed = _process_done_episodes(
+            ready_ids=ready_ids,
+            dones=dones,
+            infos=infos,
+            episode_rewards=episode_rewards,
+            episode_lengths=episode_lengths,
+            episodes_completed=episodes_completed,
+            reward_history=reward_history,
+            writer=writer,
+            learner=learner,
+            agent=agent,
+            log_interval=log_interval,
+            save_interval=save_interval,
+            checkpoint_dir=checkpoint_dir,
+            global_step=global_step,
+            start_time=start_time,
+            num_episodes=num_episodes,
+        )
 
     return episodes_completed, global_step
 

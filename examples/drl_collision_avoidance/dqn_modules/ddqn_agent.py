@@ -1,7 +1,7 @@
 import random
 import threading
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -251,8 +251,11 @@ class DDQNAgent:
         kwargs = {"lr": float(lr)}
         if self.device.type == "cuda":
             kwargs["fused"] = True
-        return optim.Adam(self.online_net.parameters(), **kwargs)
-        
+        try:
+            return optim.Adam(self.online_net.parameters(), **kwargs)
+        except TypeError:
+            kwargs.pop("fused", None)
+            return optim.Adam(self.online_net.parameters(), **kwargs)
 
     @staticmethod
     def _unwrap_module(module: nn.Module) -> nn.Module:
@@ -346,14 +349,8 @@ class DDQNAgent:
     def store_transition_batch(self, states, actions, rewards, next_states, dones):
         self.replay_buffer.store_batch(states, actions, rewards, next_states, dones)
 
-    def train_step(self, env_steps: int = 0) -> Optional[float]:
-        if len(self.replay_buffer) < self.batch_size:
-            return None
-
-        batch = self.replay_buffer.sample_batch()
-
+    def _batch_to_tensors(self, batch: Dict[str, np.ndarray]):
         if self._pin_buffers is not None:
-            # Reuse pinned buffers to avoid re-allocation
             pb = self._pin_buffers
             pb["obs"].copy_(torch.from_numpy(batch["obs"]))
             pb["next_obs"].copy_(torch.from_numpy(batch["next_obs"]))
@@ -365,56 +362,56 @@ class DDQNAgent:
             pb["dones"].copy_(torch.from_numpy(batch["done"]))
             pb["weights"].copy_(torch.from_numpy(batch["weights"]))
 
-            obs_t      = pb["obs"].to(self.device, non_blocking=True)
-            next_obs_t = pb["next_obs"].to(self.device, non_blocking=True)
-            acts_t     = pb["acts"].to(self.device, non_blocking=True)
-            rews_t     = pb["rews"].to(self.device, non_blocking=True)
-            dones_t    = pb["dones"].to(self.device, non_blocking=True)
-            weights_t  = pb["weights"].to(self.device, non_blocking=True)
-        else:
-            obs_t      = torch.FloatTensor(batch["obs"]).to(self.device)
-            next_obs_t = torch.FloatTensor(batch["next_obs"]).to(self.device)
-            acts_t     = torch.LongTensor(batch["acts"]).to(self.device)
-            rews_t     = torch.FloatTensor(batch["rews"]).to(self.device)
-            dones_t    = torch.FloatTensor(batch["done"]).to(self.device)
-            weights_t  = torch.FloatTensor(batch["weights"]).to(self.device)
-
-        self.online_net.train()
-        with torch.amp.autocast(device_type=self.device.type, enabled=self._use_amp): #type : ignore
-            current_q = (
-                self.online_net(obs_t)
-                .gather(1, acts_t.unsqueeze(1))
-                .squeeze(1)
+            return (
+                pb["obs"].to(self.device, non_blocking=True),
+                pb["next_obs"].to(self.device, non_blocking=True),
+                pb["acts"].to(self.device, non_blocking=True),
+                pb["rews"].to(self.device, non_blocking=True),
+                pb["dones"].to(self.device, non_blocking=True),
+                pb["weights"].to(self.device, non_blocking=True),
             )
+
+        return (
+            torch.FloatTensor(batch["obs"]).to(self.device),
+            torch.FloatTensor(batch["next_obs"]).to(self.device),
+            torch.LongTensor(batch["acts"]).to(self.device),
+            torch.FloatTensor(batch["rews"]).to(self.device),
+            torch.FloatTensor(batch["done"]).to(self.device),
+            torch.FloatTensor(batch["weights"]).to(self.device),
+        )
+
+    def _compute_loss(self, obs_t, acts_t, next_obs_t, rews_t, dones_t, weights_t):
+        with torch.amp.autocast(device_type=self.device.type, enabled=self._use_amp):  # type: ignore
+            current_q = self.online_net(obs_t).gather(1, acts_t.unsqueeze(1)).squeeze(1)
             with torch.no_grad():
-                # DDQN: online selects action, target evaluates it
                 best_acts = self.online_net(next_obs_t).argmax(dim=1)
-                next_q    = (
-                    self.target_net(next_obs_t)
-                    .gather(1, best_acts.unsqueeze(1))
-                    .squeeze(1)
-                )
+                next_q = self.target_net(next_obs_t).gather(1, best_acts.unsqueeze(1)).squeeze(1)
                 target_q = rews_t + self.gamma * next_q * (1.0 - dones_t)
 
-            td_errors = current_q - target_q                          # (B,)
-            # IS-weighted Huber loss
+            td_errors = current_q - target_q
             loss = (weights_t * F.huber_loss(current_q, target_q, reduction='none')).mean()
+        return loss, td_errors
 
+    def _apply_gradient_step(self, loss: torch.Tensor) -> None:
         scale = 1.0 / self.grad_accum_steps
         self._scaler.scale(loss * scale).backward()
         self._grad_accum_counter += 1
 
-        if self._grad_accum_counter >= self.grad_accum_steps:
-            self._scaler.unscale_(self.optimizer)
-            nn.utils.clip_grad_norm_(self.online_net.parameters(), max_norm=self.max_grad_norm)
-            self._scaler.step(self.optimizer)
-            self._scaler.update()
-            self.optimizer.zero_grad(set_to_none=True)   # faster than zero_grad()
-            self._grad_accum_counter = 0
+        if self._grad_accum_counter < self.grad_accum_steps:
+            return
 
+        self._scaler.unscale_(self.optimizer)
+        nn.utils.clip_grad_norm_(self.online_net.parameters(), max_norm=self.max_grad_norm)
+        self._scaler.step(self.optimizer)
+        self._scaler.update()
+        self.optimizer.zero_grad(set_to_none=True)
+        self._grad_accum_counter = 0
+
+    def _post_train_step(self, batch: Dict[str, np.ndarray], td_errors: torch.Tensor, env_steps: int) -> None:
         with torch.no_grad():
             new_priorities = td_errors.abs().cpu().numpy()
         self.replay_buffer.update_priorities(batch["indices"], new_priorities)
+
         self.train_steps += 1
         self.replay_buffer.update_beta(env_steps)
         self._decay_epsilon(env_steps)
@@ -428,6 +425,18 @@ class DDQNAgent:
             self.sync_inference_net()
 
         self._maybe_log_cuda_profile()
+
+    def train_step(self, env_steps: int = 0) -> Optional[float]:
+        if len(self.replay_buffer) < self.batch_size:
+            return None
+
+        batch = self.replay_buffer.sample_batch()
+        obs_t, next_obs_t, acts_t, rews_t, dones_t, weights_t = self._batch_to_tensors(batch)
+
+        self.online_net.train()
+        loss, td_errors = self._compute_loss(obs_t, acts_t, next_obs_t, rews_t, dones_t, weights_t)
+        self._apply_gradient_step(loss)
+        self._post_train_step(batch, td_errors, env_steps)
 
         return float(loss.item())
 
@@ -467,51 +476,61 @@ class DDQNAgent:
             path,
         )
 
+    def _resolve_checkpoint_dueling(self, checkpoint: Dict[str, Any]) -> bool:
+        ckpt_dueling = checkpoint.get("dueling")
+        if ckpt_dueling is not None:
+            return bool(ckpt_dueling)
+        keys = checkpoint["online_net"].keys()
+        return not any(k.startswith("head.") for k in keys)
+
+    def _needs_rebuild(self, online_base, ckpt_hl, ckpt_grid, ckpt_rows, ckpt_cols, ckpt_dueling):
+        return (
+            ckpt_hl != online_base.hidden_layers
+            or ckpt_grid != online_base.grid_size
+            or ckpt_rows != self.grid_rows
+            or ckpt_cols != self.grid_cols
+            or ckpt_dueling != online_base.dueling
+        )
+
+    def _rebuild_networks(self, ckpt_grid, ckpt_hl, ckpt_rows, ckpt_cols, ckpt_dueling):
+        self.online_net = QNetwork(
+            self.obs_dim, self.n_actions, ckpt_grid, ckpt_hl,
+            ckpt_rows, ckpt_cols, ckpt_dueling,
+        ).to(self.device)
+        self.target_net = QNetwork(
+            self.obs_dim, self.n_actions, ckpt_grid, ckpt_hl,
+            ckpt_rows, ckpt_cols, ckpt_dueling,
+        ).to(self.device)
+        self.inference_net = QNetwork(
+            self.obs_dim, self.n_actions, ckpt_grid, ckpt_hl,
+            ckpt_rows, ckpt_cols, ckpt_dueling,
+        ).to(self.device)
+        self.online_net, self.target_net, self.inference_net = self._maybe_compile_all(
+            self.online_net, self.target_net, self.inference_net
+        )
+        self.optimizer = self._build_optimizer(self.optimizer.param_groups[0]["lr"])
+
+    def _load_checkpoint_architecture(self, checkpoint: Dict[str, Any]) -> None:
+        online_base = self._unwrap_module(self.online_net)
+        if "hidden_layers" not in checkpoint:
+            return
+
+        ckpt_hl = checkpoint["hidden_layers"]
+        ckpt_grid = checkpoint.get("grid_size", online_base.grid_size)
+        ckpt_rows = checkpoint.get("grid_rows", self.grid_rows)
+        ckpt_cols = checkpoint.get("grid_cols", self.grid_cols)
+        ckpt_dueling = self._resolve_checkpoint_dueling(checkpoint)
+
+        if self._needs_rebuild(online_base, ckpt_hl, ckpt_grid, ckpt_rows, ckpt_cols, ckpt_dueling):
+            self._rebuild_networks(ckpt_grid, ckpt_hl, ckpt_rows, ckpt_cols, ckpt_dueling)
+
+        self.grid_rows = ckpt_rows
+        self.grid_cols = ckpt_cols
+        self.dueling = ckpt_dueling
+
     def load(self, path: str):
         checkpoint = torch.load(path, map_location=self.device, weights_only=False)
-        online_base = self._unwrap_module(self.online_net)
-        # If the checkpoint stores architecture, rebuild networks to match before loading weights.
-        if "hidden_layers" in checkpoint:
-            ckpt_hl = checkpoint["hidden_layers"]
-            ckpt_grid = checkpoint.get("grid_size", online_base.grid_size)
-            ckpt_rows = checkpoint.get("grid_rows", self.grid_rows)
-            ckpt_cols = checkpoint.get("grid_cols", self.grid_cols)
-            ckpt_dueling = checkpoint.get("dueling")
-            if ckpt_dueling is None:
-                keys = checkpoint["online_net"].keys()
-                if any(k.startswith("head.") for k in keys):
-                    ckpt_dueling = False
-                else:
-                    ckpt_dueling = True
-            ckpt_dueling = bool(ckpt_dueling)
-            needs_rebuild = (
-                ckpt_hl != online_base.hidden_layers
-                or ckpt_grid != online_base.grid_size
-                or ckpt_rows != self.grid_rows
-                or ckpt_cols != self.grid_cols
-                or ckpt_dueling != online_base.dueling
-            )
-            if needs_rebuild:
-                self.online_net = QNetwork(
-                    self.obs_dim, self.n_actions, ckpt_grid, ckpt_hl,
-                    ckpt_rows, ckpt_cols, ckpt_dueling,
-                ).to(self.device)
-                self.target_net = QNetwork(
-                    self.obs_dim, self.n_actions, ckpt_grid, ckpt_hl,
-                    ckpt_rows, ckpt_cols, ckpt_dueling,
-                ).to(self.device)
-                self.inference_net = QNetwork(
-                    self.obs_dim, self.n_actions, ckpt_grid, ckpt_hl,
-                    ckpt_rows, ckpt_cols, ckpt_dueling,
-                ).to(self.device)
-                self.online_net, self.target_net, self.inference_net = self._maybe_compile_all(
-                    self.online_net, self.target_net, self.inference_net
-                )
-                self.optimizer = self._build_optimizer(self.optimizer.param_groups[0]["lr"])
-                online_base = self._unwrap_module(self.online_net)
-            self.grid_rows = ckpt_rows
-            self.grid_cols = ckpt_cols
-            self.dueling = ckpt_dueling
+        self._load_checkpoint_architecture(checkpoint)
         self._load_state_dict_flexible(self.online_net, checkpoint["online_net"], "online_net")
         self._load_state_dict_flexible(self.target_net, checkpoint["target_net"], "target_net")
         self.sync_inference_net()

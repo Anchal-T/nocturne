@@ -1,7 +1,7 @@
 import argparse
 import os
 import sys
-from typing import Optional
+from typing import Any, Dict, Optional
 
 import imageio
 import numpy as np
@@ -10,6 +10,92 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 
 from cfgs.config import PROJECT_PATH, set_display_window
 from examples.drl_collision_avoidance.scenario_utils import load_config
+
+
+def _build_cpu_agent(cfg: Dict[str, Any], obs_dim: int, n_actions: int):
+    from examples.drl_collision_avoidance.dqn_modules.ddqn_agent import DDQNAgent, DDQNAgentConfig
+
+    grid_cfg = cfg.get('occupancy_grid', {})
+    grid_rows = int(grid_cfg['rows'])
+    grid_cols = int(grid_cfg['cols'])
+    grid_size = grid_rows * grid_cols
+    drl_cfg = cfg.get('drl', {})
+
+    agent_cfg = DDQNAgentConfig.from_drl_cfg(
+        drl_cfg,
+        grid_size=grid_size,
+        grid_rows=grid_rows,
+        grid_cols=grid_cols,
+        device='cpu',
+    )
+    return DDQNAgent.from_config(obs_dim=obs_dim, n_actions=n_actions, config=agent_cfg)
+
+
+def _open_writer(writers: Dict[str, Any], enabled: bool, stream_name: str, filename: str, video_fps: int) -> None:
+    if not enabled:
+        return
+    output_path = os.path.join(PROJECT_PATH, filename)
+    try:
+        writers[stream_name] = imageio.get_writer(output_path, fps=video_fps)
+        print(f'Recording {stream_name} stream to {output_path}')
+    except Exception as exc:
+        print(f'Failed to initialize {stream_name} writer: {exc}')
+
+
+def _append_frame(writers: Dict[str, Any], stream_name: str, frame: Optional[np.ndarray]) -> None:
+    if frame is None:
+        return
+    writer = writers.get(stream_name)
+    if writer is None:
+        return
+    try:
+        writer.append_data(frame)
+    except Exception as exc:
+        print(f'Failed to append frame to {stream_name}: {exc}')
+        try:
+            writer.close()
+        except Exception:
+            pass
+        writers.pop(stream_name, None)
+
+
+def _capture_step_frames(env, writers: Dict[str, Any]) -> None:
+    _append_frame(writers, 'main', env.base_env.render())
+    if 'ego' in writers:
+        _append_frame(writers, 'ego', env.base_env.render_ego())
+    if 'features' in writers:
+        _append_frame(writers, 'features', env.base_env.render_features())
+
+
+def _run_episode(env, agent, max_steps: int, writers: Dict[str, Any]):
+    state = env.reset()
+    total_reward = 0.0
+    collided = False
+    goal_achieved = False
+    episode_len = 0
+
+    for step in range(max_steps):
+        _capture_step_frames(env, writers)
+        action = agent.select_action(state)
+        state, reward, done, info = env.step(action)
+        total_reward += reward
+        collided = collided or info.get('collided', False)
+        goal_achieved = goal_achieved or info.get('goal_achieved', False)
+        episode_len = step + 1
+
+        if done:
+            _append_frame(writers, 'main', env.base_env.render())
+            break
+
+    return total_reward, collided, goal_achieved, episode_len
+
+
+def _close_writers(writers: Dict[str, Any]) -> None:
+    for stream_name, writer in list(writers.items()):
+        try:
+            writer.close()
+        except Exception as exc:
+            print(f'Failed to close {stream_name} writer: {exc}')
 
 
 def visualize(checkpoint_path: str, scenario_path: Optional[str] = None,
@@ -21,7 +107,6 @@ def visualize(checkpoint_path: str, scenario_path: Optional[str] = None,
     set_display_window()
 
     from examples.drl_collision_avoidance.collision_avoidance_env import CollisionAvoidanceEnv
-    from examples.drl_collision_avoidance.dqn_modules.ddqn_agent import DDQNAgent
 
     cfg = load_config(
         scenario_path=scenario_path,
@@ -34,95 +119,31 @@ def visualize(checkpoint_path: str, scenario_path: Optional[str] = None,
     env = CollisionAvoidanceEnv(cfg)
     obs_dim = env.observation_space.shape[0]
     n_actions = env.action_space.n
-    grid_cfg = cfg.get('occupancy_grid', {})
-    grid_rows = int(grid_cfg['rows'])
-    grid_cols = int(grid_cfg['cols'])
-    grid_size = grid_rows * grid_cols
-    drl_cfg = cfg.get('drl', {})
-
-    agent = DDQNAgent(
-        obs_dim=obs_dim,
-        n_actions=n_actions,
-        grid_size=grid_size,
-        hidden_layers=drl_cfg.get('hidden_layers'),
-        device='cpu',
-        grid_rows=grid_rows,
-        grid_cols=grid_cols,
-        dueling=bool(drl_cfg.get('dueling', True)),
-    )
+    agent = _build_cpu_agent(cfg, obs_dim, n_actions)
     agent.load(checkpoint_path)
     agent.epsilon = 0.0
 
-    writers = {}
-
-    def open_writer(enabled, stream_name, filename):
-        if not enabled:
-            return
-        output_path = os.path.join(PROJECT_PATH, filename)
-        try:
-            writers[stream_name] = imageio.get_writer(output_path, fps=video_fps)
-            print(f'Recording {stream_name} stream to {output_path}')
-        except Exception as exc:
-            # Continue without this stream so one codec/path issue does not
-            # cancel the full rollout capture.
-            print(f'Failed to initialize {stream_name} writer: {exc}')
-
-    def append_frame(stream_name, frame):
-        if frame is None:
-            return
-        writer = writers.get(stream_name)
-        if writer is None:
-            return
-        try:
-            writer.append_data(frame)
-        except Exception as exc:
-            # Drop only the failed stream; preserving the main video is usually
-            # more valuable than failing the whole run.
-            print(f'Failed to append frame to {stream_name}: {exc}')
-            try:
-                writer.close()
-            except Exception:
-                pass
-            writers.pop(stream_name, None)
+    writers: Dict[str, Any] = {}
 
     try:
-        open_writer(True, 'main', 'animation.mp4')
-        open_writer(record_ego, 'ego', 'animation_ego.mp4')
-        open_writer(record_features, 'features', 'animation_feature.mp4')
+        _open_writer(writers, True, 'main', 'animation.mp4', video_fps)
+        _open_writer(writers, record_ego, 'ego', 'animation_ego.mp4', video_fps)
+        _open_writer(writers, record_features, 'features', 'animation_feature.mp4', video_fps)
+        max_steps = cfg['drl']['max_episode_steps']
 
         for ep in range(1, num_episodes + 1):
-            state = env.reset()
-            total_reward = 0.0
-            collided = False
-            goal_achieved = False
-
-            max_steps = cfg['drl']['max_episode_steps']
-            for t in range(max_steps):
-                append_frame('main', env.base_env.render())
-                if 'ego' in writers:
-                    append_frame('ego', env.base_env.render_ego())
-                if 'features' in writers:
-                    append_frame('features', env.base_env.render_features())
-
-                action = agent.select_action(state)
-                state, reward, done, info = env.step(action)
-                total_reward += reward
-                collided = collided or info.get('collided', False)
-                goal_achieved = goal_achieved or info.get('goal_achieved', False)
-
-                if done:
-                    append_frame('main', env.base_env.render())
-                    break
+            total_reward, collided, goal_achieved, episode_len = _run_episode(
+                env=env,
+                agent=agent,
+                max_steps=max_steps,
+                writers=writers,
+            )
 
             status = 'GOAL' if goal_achieved else ('COLLISION' if collided else 'TIMEOUT')
-            print(f'Episode {ep:3d} | {status:9s} | reward={total_reward:8.2f} | len={t+1:4d}')
+            print(f'Episode {ep:3d} | {status:9s} | reward={total_reward:8.2f} | len={episode_len:4d}')
 
     finally:
-        for stream_name, writer in list(writers.items()):
-            try:
-                writer.close()
-            except Exception as exc:
-                print(f'Failed to close {stream_name} writer: {exc}')
+        _close_writers(writers)
 
     print(f'\nDone. Videos saved to {PROJECT_PATH}/')
 
