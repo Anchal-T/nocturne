@@ -3,12 +3,60 @@ from typing import List, Optional
 import torch
 import torch.nn as nn
 
+class ResidualBlock(nn.Module):
+    def __init__(self, in_channels: int, out_channels: int, stride: int = 1):
+        super().__init__()
+        self.conv1 = nn.Conv2d(
+            in_channels,
+            out_channels,
+            kernel_size=3,
+            stride=stride,
+            padding=1,
+            bias=False,
+        )
+        self.bn1 = nn.BatchNorm2d(out_channels)
+        self.conv2 = nn.Conv2d(
+            out_channels,
+            out_channels,
+            kernel_size=3,
+            stride=1,
+            padding=1,
+            bias=False,
+        )
+        self.bn2 = nn.BatchNorm2d(out_channels)
+        self.relu = nn.ReLU(inplace=True)
+
+        if stride != 1 or in_channels != out_channels:
+            self.shortcut = nn.Sequential(
+                nn.Conv2d(
+                    in_channels,
+                    out_channels,
+                    kernel_size=1,
+                    stride=stride,
+                    bias=False,
+                ),
+                nn.BatchNorm2d(out_channels),
+            )
+        else:
+            self.shortcut = nn.Identity()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        identity = self.shortcut(x)
+        out = self.conv1(x)
+        out = self.bn1(out)
+        out = self.relu(out)
+        out = self.conv2(out)
+        out = self.bn2(out)
+        out = out + identity
+        return self.relu(out)
+
 
 class QNetwork(nn.Module):
     """
     Q-network.
 
-    A CNN encoder processes the flattened occupancy-grid portion of the
+    A residual CNN encoder with BatchNorm processes the flattened occupancy-grid
+    portion of the
     observation; its output is concatenated with the remaining ego/path/TTZ
     features before passing through a small MLP head.
 
@@ -40,16 +88,18 @@ class QNetwork(nn.Module):
         self.dueling = dueling
         extra_dim = obs_dim - grid_size
 
-        # Build the conv backbone first so we can probe its output size with a
-        # dummy tensor rather than hard-coding 32 * 6 * 3 for a fixed 25×14 grid.
+        # Build the residual backbone first so we can probe its output size with
+        # a dummy tensor for arbitrary occupancy-grid shapes.
         conv_backbone = nn.Sequential(
             nn.Unflatten(1, (1, grid_rows, grid_cols)),
-            nn.Conv2d(1, 16, kernel_size=3, stride=1, padding=1),
-            nn.ReLU(),
-            nn.MaxPool2d(2),
-            nn.Conv2d(16, 32, kernel_size=3, stride=1, padding=1),
-            nn.ReLU(),
-            nn.MaxPool2d(2),
+            nn.Conv2d(1, 16, kernel_size=3, stride=1, padding=1, bias=False),
+            nn.BatchNorm2d(16),
+            nn.ReLU(inplace=True),
+            ResidualBlock(16, 16),
+            ResidualBlock(16, 32, stride=2),
+            ResidualBlock(32, 32),
+            ResidualBlock(32, 64, stride=2),
+            ResidualBlock(64, 64),
             nn.Flatten(),
         )
         with torch.no_grad():

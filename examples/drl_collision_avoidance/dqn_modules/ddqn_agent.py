@@ -9,6 +9,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 
+from .muon_optimizer import SingleDeviceMuon
 from .q_network import QNetwork
 from .replay_buffer import ReplayBuffer
 
@@ -39,6 +40,7 @@ class DDQNAgentConfig:
     compile_mode: str = "reduce-overhead"
     inference_sync_interval: int = 4
     profile_cuda: bool = False
+    use_muon : bool = True
 
     @classmethod
     def from_drl_cfg(
@@ -81,6 +83,7 @@ class DDQNAgentConfig:
             compile_mode=str(drl_cfg.get("compile_mode", defaults.compile_mode)),
             inference_sync_interval=drl_cfg.get("inference_sync_interval", defaults.inference_sync_interval),
             profile_cuda=bool(drl_cfg.get("profile_cuda", defaults.profile_cuda)),
+            use_muon=bool(drl_cfg.get("use_muon", defaults.use_muon)),
         )
 
 class DDQNAgent:
@@ -118,6 +121,7 @@ class DDQNAgent:
             compile_mode=config.compile_mode,
             inference_sync_interval=config.inference_sync_interval,
             profile_cuda=config.profile_cuda,
+            use_muon=config.use_muon,
         )
 
     def __init__(
@@ -148,6 +152,7 @@ class DDQNAgent:
         compile_mode: str = "reduce-overhead",
         inference_sync_interval: int = 4,
         profile_cuda: bool = False,
+        use_muon: bool = True,
     ):
         self.obs_dim = obs_dim
         self.n_actions = n_actions
@@ -158,13 +163,14 @@ class DDQNAgent:
         self.grid_rows = grid_rows
         self.grid_cols = grid_cols
         self.dueling = bool(dueling)
+        self.use_muon = bool(use_muon)
 
         self.epsilon = epsilon_start
         self.epsilon_start = epsilon_start
         self.epsilon_end = epsilon_end
         self.epsilon_decay_steps = epsilon_decay_steps
 
-        self._use_amp = self.device.type == "cuda"
+        self._use_amp = self.device.type == "cuda" and not self.use_muon
         self._scaler = torch.amp.GradScaler(enabled=self._use_amp)
         self.grad_accum_steps = max(1, int(grad_accum_steps))
         self.max_grad_norm = float(max_grad_norm)
@@ -197,12 +203,16 @@ class DDQNAgent:
         self.online_net, self.target_net, self.inference_net = self._maybe_compile_all(
             self.online_net, self.target_net, self.inference_net
         )
+        self.target_net.eval()
+        self.inference_net.eval()
 
         self.inference_lock = threading.Lock()
         self.sync_target()
         self.sync_inference_net()
 
-        self.optimizer = self._build_optimizer(lr)
+        self.optimizer = (
+            self.build_muon_optimizer(lr) if self.use_muon else self._build_optimizer(lr)
+        )
 
         self.replay_buffer = ReplayBuffer(
             obs_dim=obs_dim,
@@ -256,6 +266,64 @@ class DDQNAgent:
         except TypeError:
             kwargs.pop("fused", None)
             return optim.Adam(self.online_net.parameters(), **kwargs)
+
+    def build_muon_optimizer(self, lr: float):
+        """Hybrid: Muon on hidden Linear weights + AdamW on everything else."""
+        muon_params = []
+        adamw_params = []
+
+        for name, param in self.online_net.named_parameters():
+            if param.ndim == 2 and "weight" in name:  # hidden Linear layers
+                # Skip final output head (standard Muon practice)
+                if any(x in name for x in ["advantage_head.2", "value_head.2", "head.2"]):
+                    adamw_params.append(param)
+                else:
+                    muon_params.append(param)
+            else:
+                # Conv2d (4D), biases, BatchNorm, etc.
+                adamw_params.append(param)
+
+        if not muon_params:
+            return self._build_optimizer(lr)
+
+        muon_opt = SingleDeviceMuon(
+            muon_params,
+            lr=lr,
+            weight_decay=0.1,
+            momentum=0.95,
+        )
+
+        # AdamW for rest (slightly lower LR is common)
+        adamw_kwargs = {
+            "lr": lr * 0.5,
+            "weight_decay": 0.01,
+        }
+        if self.device.type == "cuda":
+            adamw_kwargs["fused"] = True
+        try:
+            adamw_opt = optim.AdamW(adamw_params, **adamw_kwargs)
+        except TypeError:
+            adamw_kwargs.pop("fused", None)
+            adamw_opt = optim.AdamW(adamw_params, **adamw_kwargs)
+
+        # Wrapper so your existing code (zero_grad, step, state_dict) works unchanged
+        class HybridOptimizer:
+            def __init__(self, m, a):
+                self.muon = m
+                self.adamw = a
+            def zero_grad(self, set_to_none=False):
+                self.muon.zero_grad(set_to_none=set_to_none)
+                self.adamw.zero_grad(set_to_none=set_to_none)
+            def step(self):
+                self.muon.step()
+                self.adamw.step()
+            def state_dict(self):
+                return {"muon": self.muon.state_dict(), "adamw": self.adamw.state_dict()}
+            def load_state_dict(self, state_dict):
+                self.muon.load_state_dict(state_dict["muon"])
+                self.adamw.load_state_dict(state_dict["adamw"])
+
+        return HybridOptimizer(muon_opt, adamw_opt)
 
     @staticmethod
     def _unwrap_module(module: nn.Module) -> nn.Module:
@@ -394,16 +462,23 @@ class DDQNAgent:
 
     def _apply_gradient_step(self, loss: torch.Tensor) -> None:
         scale = 1.0 / self.grad_accum_steps
-        self._scaler.scale(loss * scale).backward()
+        if self._use_amp:
+            self._scaler.scale(loss * scale).backward()
+        else:
+            (loss * scale).backward()
         self._grad_accum_counter += 1
 
         if self._grad_accum_counter < self.grad_accum_steps:
             return
 
-        self._scaler.unscale_(self.optimizer)
+        if self._use_amp:
+            self._scaler.unscale_(self.optimizer)
         nn.utils.clip_grad_norm_(self.online_net.parameters(), max_norm=self.max_grad_norm)
-        self._scaler.step(self.optimizer)
-        self._scaler.update()
+        if self._use_amp:
+            self._scaler.step(self.optimizer)
+            self._scaler.update()
+        else:
+            self.optimizer.step()
         self.optimizer.zero_grad(set_to_none=True)
         self._grad_accum_counter = 0
 
@@ -472,6 +547,7 @@ class DDQNAgent:
                 "grid_rows": self.grid_rows,
                 "grid_cols": self.grid_cols,
                 "dueling": online_base.dueling,
+                "use_muon": self.use_muon,
             },
             path,
         )
@@ -508,7 +584,16 @@ class DDQNAgent:
         self.online_net, self.target_net, self.inference_net = self._maybe_compile_all(
             self.online_net, self.target_net, self.inference_net
         )
-        self.optimizer = self._build_optimizer(self.optimizer.param_groups[0]["lr"])
+        self.target_net.eval()
+        self.inference_net.eval()
+        lr = self._current_optimizer_lr()
+        self.optimizer = self.build_muon_optimizer(lr) if self.use_muon else self._build_optimizer(lr)
+
+    def _current_optimizer_lr(self) -> float:
+        optimizer = self.optimizer
+        if hasattr(optimizer, "muon"):
+            return float(optimizer.muon.param_groups[0]["lr"])
+        return float(optimizer.param_groups[0]["lr"])
 
     def _load_checkpoint_architecture(self, checkpoint: Dict[str, Any]) -> None:
         online_base = self._unwrap_module(self.online_net)
@@ -530,10 +615,21 @@ class DDQNAgent:
 
     def load(self, path: str):
         checkpoint = torch.load(path, map_location=self.device, weights_only=False)
+        if "use_muon" in checkpoint:
+            ckpt_use_muon = bool(checkpoint["use_muon"])
+            if ckpt_use_muon != self.use_muon:
+                self.use_muon = ckpt_use_muon
+                lr = self._current_optimizer_lr()
+                self.optimizer = self.build_muon_optimizer(lr) if self.use_muon else self._build_optimizer(lr)
+                self._use_amp = self.device.type == "cuda" and not self.use_muon
+                self._scaler = torch.amp.GradScaler(enabled=self._use_amp)
         self._load_checkpoint_architecture(checkpoint)
         self._load_state_dict_flexible(self.online_net, checkpoint["online_net"], "online_net")
         self._load_state_dict_flexible(self.target_net, checkpoint["target_net"], "target_net")
         self.sync_inference_net()
-        self.optimizer.load_state_dict(checkpoint["optimizer"])
+        try:
+            self.optimizer.load_state_dict(checkpoint["optimizer"])
+        except Exception:
+            pass
         self.train_steps = checkpoint["train_steps"]
         self.epsilon = checkpoint["epsilon"]
