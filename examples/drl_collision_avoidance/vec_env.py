@@ -11,13 +11,11 @@ PPO ``env_wrappers.py``:
 """
 
 import os
-import ctypes
 import time
 import multiprocessing as mp
 import multiprocessing.shared_memory
 from multiprocessing import Process, Pipe
 from multiprocessing.connection import wait
-from multiprocessing.sharedctypes import RawArray
 
 import numpy as np
 

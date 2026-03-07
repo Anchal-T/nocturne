@@ -9,26 +9,8 @@ import numpy as np
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 
 from cfgs.config import PROJECT_PATH, set_display_window
+from examples.drl_collision_avoidance.agent_utils import build_cpu_agent
 from examples.drl_collision_avoidance.scenario_utils import load_config
-
-
-def _build_cpu_agent(cfg: Dict[str, Any], obs_dim: int, n_actions: int):
-    from examples.drl_collision_avoidance.dqn_modules.ddqn_agent import DDQNAgent, DDQNAgentConfig
-
-    grid_cfg = cfg.get('occupancy_grid', {})
-    grid_rows = int(grid_cfg['rows'])
-    grid_cols = int(grid_cfg['cols'])
-    grid_size = grid_rows * grid_cols
-    drl_cfg = cfg.get('drl', {})
-
-    agent_cfg = DDQNAgentConfig.from_drl_cfg(
-        drl_cfg,
-        grid_size=grid_size,
-        grid_rows=grid_rows,
-        grid_cols=grid_cols,
-        device='cpu',
-    )
-    return DDQNAgent.from_config(obs_dim=obs_dim, n_actions=n_actions, config=agent_cfg)
 
 
 def _open_writer(writers: Dict[str, Any], enabled: bool, stream_name: str, filename: str, video_fps: int) -> None:
@@ -119,7 +101,7 @@ def visualize(checkpoint_path: str, scenario_path: Optional[str] = None,
     env = CollisionAvoidanceEnv(cfg)
     obs_dim = env.observation_space.shape[0]
     n_actions = env.action_space.n
-    agent = _build_cpu_agent(cfg, obs_dim, n_actions)
+    agent = build_cpu_agent(cfg, obs_dim, n_actions)
     agent.load(checkpoint_path)
     agent.epsilon = 0.0
 

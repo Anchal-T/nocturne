@@ -65,6 +65,7 @@ drl:
   lr: 0.01
   gamma : 0.99
   dueling: true
+  noisy: true
   epsilon_start: 0.9
   epsilon_end: 0.05
   epsilon_decay_steps: 1000000
@@ -92,6 +93,11 @@ drl:
   grad_accum_steps: 1
   max_grad_norm: 10.0
   profile_cuda: true
+  profile_first_train_step: true
+  profile_wait_steps: 8
+  profile_warmup_steps: 4
+  profile_active_steps: 24
+  profile_trace_path: trace.json
   use_muon: true
   alpha: 0.6
   beta_start: 0.4

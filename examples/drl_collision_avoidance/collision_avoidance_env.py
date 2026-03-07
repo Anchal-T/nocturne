@@ -8,6 +8,22 @@ from gym.spaces import Box, Discrete
 import nocturne
 from nocturne.envs.base_env import BaseEnv
 
+# Sentinel for "no imminent conflict" — keeps reward logic simple while
+# still exposing finite values when interaction exists.
+NO_CONFLICT_TTZ = 999.0
+
+# Normalization divisors for observation features.
+SPEED_NORM = 30.0
+DIST_NORM = 100.0
+
+# Minimum distance below which TTZ is considered zero (contact).
+TTZ_CONTACT_DIST = 0.5
+
+# Maximum TTZ value exposed to the network (clips the sentinel).
+TTZ_OBS_CLIP = 20.0
+
+MAX_RESET_ATTEMPTS = 50
+
 
 class CollisionAvoidanceEnv(gym.Env):
     def __init__(self, cfg: Dict[str, Any]):
@@ -15,38 +31,36 @@ class CollisionAvoidanceEnv(gym.Env):
         cfg.setdefault("single_agent_mode", True)
         cfg.setdefault("max_num_vehicles", 1)
 
-        grid_cfg = cfg.get("occupancy_grid", {})
-        self.grid_rows = grid_cfg.get("rows", 25)
-        self.grid_cols = grid_cfg.get("cols", 14)
-        self.forward_dist = grid_cfg.get("forward_dist", 20.0)
-        self.backward_dist = grid_cfg.get("backward_dist", 5.0)
-        self.lateral_dist = grid_cfg.get("lateral_dist", 7.0)
-        self.vru_weight = grid_cfg.get("vru_weight", 2.0)
-        self.vehicle_weight = grid_cfg.get("vehicle_weight", 1.0)
-        self.road_edge_weight = grid_cfg.get("road_edge_weight", 3.0)
+        grid_cfg = cfg["occupancy_grid"]
+        self.grid_rows = grid_cfg["rows"]
+        self.grid_cols = grid_cfg["cols"]
+        self.forward_dist = grid_cfg["forward_dist"]
+        self.backward_dist = grid_cfg["backward_dist"]
+        self.lateral_dist = grid_cfg["lateral_dist"]
+        self.vru_weight = grid_cfg["vru_weight"]
+        self.vehicle_weight = grid_cfg["vehicle_weight"]
+        self.road_edge_weight = grid_cfg["road_edge_weight"]
 
-        rew_cfg = cfg.get("reward", {})
-        self.goal_bonus = rew_cfg.get("goal_bonus", 100.0)
-        self.collision_penalty = rew_cfg.get("collision_penalty", 0.0)
-        self.step_penalty = rew_cfg.get("step_penalty", 0.0)
-        self.progress_scale = rew_cfg.get("progress_scale", 0.5)
-        self.ttz_safe_threshold = rew_cfg.get("ttz_safe_threshold", 4.0)
-        self.ttz_reward_scale = rew_cfg.get("ttz_reward_scale", 0.5)
-        self.offroad_penalty = rew_cfg.get("offroad_penalty", 5.0)
-        self.heading_scale = rew_cfg.get("heading_scale", 0.3)
+        rew_cfg = cfg["reward"]
+        self.goal_bonus = rew_cfg["goal_bonus"]
+        self.collision_penalty = rew_cfg["collision_penalty"]
+        self.step_penalty = rew_cfg["step_penalty"]
+        self.progress_scale = rew_cfg["progress_scale"]
+        self.ttz_safe_threshold = rew_cfg["ttz_safe_threshold"]
+        self.ttz_reward_scale = rew_cfg["ttz_reward_scale"]
+        self.offroad_penalty = rew_cfg["offroad_penalty"]
+        self.heading_scale = rew_cfg["heading_scale"]
 
-        act_cfg = cfg.get("action_map", {})
-        throttle_levels = act_cfg.get("throttle_levels", [-4.0, 0.0, 2.0])
-        steer_levels = act_cfg.get("steer_levels", [-0.3, 0.0, 0.3])
-        self.action_table = []
-        for t in throttle_levels:
-            for s in steer_levels:
-                self.action_table.append((float(t), float(s)))
+        act_cfg = cfg["action_map"]
+        throttle_levels = act_cfg["throttle_levels"]
+        steer_levels = act_cfg["steer_levels"]
+        self.action_table = [
+            (float(t), float(s)) for t in throttle_levels for s in steer_levels
+        ]
 
         self.base_env = BaseEnv(cfg)
         self.cfg = cfg
 
-        # grid(rows*cols) + ego(heading, speed, heading_err, speed_err) + goal(dist, rel_heading) + ttz(3)
         obs_dim = self.grid_rows * self.grid_cols + 4 + 2 + 3
         self.observation_space = Box(
             low=-np.inf, high=np.inf, shape=(obs_dim,), dtype=np.float32
@@ -56,19 +70,16 @@ class CollisionAvoidanceEnv(gym.Env):
         self._ego_id: Optional[int] = None
         self._prev_goal_dist: float = 0.0
         self._step_count: int = 0
-        self._max_steps = cfg.get("drl", {}).get("max_episode_steps", 400)
-        self._ttz_vehicle: float = 999.0
-        self._ttz_pedestrian: float = 999.0
+        self._max_steps = cfg["drl"]["max_episode_steps"]
+        self._ttz_vehicle: float = NO_CONFLICT_TTZ
+        self._ttz_pedestrian: float = NO_CONFLICT_TTZ
 
     def reset(self) -> np.ndarray:
-        # BaseEnv reset can occasionally pick a controlled id that gets removed
-        # during startup filtering. Retry to avoid starting from an invalid ego.
-        obs_dict = {}
-        for _ in range(50):
+        for _ in range(MAX_RESET_ATTEMPTS):
             obs_dict = self.base_env.reset()
             if not obs_dict:
                 continue
-            ego_id = list(obs_dict.keys())[0]
+            ego_id = next(iter(obs_dict))
             vehicle_ids = {v.getID() for v in self.base_env.scenario.getVehicles()}
             if ego_id in vehicle_ids:
                 self._ego_id = ego_id
@@ -76,32 +87,27 @@ class CollisionAvoidanceEnv(gym.Env):
                 self._prev_goal_dist = self._get_goal_dist()
                 return self._build_observation()
 
-        if obs_dict:
-            self._ego_id = list(obs_dict.keys())[0]
-        else:
-            controlled = getattr(self.base_env, "controlled_vehicles", []) or []
-            if controlled:
-                self._ego_id = controlled[0].getID()
-            else:
-                scenario = getattr(self.base_env, "scenario", None)
-                scenario_vehicles = (
-                    scenario.getVehicles() if scenario is not None else []
-                )
-                if scenario_vehicles:
-                    self._ego_id = scenario_vehicles[0].getID()
-                else:
-                    raise RuntimeError(
-                        "Failed to initialize environment after 50 reset attempts."
-                    )
-
-        if self._ego_id is None:
+        ego_id = self._find_any_ego_id(obs_dict)
+        if ego_id is None:
             raise RuntimeError(
-                "Failed to initialize environment after 50 reset attempts."
+                f"Failed to initialize environment after {MAX_RESET_ATTEMPTS} reset attempts."
             )
-
+        self._ego_id = ego_id
         self._step_count = 0
         self._prev_goal_dist = self._get_goal_dist()
         return self._build_observation()
+
+    def _find_any_ego_id(self, obs_dict):
+        if obs_dict:
+            return next(iter(obs_dict))
+        controlled = getattr(self.base_env, "controlled_vehicles", []) or []
+        if controlled:
+            return controlled[0].getID()
+        scenario = getattr(self.base_env, "scenario", None)
+        vehicles = scenario.getVehicles() if scenario is not None else []
+        if vehicles:
+            return vehicles[0].getID()
+        return None
 
     def step(self, action: int) -> Tuple[np.ndarray, float, bool, Dict]:
         throttle, steer = self.action_table[action]
@@ -133,11 +139,13 @@ class CollisionAvoidanceEnv(gym.Env):
     def close(self):
         pass
 
+    # --- Observation Building ---
+
     def _build_observation(self) -> np.ndarray:
         ego_veh = self._get_ego_vehicle()
         if ego_veh is None:
-            self._ttz_vehicle = 999.0
-            self._ttz_pedestrian = 999.0
+            self._ttz_vehicle = NO_CONFLICT_TTZ
+            self._ttz_pedestrian = NO_CONFLICT_TTZ
             return np.zeros(self.observation_space.shape, dtype=np.float32)
 
         grid = self._build_occupancy_grid(ego_veh)
@@ -145,81 +153,47 @@ class CollisionAvoidanceEnv(gym.Env):
         target_info = self._get_target_info(ego_veh)
         ttz_info = self._get_ttz_info(ego_veh)
 
-        obs = np.concatenate([grid.flatten(), ego_state, target_info, ttz_info])
-        return obs.astype(np.float32)
+        return np.concatenate(
+            [grid.flatten(), ego_state, target_info, ttz_info]
+        ).astype(np.float32)
 
     def _build_occupancy_grid(self, ego_veh) -> np.ndarray:
         grid = np.zeros((self.grid_rows, self.grid_cols), dtype=np.float32)
-
         ego_pos = ego_veh.position
-        ego_heading = ego_veh.heading
-        cos_h, sin_h = math.cos(ego_heading), math.sin(ego_heading)
-
-        total_long = self.forward_dist + self.backward_dist
-        total_lat = 2.0 * self.lateral_dist
-        cell_long = total_long / self.grid_rows
-        cell_lat = total_lat / self.grid_cols
+        cos_h, sin_h = math.cos(ego_veh.heading), math.sin(ego_veh.heading)
+        cell_long = (self.forward_dist + self.backward_dist) / self.grid_rows
+        cell_lat = (2.0 * self.lateral_dist) / self.grid_cols
 
         for obj in self.base_env.scenario.getVehicles():
             if obj.getID() == self._ego_id:
                 continue
             self._project_to_grid(
-                obj,
-                ego_pos,
-                cos_h,
-                sin_h,
-                cell_long,
-                cell_lat,
-                grid,
-                self.vehicle_weight,
+                obj.position, ego_pos, cos_h, sin_h, cell_long, cell_lat, grid, self.vehicle_weight,
             )
 
         for obj in self.base_env.scenario.getPedestrians():
             self._project_to_grid(
-                obj, ego_pos, cos_h, sin_h, cell_long, cell_lat, grid, self.vru_weight
+                obj.position, ego_pos, cos_h, sin_h, cell_long, cell_lat, grid, self.vru_weight,
             )
 
         for obj in self.base_env.scenario.getCyclists():
             self._project_to_grid(
-                obj, ego_pos, cos_h, sin_h, cell_long, cell_lat, grid, self.vru_weight
+                obj.position, ego_pos, cos_h, sin_h, cell_long, cell_lat, grid, self.vru_weight,
             )
 
         for road_line in self.base_env.scenario.getRoadLines():
             if road_line.road_type == nocturne.RoadType.ROAD_EDGE:
                 for pt in road_line.geometry_points():
-                    self._project_point_to_grid(
-                        pt, ego_pos, cos_h, sin_h,
-                        cell_long, cell_lat, grid, self.road_edge_weight,
+                    self._project_to_grid(
+                        pt, ego_pos, cos_h, sin_h, cell_long, cell_lat, grid, self.road_edge_weight,
                     )
 
         return grid
 
-    def _project_to_grid(
-        self, obj, ego_pos, cos_h, sin_h, cell_long, cell_lat, grid, weight
-    ):
-        dx = obj.position.x - ego_pos.x
-        dy = obj.position.y - ego_pos.y
-        local_x = dx * cos_h + dy * sin_h
-        local_y = -dx * sin_h + dy * cos_h
-
-        if local_x < -self.backward_dist or local_x > self.forward_dist:
-            return
-        if abs(local_y) > self.lateral_dist:
-            return
-
-        row = int((self.forward_dist - local_x) / cell_long)
-        col = int((local_y + self.lateral_dist) / cell_lat)
-        # Row index is inverted so smaller row numbers correspond to space ahead
-        # of the ego vehicle (top of the grid in downstream visualizations).
-        row = max(0, min(row, self.grid_rows - 1))
-        col = max(0, min(col, self.grid_cols - 1))
-        grid[row, col] = max(grid[row, col], weight)
-
-    def _project_point_to_grid(
-        self, pt, ego_pos, cos_h, sin_h, cell_long, cell_lat, grid, weight
-    ):
-        dx = pt.x - ego_pos.x
-        dy = pt.y - ego_pos.y
+    def _project_to_grid(self, point, ego_pos, cos_h, sin_h, cell_long, cell_lat, grid, weight):
+        """Project a point (any object with .x/.y) into the ego-centric grid."""
+        dx = point.x - ego_pos.x
+        dy = point.y - ego_pos.y
         local_x = dx * cos_h + dy * sin_h
         local_y = -dx * sin_h + dy * cos_h
 
@@ -236,11 +210,11 @@ class CollisionAvoidanceEnv(gym.Env):
 
     def _get_ego_state(self, ego_veh) -> np.ndarray:
         heading_err = self._get_heading_error(ego_veh)
-        speed_err = (ego_veh.speed - ego_veh.target_speed) / 30.0
+        speed_err = (ego_veh.speed - ego_veh.target_speed) / SPEED_NORM
         return np.array(
             [
                 ego_veh.heading / math.pi,
-                ego_veh.speed / 30.0,
+                ego_veh.speed / SPEED_NORM,
                 heading_err / math.pi,
                 speed_err,
             ],
@@ -256,16 +230,14 @@ class CollisionAvoidanceEnv(gym.Env):
         angle_to_goal = math.atan2(dy, dx)
         rel_heading = angle_to_goal - ego_veh.heading
         rel_heading = (rel_heading + math.pi) % (2 * math.pi) - math.pi
-        return np.array([dist / 100.0, rel_heading / math.pi], dtype=np.float32)
+        return np.array([dist / DIST_NORM, rel_heading / math.pi], dtype=np.float32)
 
     def _get_ttz_info(self, ego_veh) -> np.ndarray:
         ego_pos = ego_veh.position
         ego_speed = max(ego_veh.speed, 0.1)
 
-        # 999.0 is a sentinel for "no imminent conflict" that keeps reward logic
-        # simple while still exposing finite values when interaction exists.
-        min_ttz_veh = 999.0
-        min_ttz_ped = 999.0
+        min_ttz_veh = NO_CONFLICT_TTZ
+        min_ttz_ped = NO_CONFLICT_TTZ
 
         for obj in self.base_env.scenario.getVehicles():
             if obj.getID() == self._ego_id:
@@ -284,14 +256,11 @@ class CollisionAvoidanceEnv(gym.Env):
         self._ttz_vehicle = min_ttz_veh
         self._ttz_pedestrian = min_ttz_ped
 
-        ttz_diff = min_ttz_veh - min_ttz_ped
-        # Clip observation features so the network input scale is bounded even
-        # when there are no nearby actors (sentinel stays in info/reward attrs).
         return np.array(
             [
-                min(min_ttz_veh, 20.0),
-                min(min_ttz_ped, 20.0),
-                np.clip(ttz_diff, -20.0, 20.0),
+                min(min_ttz_veh, TTZ_OBS_CLIP),
+                min(min_ttz_ped, TTZ_OBS_CLIP),
+                np.clip(min_ttz_veh - min_ttz_ped, -TTZ_OBS_CLIP, TTZ_OBS_CLIP),
             ],
             dtype=np.float32,
         )
@@ -300,9 +269,8 @@ class CollisionAvoidanceEnv(gym.Env):
         dx = obj.position.x - ego_pos.x
         dy = obj.position.y - ego_pos.y
         dist = math.sqrt(dx * dx + dy * dy)
-        if dist < 0.5:
+        if dist < TTZ_CONTACT_DIST:
             return 0.0
-        # Positive closing speed means the relative motion is reducing distance.
         closing_speed = ego_speed * (
             math.cos(ego_heading) * dx / dist + math.sin(ego_heading) * dy / dist
         )
@@ -313,7 +281,7 @@ class CollisionAvoidanceEnv(gym.Env):
                 math.cos(obj_heading) * dx / dist + math.sin(obj_heading) * dy / dist
             )
         if closing_speed <= 0.01:
-            return 999.0
+            return NO_CONFLICT_TTZ
         return dist / closing_speed
 
     def _get_heading_error(self, ego_veh) -> float:
@@ -322,6 +290,8 @@ class CollisionAvoidanceEnv(gym.Env):
         angle_to_goal = math.atan2(goal.y - pos.y, goal.x - pos.x)
         err = angle_to_goal - ego_veh.heading
         return (err + math.pi) % (2 * math.pi) - math.pi
+
+    # --- Reward ---
 
     def _compute_reward(self, rew_dict, info_dict, done_dict) -> float:
         reward = 0.0
@@ -367,9 +337,7 @@ class CollisionAvoidanceEnv(gym.Env):
         pos = ego_veh.position
         return math.sqrt((goal.x - pos.x) ** 2 + (goal.y - pos.y) ** 2)
 
-    def _get_ego_vehicle(
-        self,
-    ):
+    def _get_ego_vehicle(self):
         for v in self.base_env.controlled_vehicles:
             if v.getID() == self._ego_id:
                 return v

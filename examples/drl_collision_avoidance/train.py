@@ -197,12 +197,12 @@ class BackgroundLearner:
         self._thread.join(timeout=5.0)
 
 def _resolve_training_device(cfg_dict, drl_cfg):
-    device = cfg_dict.get('device', 'cpu')
+    device = cfg_dict['device']
     if device.startswith('cuda') and not torch.cuda.is_available():
         device = 'cpu'
     if device.startswith('cuda'):
-        use_tf32 = bool(drl_cfg.get('use_tf32', True))
-        cudnn_benchmark = bool(drl_cfg.get('cudnn_benchmark', True))
+        use_tf32 = bool(drl_cfg['use_tf32'])
+        cudnn_benchmark = bool(drl_cfg['cudnn_benchmark'])
         if hasattr(torch, "set_float32_matmul_precision"):
             torch.set_float32_matmul_precision("high")
         torch.backends.cuda.matmul.allow_tf32 = use_tf32
@@ -234,9 +234,9 @@ def _build_vec_env(cfg_dict, num_envs, vec_env_mode):
 def _build_agent(cfg_dict, drl_cfg, obs_dim, n_actions):
     from examples.drl_collision_avoidance.dqn_modules.ddqn_agent import DDQNAgent, DDQNAgentConfig
 
-    grid_cfg = cfg_dict.get('occupancy_grid', {})
-    grid_rows = grid_cfg.get('rows', 25)
-    grid_cols = grid_cfg.get('cols', 14)
+    grid_cfg = cfg_dict['occupancy_grid']
+    grid_rows = grid_cfg['rows']
+    grid_cols = grid_cfg['cols']
     grid_size = grid_rows * grid_cols
     device = _resolve_training_device(cfg_dict, drl_cfg)
 
@@ -247,7 +247,7 @@ def _build_agent(cfg_dict, drl_cfg, obs_dim, n_actions):
         grid_cols=grid_cols,
         device=device,
     )
-    return DDQNAgent.from_config(obs_dim=obs_dim, n_actions=n_actions, config=agent_cfg)
+    return DDQNAgent(obs_dim=obs_dim, n_actions=n_actions, config=agent_cfg)
 
 
 def _print_training_header(num_workers, num_envs_per_worker, num_envs, vec_env_cls, train_in_bg, obs_dim, n_actions):
@@ -508,10 +508,10 @@ def main(cfg):
     from examples.drl_collision_avoidance.scenario_utils import apply_scenario_path_defaults
 
     cfg_dict = apply_scenario_path_defaults(cfg_dict, default_split='train')
-    drl_cfg = cfg_dict.get('drl', {})
+    drl_cfg = cfg_dict['drl']
     num_workers, num_envs_per_worker, num_envs = _resolve_parallel_env_config(drl_cfg)
-    vec_env_mode = str(drl_cfg.get('vec_env_mode', 'async')).lower()
-    train_in_bg = drl_cfg.get('train_in_background', True)
+    vec_env_mode = str(drl_cfg['vec_env_mode']).lower()
+    train_in_bg = drl_cfg['train_in_background']
 
     vec_env, vec_env_cls = _build_vec_env(cfg_dict, num_envs, vec_env_mode)
     obs_dim = vec_env.observation_space.shape[0]
@@ -533,7 +533,7 @@ def main(cfg):
     min_replay = drl_cfg['min_replay_size']
     log_interval = drl_cfg['log_interval']
     save_interval = drl_cfg['save_interval']
-    checkpoint_dir = drl_cfg.get('checkpoint_dir', 'checkpoints/drl_collision_avoidance')
+    checkpoint_dir = drl_cfg['checkpoint_dir']
     os.makedirs(checkpoint_dir, exist_ok=True)
 
     writer = _make_writer(checkpoint_dir)
@@ -580,6 +580,7 @@ def main(cfg):
                   f'{learner.buffer_size} transitions in buffer')
             learner.stop()
 
+        agent.finalize_profiling()
         vec_env.close()
 
         final_path = os.path.join(checkpoint_dir, 'ddqn_final.pth')

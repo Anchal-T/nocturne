@@ -3,25 +3,20 @@ from typing import List, Optional
 import torch
 import torch.nn as nn
 
+from .noisy_layer import NoisyLinear
+
+
 class ResidualBlock(nn.Module):
     def __init__(self, in_channels: int, out_channels: int, stride: int = 1):
         super().__init__()
         self.conv1 = nn.Conv2d(
-            in_channels,
-            out_channels,
-            kernel_size=3,
-            stride=stride,
-            padding=1,
-            bias=False,
+            in_channels, out_channels,
+            kernel_size=3, stride=stride, padding=1, bias=False,
         )
         self.bn1 = nn.BatchNorm2d(out_channels)
         self.conv2 = nn.Conv2d(
-            out_channels,
-            out_channels,
-            kernel_size=3,
-            stride=1,
-            padding=1,
-            bias=False,
+            out_channels, out_channels,
+            kernel_size=3, stride=1, padding=1, bias=False,
         )
         self.bn2 = nn.BatchNorm2d(out_channels)
         self.relu = nn.ReLU(inplace=True)
@@ -29,11 +24,8 @@ class ResidualBlock(nn.Module):
         if stride != 1 or in_channels != out_channels:
             self.shortcut = nn.Sequential(
                 nn.Conv2d(
-                    in_channels,
-                    out_channels,
-                    kernel_size=1,
-                    stride=stride,
-                    bias=False,
+                    in_channels, out_channels,
+                    kernel_size=1, stride=stride, bias=False,
                 ),
                 nn.BatchNorm2d(out_channels),
             )
@@ -42,29 +34,52 @@ class ResidualBlock(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         identity = self.shortcut(x)
-        out = self.conv1(x)
-        out = self.bn1(out)
-        out = self.relu(out)
-        out = self.conv2(out)
-        out = self.bn2(out)
-        out = out + identity
-        return self.relu(out)
+        out = self.relu(self.bn1(self.conv1(x)))
+        out = self.bn2(self.conv2(out))
+        return self.relu(out + identity)
+
+
+def _parse_hidden_layers(
+    hidden_layers: Optional[List[int]],
+    encoder_dim: Optional[int],
+    head_dim: Optional[int],
+) -> tuple:
+    """Resolve encoder_dim and head_dim from either explicit args or legacy list.
+
+    Legacy format was a 4-element list [unused, encoder_dim, unused, head_dim].
+    New code should pass encoder_dim and head_dim directly.
+    """
+    if encoder_dim is not None and head_dim is not None:
+        return encoder_dim, head_dim
+
+    hl = hidden_layers or [128, 128, 128, 32]
+    if len(hl) != 4:
+        raise ValueError(
+            f"hidden_layers must have 4 elements (legacy format), got {len(hl)}. "
+            "Prefer using encoder_dim and head_dim directly."
+        )
+    return hl[1], hl[3]
 
 
 class QNetwork(nn.Module):
-    """
-    Q-network.
+    """Q-network with residual CNN encoder and NoisyNet dueling heads.
 
-    A residual CNN encoder with BatchNorm processes the flattened occupancy-grid
-    portion of the
-    observation; its output is concatenated with the remaining ego/path/TTZ
-    features before passing through a small MLP head.
+    The occupancy-grid portion of the observation is processed by a residual
+    CNN encoder; its output is concatenated with the remaining ego/path/TTZ
+    features before passing through NoisyLinear dueling streams.
 
-        ``hidden_layers`` is a 4-element list to preserve config compatibility:
-      [0] unused
-      [1] encoder output width  (Linear after the conv stack)
-      [2] unused
-            [3] stream hidden width
+    Args:
+        obs_dim: Total observation dimension (grid + extra features).
+        n_actions: Number of discrete actions.
+        grid_size: Number of elements in the flattened occupancy grid.
+        grid_rows: Height of the occupancy grid.
+        grid_cols: Width of the occupancy grid.
+        dueling: Whether to use dueling architecture.
+        encoder_dim: Output width of the CNN encoder's final linear layer.
+        head_dim: Hidden width of the advantage/value stream heads.
+        hidden_layers: Legacy 4-element list [_, encoder_dim, _, head_dim].
+            Ignored when encoder_dim and head_dim are provided explicitly.
+        noisy: Whether to use NoisyLinear in the heads for exploration.
     """
 
     def __init__(
@@ -76,20 +91,24 @@ class QNetwork(nn.Module):
         grid_rows: int = 25,
         grid_cols: int = 14,
         dueling: bool = True,
+        encoder_dim: Optional[int] = None,
+        head_dim: Optional[int] = None,
+        noisy: bool = True,
     ):
         super().__init__()
-        hidden_layers = hidden_layers or [128, 128, 128, 32]
-        assert len(hidden_layers) == 4
+        enc_dim, hd_dim = _parse_hidden_layers(hidden_layers, encoder_dim, head_dim)
 
-        self.hidden_layers = hidden_layers
+        # Store for checkpoint compatibility
+        self.hidden_layers = [enc_dim, enc_dim, enc_dim, hd_dim]
         self.grid_size = grid_size
         self.grid_rows = grid_rows
         self.grid_cols = grid_cols
         self.dueling = dueling
-        extra_dim = obs_dim - grid_size
+        self.noisy = noisy
 
-        # Build the residual backbone first so we can probe its output size with
-        # a dummy tensor for arbitrary occupancy-grid shapes.
+        extra_dim = obs_dim - grid_size
+        linear_cls = NoisyLinear if noisy else nn.Linear
+
         conv_backbone = nn.Sequential(
             nn.Unflatten(1, (1, grid_rows, grid_cols)),
             nn.Conv2d(1, 16, kernel_size=3, stride=1, padding=1, bias=False),
@@ -107,36 +126,40 @@ class QNetwork(nn.Module):
 
         self.grid_encoder = nn.Sequential(
             *conv_backbone,
-            nn.Linear(flat_dim, hidden_layers[1]),
+            nn.Linear(flat_dim, enc_dim),
             nn.ReLU(),
         )
 
-        head_input_dim = hidden_layers[1] + extra_dim
+        head_input_dim = enc_dim + extra_dim
         if self.dueling:
             self.advantage_head = nn.Sequential(
-                nn.Linear(head_input_dim, hidden_layers[3]),
+                linear_cls(head_input_dim, hd_dim),
                 nn.ReLU(),
-                nn.Linear(hidden_layers[3], n_actions),
+                linear_cls(hd_dim, n_actions),
             )
             self.value_head = nn.Sequential(
-                nn.Linear(head_input_dim, hidden_layers[3]),
+                linear_cls(head_input_dim, hd_dim),
                 nn.ReLU(),
-                nn.Linear(hidden_layers[3], 1),
+                linear_cls(hd_dim, 1),
             )
         else:
             self.head = nn.Sequential(
-                nn.Linear(head_input_dim, hidden_layers[3]),
+                linear_cls(head_input_dim, hd_dim),
                 nn.ReLU(),
-                nn.Linear(hidden_layers[3], n_actions),
+                linear_cls(hd_dim, n_actions),
             )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        grid_input = x[:, : self.grid_size]
-        extra_input = x[:, self.grid_size :]
-        grid_features = self.grid_encoder(grid_input)
-        combined = torch.cat([grid_features, extra_input], dim=1)
+        grid_features = self.grid_encoder(x[:, :self.grid_size])
+        combined = torch.cat([grid_features, x[:, self.grid_size:]], dim=1)
         if self.dueling:
             advantage = self.advantage_head(combined)
             value = self.value_head(combined)
             return value + advantage - advantage.mean(dim=-1, keepdim=True)
         return self.head(combined)
+
+    def reset_noise(self) -> None:
+        """Reset noise in all NoisyLinear layers (call before each forward in training)."""
+        for module in self.modules():
+            if isinstance(module, NoisyLinear):
+                module.reset_noise()

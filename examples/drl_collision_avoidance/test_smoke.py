@@ -7,11 +7,12 @@ from cfgs.config import PROJECT_PATH, set_display_window
 
 
 def test_ddqn_forward_and_train():
-    from examples.drl_collision_avoidance.dqn_modules.ddqn_agent import DDQNAgent
+    from examples.drl_collision_avoidance.dqn_modules.ddqn_agent import DDQNAgent, DDQNAgentConfig
     import torch
     import numpy as np
 
-    agent = DDQNAgent(obs_dim=359, n_actions=15, grid_size=350, device='cpu')
+    config = DDQNAgentConfig(grid_size=350, grid_rows=25, grid_cols=14, device='cpu', batch_size=64)
+    agent = DDQNAgent(obs_dim=359, n_actions=15, config=config)
     state = torch.randn(1, 359)
     q = agent.online_net(state)
     assert q.shape == (1, 15), f'Expected (1,15) got {q.shape}'

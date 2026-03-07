@@ -7,7 +7,7 @@ from .sum_tree import SumTree
 
 
 class ReplayBuffer:
-    """Numpy replay buffer with optional n-step return aggregation."""
+    """Numpy replay buffer with Prioritized Experience Replay and optional n-step returns."""
 
     def __init__(
         self,
@@ -39,22 +39,19 @@ class ReplayBuffer:
         self.n_step_buffer: Deque[Tuple[np.ndarray, int, float, np.ndarray, bool]] = deque(
             maxlen=self.n_step
         )
-        self.sum_tree = SumTree(capacity=size)  
+        self.sum_tree = SumTree(capacity=size)
         self.alpha = alpha
         self.beta = beta_start
         self.beta_start = beta_start
         self.beta_frames = beta_frames
         self.epsilon = max(float(epsilon), 1e-8)
         self.max_priority = 1.0
-        self.max_priority_cap = 1e6
+
+        MAX_PRIORITY_CAP = 1e6
+        self._max_priority_cap = MAX_PRIORITY_CAP
 
     def _insert_transition(
-        self,
-        obs: np.ndarray,
-        act: int,
-        rew: float,
-        next_obs: np.ndarray,
-        done: bool,
+        self, obs: np.ndarray, act: int, rew: float, next_obs: np.ndarray, done: bool,
     ) -> None:
         self.obs_buf[self.ptr] = obs
         self.next_obs_buf[self.ptr] = next_obs
@@ -65,13 +62,8 @@ class ReplayBuffer:
         self.size = min(self.size + 1, self.max_size)
 
     def store(
-        self,
-        obs: np.ndarray,
-        act: int,
-        rew: float,
-        next_obs: np.ndarray,
-        done: bool,
-    ):
+        self, obs: np.ndarray, act: int, rew: float, next_obs: np.ndarray, done: bool,
+    ) -> None:
         transition = (
             np.asarray(obs, dtype=np.float32),
             int(act),
@@ -82,24 +74,18 @@ class ReplayBuffer:
         self.n_step_buffer.append(transition)
 
         if len(self.n_step_buffer) < self.n_step:
-            return ()
+            return
 
         n_rew, n_next_obs, n_done = self._get_n_step_info(self.n_step_buffer, self.gamma)
         first_obs, first_act = self.n_step_buffer[0][:2]
         self._insert_transition(first_obs, first_act, n_rew, n_next_obs, n_done)
-
         self.sum_tree.add(self.max_priority)
-
-        return self.n_step_buffer[0]
 
     def store_batch(self, states, actions, rewards, next_states, dones) -> None:
         for state, action, reward, next_state, done in zip(
             states, actions, rewards, next_states, dones
         ):
             self.store(state, action, reward, next_state, done)
-
-    def push(self, obs, act, rew, next_obs, done):
-        return self.store(obs, act, rew, next_obs, done)
 
     def sample_batch(self, batch_size: int = None) -> Dict[str, np.ndarray]:
         bs = int(batch_size) if batch_size is not None else self.batch_size
@@ -111,7 +97,7 @@ class ReplayBuffer:
         total_priority = float(self.sum_tree.total())
         if not np.isfinite(total_priority) or total_priority <= 0.0:
             indices = np.random.choice(self.size, size=bs, replace=False)
-            batch = self.sample_batch_from_idxs(indices)
+            batch = self._get_batch_from_indices(indices)
             batch["indices"] = np.asarray(indices, dtype=np.int64)
             batch["weights"] = np.ones(bs, dtype=np.float32)
             return batch
@@ -147,37 +133,25 @@ class ReplayBuffer:
         weights = np.nan_to_num(weights, nan=1.0, posinf=1.0, neginf=1.0)
 
         indices = np.array(data_indices, dtype=np.int64)
-        batch = self.sample_batch_from_idxs(indices)
-
-        batch["indices"] = indices          # for later priority update
-        batch["weights"] = weights          # importance-sampling weights
+        batch = self._get_batch_from_indices(indices)
+        batch["indices"] = indices
+        batch["weights"] = weights
         return batch
 
     def update_priorities(self, indices: np.ndarray, td_errors: np.ndarray):
-        """Call this after every train_step with absolute TD errors."""
         if len(indices) == 0:
             return
 
-        priorities = np.abs(np.asarray(td_errors, dtype=np.float32)) + self.epsilon
-        priorities = np.nan_to_num(
-            priorities,
-            nan=self.max_priority,
-            posinf=self.max_priority_cap,
-            neginf=self.epsilon,
+        priorities = (np.abs(np.asarray(td_errors, dtype=np.float32)) + self.epsilon) ** self.alpha
+        priorities = np.clip(
+            np.nan_to_num(priorities, nan=self.max_priority, posinf=self._max_priority_cap, neginf=self.epsilon),
+            self.epsilon,
+            self._max_priority_cap,
         )
-        priorities = np.clip(priorities, self.epsilon, self.max_priority_cap) ** self.alpha
-        priorities = np.nan_to_num(
-            priorities,
-            nan=self.max_priority,
-            posinf=self.max_priority_cap,
-            neginf=self.epsilon,
-        )
-        priorities = np.clip(priorities, self.epsilon, self.max_priority_cap)
 
         max_prio = float(np.max(priorities))
-        if not np.isfinite(max_prio) or max_prio <= 0.0:
-            max_prio = self.epsilon
-        self.max_priority = min(max(self.max_priority, max_prio), self.max_priority_cap)
+        if np.isfinite(max_prio) and max_prio > 0.0:
+            self.max_priority = min(max(self.max_priority, max_prio), self._max_priority_cap)
 
         for idx, prio in zip(indices, priorities):
             if idx < 0 or idx >= self.sum_tree.capacity:
@@ -186,23 +160,12 @@ class ReplayBuffer:
             self.sum_tree.update(tree_idx, float(prio))
 
     def update_beta(self, env_steps: int):
-        """Anneal beta (call every train_step)."""
         if self.beta_frames <= 0:
             return
         fraction = min(1.0, env_steps / self.beta_frames)
-        self.beta = self.beta_start + fraction * (1.0 - self.beta_start)    
+        self.beta = self.beta_start + fraction * (1.0 - self.beta_start)
 
-    def sample(self, batch_size: int = None):
-        batch = self.sample_batch(batch_size=batch_size)
-        return (
-            batch["obs"],
-            batch["acts"],
-            batch["rews"],
-            batch["next_obs"],
-            batch["done"],
-        )
-
-    def sample_batch_from_idxs(self, indices: np.ndarray) -> Dict[str, np.ndarray]:
+    def _get_batch_from_indices(self, indices: np.ndarray) -> Dict[str, np.ndarray]:
         return {
             "obs": self.obs_buf[indices],
             "next_obs": self.next_obs_buf[indices],
@@ -211,16 +174,16 @@ class ReplayBuffer:
             "done": self.done_buf[indices],
         }
 
+    @staticmethod
     def _get_n_step_info(
-        self, n_step_buffer: Deque[Tuple[np.ndarray, int, float, np.ndarray, bool]], gamma: float
+        n_step_buffer: Deque[Tuple[np.ndarray, int, float, np.ndarray, bool]],
+        gamma: float,
     ) -> Tuple[float, np.ndarray, bool]:
         rew, next_obs, done = n_step_buffer[-1][-3:]
-
         for transition in reversed(list(n_step_buffer)[:-1]):
             r, n_o, d = transition[-3:]
             rew = r + gamma * rew * (1 - d)
             next_obs, done = (n_o, d) if d else (next_obs, done)
-
         return float(rew), np.asarray(next_obs, dtype=np.float32), bool(done)
 
     def __len__(self) -> int:

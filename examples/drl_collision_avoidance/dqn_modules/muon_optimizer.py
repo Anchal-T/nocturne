@@ -1,9 +1,15 @@
 import torch
 
 
-def zeropower_via_newtonschulz5(G, steps: int = 5):
+# Newton-Schulz iteration coefficients for computing the zero-power
+# (orthogonal projection) of a matrix. These are the optimal 5th-order
+# polynomial coefficients from the Muon optimizer paper.
+_NS_COEFFICIENTS = (3.4445, -4.7750, 2.0315)
+
+
+def zeropower_via_newtonschulz5(G: torch.Tensor, steps: int = 5) -> torch.Tensor:
     assert G.ndim >= 2
-    a, b, c = (3.4445, -4.7750, 2.0315)
+    a, b, c = _NS_COEFFICIENTS
     X = G.bfloat16()
     if G.size(-2) > G.size(-1):
         X = X.mT
@@ -19,6 +25,7 @@ def zeropower_via_newtonschulz5(G, steps: int = 5):
 
 class SingleDeviceMuon(torch.optim.Optimizer):
     """Official Muon for single-GPU (no distributed)."""
+
     def __init__(self, params, lr=0.02, weight_decay=0.0, momentum=0.95):
         defaults = dict(lr=lr, weight_decay=weight_decay, momentum=momentum)
         super().__init__(params, defaults)
@@ -41,9 +48,10 @@ class SingleDeviceMuon(torch.optim.Optimizer):
                 g = p.grad
                 momentum_buf = state["momentum_buffer"]
                 momentum_buf.lerp_(g, 1 - group["momentum"])
-                update = g.lerp_(momentum_buf, group["momentum"]) if True else momentum_buf   # nesterov=True
+                # Nesterov momentum: interpolate current gradient toward the buffer
+                update = g.lerp_(momentum_buf, group["momentum"])
 
-                if update.ndim == 4:  # conv case (rare here)
+                if update.ndim == 4:
                     update = update.view(len(update), -1)
                 update = zeropower_via_newtonschulz5(update)
                 update *= max(1, update.size(-2) / update.size(-1)) ** 0.5
