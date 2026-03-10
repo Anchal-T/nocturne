@@ -120,7 +120,7 @@ class BackgroundLearner:
     them into the replay buffer + runs training steps.
     """
 
-    def __init__(self, agent, train_freq, min_replay, maxsize=128):
+    def __init__(self, agent, train_freq, min_replay, maxsize=32968):
         self.agent = agent
         self.train_freq = max(1, int(train_freq))
         self.min_replay = min_replay
@@ -235,14 +235,16 @@ def _build_agent(cfg_dict, drl_cfg, obs_dim, n_actions):
     from examples.drl_collision_avoidance.dqn_modules.ddqn_agent import DDQNAgent, DDQNAgentConfig
 
     grid_cfg = cfg_dict['occupancy_grid']
+    grid_channels = 3
     grid_rows = grid_cfg['rows']
     grid_cols = grid_cfg['cols']
-    grid_size = grid_rows * grid_cols
+    grid_size = grid_channels * grid_rows * grid_cols
     device = _resolve_training_device(cfg_dict, drl_cfg)
 
     agent_cfg = DDQNAgentConfig.from_drl_cfg(
         drl_cfg,
         grid_size=grid_size,
+        grid_channels=grid_channels,
         grid_rows=grid_rows,
         grid_cols=grid_cols,
         device=device,

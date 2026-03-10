@@ -18,10 +18,12 @@ from .replay_buffer import ReplayBuffer
 @dataclass
 class DDQNAgentConfig:
     grid_size: int
+    grid_channels: int
     grid_rows: int
     grid_cols: int
     device: str
     hidden_layers: Optional[List[int]] = None
+    n_step: int = 3
     lr: float = 0.01
     gamma: float = 0.9
     epsilon_start: float = 1.0
@@ -55,16 +57,19 @@ class DDQNAgentConfig:
         drl_cfg: Dict,
         *,
         grid_size: int,
+        grid_channels: int,
         grid_rows: int,
         grid_cols: int,
         device: str,
     ) -> "DDQNAgentConfig":
         return cls(
             grid_size=grid_size,
+            grid_channels=grid_channels,
             grid_rows=grid_rows,
             grid_cols=grid_cols,
             device=device,
             hidden_layers=drl_cfg["hidden_layers"],
+            n_step=int(drl_cfg.get("n_step", 3)),
             lr=drl_cfg["lr"],
             gamma=drl_cfg["gamma"],
             epsilon_start=drl_cfg["epsilon_start"],
@@ -105,6 +110,7 @@ class DDQNAgent:
         self.target_update_freq = config.target_update_freq
         self.grid_rows = config.grid_rows
         self.grid_cols = config.grid_cols
+        self.grid_channels = config.grid_channels
         self.dueling = bool(config.dueling)
         self.noisy = bool(config.noisy)
         self.use_muon = bool(config.use_muon)
@@ -151,7 +157,7 @@ class DDQNAgent:
             obs_dim=obs_dim,
             size=config.replay_buffer_size,
             batch_size=config.batch_size,
-            n_step=1,
+            n_step=config.n_step,
             gamma=config.gamma,
             alpha=config.alpha,
             beta_start=config.beta_start,
@@ -169,6 +175,7 @@ class DDQNAgent:
                 n_actions=self.n_actions,
                 grid_size=config.grid_size,
                 hidden_layers=config.hidden_layers,
+                grid_channels=config.grid_channels,
                 grid_rows=config.grid_rows,
                 grid_cols=config.grid_cols,
                 dueling=self.dueling,
@@ -415,6 +422,7 @@ class DDQNAgent:
                 "epsilon": self.epsilon,
                 "hidden_layers": online_base.hidden_layers,
                 "grid_size": online_base.grid_size,
+                "grid_channels": self.grid_channels,
                 "grid_rows": self.grid_rows,
                 "grid_cols": self.grid_cols,
                 "dueling": online_base.dueling,
@@ -463,12 +471,19 @@ class DDQNAgent:
         ckpt_grid = checkpoint["grid_size"]
         ckpt_rows = checkpoint["grid_rows"]
         ckpt_cols = checkpoint["grid_cols"]
+        ckpt_channels = int(
+            checkpoint.get(
+                "grid_channels",
+                max(1, ckpt_grid // max(1, ckpt_rows * ckpt_cols)),
+            )
+        )
         ckpt_dueling = bool(checkpoint["dueling"])
         ckpt_noisy = bool(checkpoint["noisy"])
 
         needs_rebuild = (
             ckpt_hl != online_base.hidden_layers
             or ckpt_grid != online_base.grid_size
+            or ckpt_channels != getattr(online_base, "grid_channels", 1)
             or ckpt_rows != self.grid_rows
             or ckpt_cols != self.grid_cols
             or ckpt_dueling != online_base.dueling
@@ -476,18 +491,29 @@ class DDQNAgent:
         )
 
         if needs_rebuild:
-            self._rebuild_networks(ckpt_grid, ckpt_hl, ckpt_rows, ckpt_cols, ckpt_dueling, ckpt_noisy)
+            self._rebuild_networks(
+                ckpt_grid,
+                ckpt_channels,
+                ckpt_hl,
+                ckpt_rows,
+                ckpt_cols,
+                ckpt_dueling,
+                ckpt_noisy,
+            )
 
+        self.grid_channels = ckpt_channels
         self.grid_rows = ckpt_rows
         self.grid_cols = ckpt_cols
         self.dueling = ckpt_dueling
         self.noisy = ckpt_noisy
 
-    def _rebuild_networks(self, grid_size, hidden_layers, grid_rows, grid_cols, dueling, noisy):
+    def _rebuild_networks(
+        self, grid_size, grid_channels, hidden_layers, grid_rows, grid_cols, dueling, noisy,
+    ):
         def _make(d, n):
             return QNetwork(
                 self.obs_dim, self.n_actions, grid_size, hidden_layers,
-                grid_rows, grid_cols, d, noisy=n,
+                grid_channels, grid_rows, grid_cols, d, noisy=n,
             ).to(self.device)
 
         self.online_net = _make(dueling, noisy)

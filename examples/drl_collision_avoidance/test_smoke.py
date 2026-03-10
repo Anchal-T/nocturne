@@ -11,15 +11,25 @@ def test_ddqn_forward_and_train():
     import torch
     import numpy as np
 
-    config = DDQNAgentConfig(grid_size=350, grid_rows=25, grid_cols=14, device='cpu', batch_size=64)
-    agent = DDQNAgent(obs_dim=359, n_actions=15, config=config)
-    state = torch.randn(1, 359)
+    grid_channels = 3
+    grid_size = grid_channels * 25 * 14
+    obs_dim = grid_size + 4 + 2 + 3
+    config = DDQNAgentConfig(
+        grid_size=grid_size,
+        grid_channels=grid_channels,
+        grid_rows=25,
+        grid_cols=14,
+        device='cpu',
+        batch_size=64,
+    )
+    agent = DDQNAgent(obs_dim=obs_dim, n_actions=15, config=config)
+    state = torch.randn(1, obs_dim)
     q = agent.online_net(state)
     assert q.shape == (1, 15), f'Expected (1,15) got {q.shape}'
 
     for _ in range(100):
-        s = np.random.randn(359).astype(np.float32)
-        ns = np.random.randn(359).astype(np.float32)
+        s = np.random.randn(obs_dim).astype(np.float32)
+        ns = np.random.randn(obs_dim).astype(np.float32)
         agent.store_transition(s, np.random.randint(15), np.random.randn(), ns, 0.0)
 
     loss = agent.train_step()
@@ -104,7 +114,7 @@ def test_env_interface():
 
         env = CollisionAvoidanceEnv(cfg)
         obs = env.reset()
-        expected_dim = 25 * 14 + 4 + 2 + 3
+        expected_dim = 3 * 25 * 14 + 4 + 2 + 3
         assert obs.shape == (expected_dim,), f'Expected ({expected_dim},) got {obs.shape}'
         assert env.action_space.n == 15
 

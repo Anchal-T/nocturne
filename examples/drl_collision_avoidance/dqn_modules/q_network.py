@@ -72,6 +72,7 @@ class QNetwork(nn.Module):
         obs_dim: Total observation dimension (grid + extra features).
         n_actions: Number of discrete actions.
         grid_size: Number of elements in the flattened occupancy grid.
+        grid_channels: Number of occupancy-grid channels.
         grid_rows: Height of the occupancy grid.
         grid_cols: Width of the occupancy grid.
         dueling: Whether to use dueling architecture.
@@ -88,6 +89,7 @@ class QNetwork(nn.Module):
         n_actions: int,
         grid_size: int,
         hidden_layers: Optional[List[int]] = None,
+        grid_channels: int = 1,
         grid_rows: int = 25,
         grid_cols: int = 14,
         dueling: bool = True,
@@ -101,6 +103,7 @@ class QNetwork(nn.Module):
         # Store for checkpoint compatibility
         self.hidden_layers = [enc_dim, enc_dim, enc_dim, hd_dim]
         self.grid_size = grid_size
+        self.grid_channels = grid_channels
         self.grid_rows = grid_rows
         self.grid_cols = grid_cols
         self.dueling = dueling
@@ -110,8 +113,8 @@ class QNetwork(nn.Module):
         linear_cls = NoisyLinear if noisy else nn.Linear
 
         conv_backbone = nn.Sequential(
-            nn.Unflatten(1, (1, grid_rows, grid_cols)),
-            nn.Conv2d(1, 16, kernel_size=3, stride=1, padding=1, bias=False),
+            nn.Unflatten(1, (grid_channels, grid_rows, grid_cols)),
+            nn.Conv2d(grid_channels, 16, kernel_size=3, stride=1, padding=1, bias=False),
             nn.BatchNorm2d(16),
             nn.ReLU(inplace=True),
             ResidualBlock(16, 16),

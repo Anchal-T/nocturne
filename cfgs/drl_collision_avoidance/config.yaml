@@ -56,7 +56,7 @@ subscriber:
   use_ego_state: True
   use_observations: True
   keep_inactive_agents: False
-  n_frames_stacked: 1
+  n_frames_stacked: 3
   render_img_width: 640
   render_img_height: 480
   render_padding: 30.0
@@ -64,36 +64,37 @@ subscriber:
 drl:
   lr: 0.01
   gamma : 0.99
+  n_step: 3
   dueling: true
   noisy: true
   epsilon_start: 0.9
   epsilon_end: 0.05
   epsilon_decay_steps: 1000000
   replay_buffer_size: 1000000
-  batch_size: 128
+  batch_size: 512
   target_update_freq: 1000
   train_freq: 4
   min_replay_size: 5000
   hidden_layers: [512, 512, 256, 32]
-  num_episodes: 1000
+  num_episodes: 10000
   max_episode_steps: 80
   log_interval: 10
   save_interval: 1000
   checkpoint_dir: checkpoints/drl_collision_avoidance
-  num_workers: 2
-  num_envs_per_worker: 1
-  num_envs: 4          
+  num_workers: 12
+  num_envs_per_worker: 4
+  num_envs: 192
   vec_env_mode: async   # async | sync | dummy
   train_in_background: true
-  use_torch_compile: true
+  use_torch_compile: false
   compile_mode: reduce-overhead
   use_tf32: true
   cudnn_benchmark: true
   inference_sync_interval: 16
   grad_accum_steps: 1
   max_grad_norm: 10.0
-  profile_cuda: true
-  profile_first_train_step: true
+  profile_cuda: false
+  profile_first_train_step: false
   profile_wait_steps: 8
   profile_warmup_steps: 4
   profile_active_steps: 24
@@ -115,11 +116,11 @@ occupancy_grid:
   road_edge_weight: 3.0
 
 reward:
-  goal_bonus: 10000.0
-  collision_penalty: 1000.0
+  goal_bonus: 100.0
+  collision_penalty: 100.0
   step_penalty: 0.0
   progress_scale: 0.9
-  ttz_safe_threshold: 0.0
+  ttz_safe_threshold: 3.0
   ttz_reward_scale: 0.5
   offroad_penalty: 500.0
   heading_scale: 0.3

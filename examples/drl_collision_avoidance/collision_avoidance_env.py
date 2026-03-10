@@ -22,6 +22,10 @@ TTZ_CONTACT_DIST = 0.5
 # Maximum TTZ value exposed to the network (clips the sentinel).
 TTZ_OBS_CLIP = 20.0
 
+# Occupancy grid channels: occupancy strength, relative longitudinal velocity,
+# and relative lateral velocity in the ego frame.
+GRID_CHANNELS = 3
+
 MAX_RESET_ATTEMPTS = 50
 
 
@@ -40,6 +44,7 @@ class CollisionAvoidanceEnv(gym.Env):
         self.vru_weight = grid_cfg["vru_weight"]
         self.vehicle_weight = grid_cfg["vehicle_weight"]
         self.road_edge_weight = grid_cfg["road_edge_weight"]
+        self.grid_channels = GRID_CHANNELS
 
         rew_cfg = cfg["reward"]
         self.goal_bonus = rew_cfg["goal_bonus"]
@@ -61,7 +66,7 @@ class CollisionAvoidanceEnv(gym.Env):
         self.base_env = BaseEnv(cfg)
         self.cfg = cfg
 
-        obs_dim = self.grid_rows * self.grid_cols + 4 + 2 + 3
+        obs_dim = self.grid_channels * self.grid_rows * self.grid_cols + 4 + 2 + 3
         self.observation_space = Box(
             low=-np.inf, high=np.inf, shape=(obs_dim,), dtype=np.float32
         )
@@ -158,18 +163,35 @@ class CollisionAvoidanceEnv(gym.Env):
         ).astype(np.float32)
 
     def _build_occupancy_grid(self, ego_veh) -> np.ndarray:
-        grid = np.zeros((self.grid_rows, self.grid_cols), dtype=np.float32)
+        grid = np.zeros(
+            (self.grid_channels, self.grid_rows, self.grid_cols), dtype=np.float32
+        )
+        vehicle_cell_dist = np.full((self.grid_rows, self.grid_cols), np.inf, dtype=np.float32)
         ego_pos = ego_veh.position
         cos_h, sin_h = math.cos(ego_veh.heading), math.sin(ego_veh.heading)
         cell_long = (self.forward_dist + self.backward_dist) / self.grid_rows
         cell_lat = (2.0 * self.lateral_dist) / self.grid_cols
+        ego_vx, ego_vy = self._get_velocity_components(ego_veh)
 
         for obj in self.base_env.scenario.getVehicles():
             if obj.getID() == self._ego_id:
                 continue
-            self._project_to_grid(
-                obj.position, ego_pos, cos_h, sin_h, cell_long, cell_lat, grid, self.vehicle_weight,
+            cell = self._locate_grid_cell(
+                obj.position, ego_pos, cos_h, sin_h, cell_long, cell_lat,
             )
+            if cell is None:
+                continue
+            row, col, local_x, local_y = cell
+            grid[0, row, col] = max(grid[0, row, col], self.vehicle_weight)
+
+            rel_vx, rel_vy = self._get_relative_velocity_in_ego_frame(
+                ego_vx, ego_vy, obj, cos_h, sin_h,
+            )
+            cell_dist = local_x * local_x + local_y * local_y
+            if cell_dist <= vehicle_cell_dist[row, col]:
+                vehicle_cell_dist[row, col] = cell_dist
+                grid[1, row, col] = rel_vx / SPEED_NORM
+                grid[2, row, col] = rel_vy / SPEED_NORM
 
         for obj in self.base_env.scenario.getPedestrians():
             self._project_to_grid(
@@ -191,7 +213,16 @@ class CollisionAvoidanceEnv(gym.Env):
         return grid
 
     def _project_to_grid(self, point, ego_pos, cos_h, sin_h, cell_long, cell_lat, grid, weight):
-        """Project a point (any object with .x/.y) into the ego-centric grid."""
+        """Project a point (any object with .x/.y) into the occupancy channel."""
+        cell = self._locate_grid_cell(point, ego_pos, cos_h, sin_h, cell_long, cell_lat)
+        if cell is None:
+            return
+
+        row, col, _, _ = cell
+        grid[0, row, col] = max(grid[0, row, col], weight)
+
+    def _locate_grid_cell(self, point, ego_pos, cos_h, sin_h, cell_long, cell_lat):
+        """Map a world-frame point into an ego-centric grid cell."""
         dx = point.x - ego_pos.x
         dy = point.y - ego_pos.y
         local_x = dx * cos_h + dy * sin_h
@@ -206,7 +237,21 @@ class CollisionAvoidanceEnv(gym.Env):
         col = int((local_y + self.lateral_dist) / cell_lat)
         row = max(0, min(row, self.grid_rows - 1))
         col = max(0, min(col, self.grid_cols - 1))
-        grid[row, col] = max(grid[row, col], weight)
+        return row, col, local_x, local_y
+
+    @staticmethod
+    def _get_velocity_components(obj) -> Tuple[float, float]:
+        speed = getattr(obj, "speed", 0.0)
+        heading = getattr(obj, "heading", 0.0)
+        return speed * math.cos(heading), speed * math.sin(heading)
+
+    def _get_relative_velocity_in_ego_frame(self, ego_vx, ego_vy, obj, cos_h, sin_h):
+        obj_vx, obj_vy = self._get_velocity_components(obj)
+        rel_world_x = obj_vx - ego_vx
+        rel_world_y = obj_vy - ego_vy
+        rel_x = rel_world_x * cos_h + rel_world_y * sin_h
+        rel_y = -rel_world_x * sin_h + rel_world_y * cos_h
+        return rel_x, rel_y
 
     def _get_ego_state(self, ego_veh) -> np.ndarray:
         heading_err = self._get_heading_error(ego_veh)
