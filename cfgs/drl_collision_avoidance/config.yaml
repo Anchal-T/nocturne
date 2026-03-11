@@ -62,34 +62,34 @@ subscriber:
   render_padding: 30.0
 
 drl:
-  lr: 0.01
-  gamma : 0.99
+  lr: 0.0003
+  gamma: 0.99
   n_step: 3
   dueling: true
   noisy: true
-  epsilon_start: 0.9
+  epsilon_start: 1.0
   epsilon_end: 0.05
-  epsilon_decay_steps: 1000000
+  epsilon_decay_steps: 500000
   replay_buffer_size: 1000000
-  batch_size: 512
+  batch_size: 256
   target_update_freq: 1000
-  train_freq: 4
+  train_freq: 512
   min_replay_size: 5000
-  hidden_layers: [512, 512, 256, 32]
-  num_episodes: 10000
+  hidden_layers: [256, 256, 128, 64]
+  num_episodes: 500000
   max_episode_steps: 80
-  log_interval: 10
-  save_interval: 1000
+  log_interval: 1000
+  save_interval: 100000
   checkpoint_dir: checkpoints/drl_collision_avoidance
   num_workers: 2
   num_envs_per_worker: 1
-  num_envs: 4
+  num_envs: 2
   vec_env_mode: async   # async | sync | dummy
   train_in_background: true
   learner_queue_size: 256
   learner_queue_put_timeout_s: 0.25
-  learner_overload_policy: block   # block | drop_new | drop_oldest
-  learner_max_train_steps_per_cycle: 4
+  learner_overload_policy: block
+  learner_max_train_steps_per_cycle: 32
   learner_weight_sync_interval: 16
   learner_metrics_interval_s: 1.0
   learner_startup_timeout_s: 60.0
@@ -113,26 +113,25 @@ drl:
   per_epsilon: 1e-6
 
 occupancy_grid:
-  rows: 10
-  cols: 5
-  forward_dist: 10.0
+  rows: 20
+  cols: 10
+  forward_dist: 40.0
   backward_dist: 5.0
-  lateral_dist: 7.0
+  lateral_dist: 10.0
   vru_weight: 2.0
   vehicle_weight: 1.0
   road_edge_weight: 3.0
 
 reward:
   goal_bonus: 100.0
-  collision_penalty: 100.0
-  step_penalty: 0.0
-  progress_scale: 0.9
+  collision_penalty: 50.0
+  step_penalty: 0.1
+  progress_scale: 2.0
   ttz_safe_threshold: 3.0
   ttz_reward_scale: 0.5
-  offroad_penalty: 500.0
+  offroad_penalty: 50.0
   heading_scale: 0.3
 
 action_map:
   throttle_levels: [-1.0, 0.0, 2.0]
   steer_levels: [-0.7, -0.2, 0.0, 0.2, 0.7]
-

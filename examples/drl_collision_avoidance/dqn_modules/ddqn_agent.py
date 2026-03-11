@@ -50,6 +50,7 @@ class DDQNAgentConfig:
     profile_active_steps: int = 24
     profile_trace_path: str = "trace.json"
     use_muon: bool = True
+    num_envs: int = 1
 
     @classmethod
     def from_drl_cfg(
@@ -96,6 +97,7 @@ class DDQNAgentConfig:
             profile_active_steps=int(drl_cfg["profile_active_steps"]),
             profile_trace_path=str(drl_cfg["profile_trace_path"]),
             use_muon=bool(drl_cfg["use_muon"]),
+            num_envs=int(drl_cfg["num_envs"]),
         )
 
 
@@ -163,6 +165,7 @@ class DDQNAgent:
             beta_start=config.beta_start,
             beta_frames=config.beta_frames,
             epsilon=config.per_epsilon,
+            num_envs=config.num_envs,
         )
         self.train_steps = 0
         self._grad_accum_counter = 0
@@ -283,8 +286,8 @@ class DDQNAgent:
             bool(done),
         )
 
-    def store_transition_batch(self, states, actions, rewards, next_states, dones):
-        self.replay_buffer.store_batch(states, actions, rewards, next_states, dones)
+    def store_transition_batch(self, states, actions, rewards, next_states, dones, env_ids=None):
+        self.replay_buffer.store_batch(states, actions, rewards, next_states, dones, env_ids=env_ids)
 
     # --- Training ---
 
@@ -324,7 +327,7 @@ class DDQNAgent:
             with torch.no_grad():
                 best_acts = self.online_net(next_obs_t).argmax(dim=1)
                 next_q = self.target_net(next_obs_t).gather(1, best_acts.unsqueeze(1)).squeeze(1)
-                target_q = rews_t + self.gamma * next_q * (1.0 - dones_t)
+                target_q = rews_t + (self.gamma ** self.config.n_step) * next_q * (1.0 - dones_t)
             td_errors = current_q - target_q
             loss = (weights_t * F.huber_loss(current_q, target_q, reduction='none')).mean()
         return loss, td_errors

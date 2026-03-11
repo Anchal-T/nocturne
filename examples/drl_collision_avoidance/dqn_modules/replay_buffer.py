@@ -1,5 +1,5 @@
 from collections import deque
-from typing import Deque, Dict, Tuple
+from typing import Deque, Dict, Optional, Tuple
 
 import numpy as np
 
@@ -7,7 +7,11 @@ from .sum_tree import SumTree
 
 
 class ReplayBuffer:
-    """Numpy replay buffer with Prioritized Experience Replay and optional n-step returns."""
+    """Numpy replay buffer with Prioritized Experience Replay and n-step returns.
+
+    Each parallel environment gets its own n-step buffer so transitions from
+    different envs are never mixed into the same n-step return.
+    """
 
     def __init__(
         self,
@@ -20,6 +24,7 @@ class ReplayBuffer:
         beta_start: float = 0.4,
         beta_frames: int = 100000,
         epsilon: float = 1e-6,
+        num_envs: int = 1,
     ):
         if n_step < 1:
             raise ValueError(f"n_step must be >= 1, got {n_step}")
@@ -36,9 +41,12 @@ class ReplayBuffer:
 
         self.n_step = int(n_step)
         self.gamma = float(gamma)
-        self.n_step_buffer: Deque[Tuple[np.ndarray, int, float, np.ndarray, bool]] = deque(
-            maxlen=self.n_step
-        )
+        self.num_envs = max(1, int(num_envs))
+        # One n-step deque per environment so cross-env mixing can't happen.
+        self._n_step_buffers: Dict[int, Deque[Tuple]] = {
+            i: deque(maxlen=self.n_step) for i in range(self.num_envs)
+        }
+
         self.sum_tree = SumTree(capacity=size)
         self.alpha = alpha
         self.beta = beta_start
@@ -46,9 +54,7 @@ class ReplayBuffer:
         self.beta_frames = beta_frames
         self.epsilon = max(float(epsilon), 1e-8)
         self.max_priority = 1.0
-
-        MAX_PRIORITY_CAP = 1e6
-        self._max_priority_cap = MAX_PRIORITY_CAP
+        self._max_priority_cap = 1e6
 
     def _insert_transition(
         self, obs: np.ndarray, act: int, rew: float, next_obs: np.ndarray, done: bool,
@@ -61,9 +67,27 @@ class ReplayBuffer:
         self.ptr = (self.ptr + 1) % self.max_size
         self.size = min(self.size + 1, self.max_size)
 
+    def _flush_n_step_buffer(self, buf: Deque) -> None:
+        """Drain remaining transitions at episode end by shrinking the n-step window."""
+        while len(buf) > 0:
+            n_rew, n_next_obs, n_done = self._get_n_step_info(buf, self.gamma)
+            first_obs, first_act = buf[0][:2]
+            self._insert_transition(first_obs, first_act, n_rew, n_next_obs, n_done)
+            self.sum_tree.add(self.max_priority)
+            buf.popleft()
+
     def store(
-        self, obs: np.ndarray, act: int, rew: float, next_obs: np.ndarray, done: bool,
+        self,
+        obs: np.ndarray,
+        act: int,
+        rew: float,
+        next_obs: np.ndarray,
+        done: bool,
+        env_id: int = 0,
     ) -> None:
+        env_id = int(env_id) % self.num_envs
+        buf = self._n_step_buffers[env_id]
+
         transition = (
             np.asarray(obs, dtype=np.float32),
             int(act),
@@ -71,21 +95,29 @@ class ReplayBuffer:
             np.asarray(next_obs, dtype=np.float32),
             bool(done),
         )
-        self.n_step_buffer.append(transition)
+        buf.append(transition)
 
-        if len(self.n_step_buffer) < self.n_step:
+        if done:
+            # Flush all buffered transitions for this episode.
+            self._flush_n_step_buffer(buf)
             return
 
-        n_rew, n_next_obs, n_done = self._get_n_step_info(self.n_step_buffer, self.gamma)
-        first_obs, first_act = self.n_step_buffer[0][:2]
+        if len(buf) < self.n_step:
+            return
+
+        n_rew, n_next_obs, n_done = self._get_n_step_info(buf, self.gamma)
+        first_obs, first_act = buf[0][:2]
         self._insert_transition(first_obs, first_act, n_rew, n_next_obs, n_done)
         self.sum_tree.add(self.max_priority)
 
-    def store_batch(self, states, actions, rewards, next_states, dones) -> None:
-        for state, action, reward, next_state, done in zip(
-            states, actions, rewards, next_states, dones
+    def store_batch(
+        self, states, actions, rewards, next_states, dones, env_ids: Optional[np.ndarray] = None
+    ) -> None:
+        for i, (state, action, reward, next_state, done) in enumerate(
+            zip(states, actions, rewards, next_states, dones)
         ):
-            self.store(state, action, reward, next_state, done)
+            env_id = int(env_ids[i]) if env_ids is not None else i % self.num_envs
+            self.store(state, action, reward, next_state, done, env_id=env_id)
 
     def sample_batch(self, batch_size: int = None) -> Dict[str, np.ndarray]:
         bs = int(batch_size) if batch_size is not None else self.batch_size
@@ -176,7 +208,7 @@ class ReplayBuffer:
 
     @staticmethod
     def _get_n_step_info(
-        n_step_buffer: Deque[Tuple[np.ndarray, int, float, np.ndarray, bool]],
+        n_step_buffer: Deque[Tuple],
         gamma: float,
     ) -> Tuple[float, np.ndarray, bool]:
         rew, next_obs, done = n_step_buffer[-1][-3:]

@@ -13,12 +13,12 @@ class ResidualBlock(nn.Module):
             in_channels, out_channels,
             kernel_size=3, stride=stride, padding=1, bias=False,
         )
-        self.bn1 = nn.BatchNorm2d(out_channels)
+        self.norm1 = nn.GroupNorm(min(8, out_channels), out_channels)
         self.conv2 = nn.Conv2d(
             out_channels, out_channels,
             kernel_size=3, stride=1, padding=1, bias=False,
         )
-        self.bn2 = nn.BatchNorm2d(out_channels)
+        self.norm2 = nn.GroupNorm(min(8, out_channels), out_channels)
         self.relu = nn.ReLU(inplace=True)
 
         if stride != 1 or in_channels != out_channels:
@@ -27,15 +27,15 @@ class ResidualBlock(nn.Module):
                     in_channels, out_channels,
                     kernel_size=1, stride=stride, bias=False,
                 ),
-                nn.BatchNorm2d(out_channels),
+                nn.GroupNorm(min(8, out_channels), out_channels),
             )
         else:
             self.shortcut = nn.Identity()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         identity = self.shortcut(x)
-        out = self.relu(self.bn1(self.conv1(x)))
-        out = self.bn2(self.conv2(out))
+        out = self.relu(self.norm1(self.conv1(x)))
+        out = self.norm2(self.conv2(out))
         return self.relu(out + identity)
 
 
@@ -115,7 +115,7 @@ class QNetwork(nn.Module):
         conv_backbone = nn.Sequential(
             nn.Unflatten(1, (grid_channels, grid_rows, grid_cols)),
             nn.Conv2d(grid_channels, 16, kernel_size=3, stride=1, padding=1, bias=False),
-            nn.BatchNorm2d(16),
+            nn.GroupNorm(min(8, 16), 16),
             nn.ReLU(inplace=True),
             ResidualBlock(16, 16),
             ResidualBlock(16, 32, stride=2),

@@ -113,13 +113,14 @@ def _resolve_parallel_env_config(drl_cfg):
     return num_workers, num_envs_per_worker, total_envs
 
 
-def _clone_transition_batch(states, actions, rewards, next_states, dones):
+def _clone_transition_batch(states, actions, rewards, next_states, dones, env_ids):
     return (
         np.asarray(states, dtype=np.float32).copy(),
         np.asarray(actions, dtype=np.int64).copy(),
         np.asarray(rewards, dtype=np.float32).copy(),
         np.asarray(next_states, dtype=np.float32).copy(),
         np.asarray(dones, dtype=np.float32).copy(),
+        np.asarray(env_ids, dtype=np.int64).copy(),
     )
 
 
@@ -223,7 +224,8 @@ def _learner_process_main(
             int(drl_cfg.get('learner_weight_sync_interval', drl_cfg.get('inference_sync_interval', 1))),
         )
 
-        agent = _build_agent(cfg_dict, drl_cfg, obs_dim, n_actions)
+        num_envs_for_buffer, _, _ = _resolve_parallel_env_config(drl_cfg)
+        agent = _build_agent(cfg_dict, drl_cfg, obs_dim, n_actions, num_envs=num_envs_for_buffer)
         _replace_latest_queue_value(weights_queue, agent.export_inference_state(refresh=True))
 
         latest_loss = None
@@ -248,8 +250,8 @@ def _learner_process_main(
 
             batches_ingested = 0
             while batch is not None:
-                states, actions, rewards, next_states, dones = batch
-                agent.store_transition_batch(states, actions, rewards, next_states, dones)
+                states, actions, rewards, next_states, dones, env_ids = batch
+                agent.store_transition_batch(states, actions, rewards, next_states, dones, env_ids=env_ids)
                 steps_ingested += len(states)
                 batches_ingested += 1
                 try:
@@ -411,10 +413,10 @@ class ProcessLearner:
 
         raise TimeoutError('Learner process did not publish initial inference weights in time.')
 
-    def submit(self, states, actions, rewards, next_states, dones):
+    def submit(self, states, actions, rewards, next_states, dones, env_ids):
         self._drain_responses()
         self._ensure_process_alive()
-        payload = _clone_transition_batch(states, actions, rewards, next_states, dones)
+        payload = _clone_transition_batch(states, actions, rewards, next_states, dones, env_ids)
 
         if self._overload_policy == 'drop_new':
             try:
@@ -571,7 +573,7 @@ def _build_vec_env(cfg_dict, num_envs, vec_env_mode):
     return vec_env_cls(env_fns), vec_env_cls
 
 
-def _build_agent(cfg_dict, drl_cfg, obs_dim, n_actions):
+def _build_agent(cfg_dict, drl_cfg, obs_dim, n_actions, num_envs: int = 1):
     from examples.drl_collision_avoidance.dqn_modules.ddqn_agent import DDQNAgent, DDQNAgentConfig
 
     grid_cfg = cfg_dict['occupancy_grid']
@@ -581,8 +583,12 @@ def _build_agent(cfg_dict, drl_cfg, obs_dim, n_actions):
     grid_size = grid_channels * grid_rows * grid_cols
     device = _resolve_training_device(cfg_dict, drl_cfg)
 
+    # Inject num_envs so the replay buffer allocates per-env n-step buffers.
+    drl_cfg_with_envs = dict(drl_cfg)
+    drl_cfg_with_envs['num_envs'] = num_envs
+
     agent_cfg = DDQNAgentConfig.from_drl_cfg(
-        drl_cfg,
+        drl_cfg_with_envs,
         grid_size=grid_size,
         grid_channels=grid_channels,
         grid_rows=grid_rows,
@@ -645,13 +651,13 @@ def _collect_transition_batch(
     )
 
 
-def _submit_or_train_batch(learner, agent, prev_obs, prev_actions, rewards, next_obs, dones, min_replay, train_freq, global_step):
+def _submit_or_train_batch(learner, agent, env_ids, prev_obs, prev_actions, rewards, next_obs, dones, min_replay, train_freq, global_step):
     dones_f32 = dones.astype(np.float32)
     if learner is not None:
-        learner.submit(prev_obs, prev_actions, rewards, next_obs, dones_f32)
+        learner.submit(prev_obs, prev_actions, rewards, next_obs, dones_f32, env_ids)
         return
 
-    agent.store_transition_batch(prev_obs, prev_actions, rewards, next_obs, dones_f32)
+    agent.store_transition_batch(prev_obs, prev_actions, rewards, next_obs, dones_f32, env_ids=env_ids)
     if len(agent.replay_buffer) >= min_replay and global_step % train_freq == 0:
         agent.train_step(env_steps=global_step)
 
@@ -828,6 +834,7 @@ def _run_training_loop(
         _submit_or_train_batch(
             learner=learner,
             agent=agent,
+            env_ids=ready_ids,
             prev_obs=prev_obs,
             prev_actions=prev_actions,
             rewards=rewards,
@@ -894,7 +901,7 @@ def main(cfg):
         n_actions,
     )
 
-    agent = _build_agent(cfg_dict, drl_cfg, obs_dim, n_actions)
+    agent = _build_agent(cfg_dict, drl_cfg, obs_dim, n_actions, num_envs=num_envs)
 
     num_episodes = drl_cfg['num_episodes']
     train_freq = drl_cfg['train_freq']
