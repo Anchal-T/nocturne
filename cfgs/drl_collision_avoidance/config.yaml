@@ -81,11 +81,18 @@ drl:
   log_interval: 10
   save_interval: 1000
   checkpoint_dir: checkpoints/drl_collision_avoidance
-  num_workers: 12
-  num_envs_per_worker: 4
-  num_envs: 192
+  num_workers: 2
+  num_envs_per_worker: 1
+  num_envs: 4
   vec_env_mode: async   # async | sync | dummy
   train_in_background: true
+  learner_queue_size: 256
+  learner_queue_put_timeout_s: 0.25
+  learner_overload_policy: block   # block | drop_new | drop_oldest
+  learner_max_train_steps_per_cycle: 4
+  learner_weight_sync_interval: 16
+  learner_metrics_interval_s: 1.0
+  learner_startup_timeout_s: 60.0
   use_torch_compile: false
   compile_mode: reduce-overhead
   use_tf32: true

@@ -399,6 +399,35 @@ class DDQNAgent:
             online_state = self._unwrap_module(self.online_net).state_dict()
             self._load_state_dict_flexible(self.inference_net, online_state, "inference_sync")
 
+    def export_inference_state(self, refresh: bool = False) -> Dict[str, Any]:
+        if refresh:
+            self.sync_inference_net()
+
+        with self.inference_lock:
+            inference_state = self._unwrap_module(self.inference_net).state_dict()
+            return {
+                "inference_net": self._state_dict_to_cpu(inference_state),
+                "train_steps": self.train_steps,
+                "epsilon": self.epsilon,
+            }
+
+    def load_inference_state(self, state: Dict[str, Any]) -> None:
+        inference_state = state.get("inference_net")
+        if inference_state is None:
+            raise KeyError("Inference state payload is missing 'inference_net'.")
+
+        with self.inference_lock:
+            self._load_state_dict_flexible(self.inference_net, inference_state, "inference_net")
+
+        if "train_steps" in state:
+            self.train_steps = int(state["train_steps"])
+        if "epsilon" in state:
+            self.epsilon = float(state["epsilon"])
+
+    def update_exploration(self, env_steps: int) -> float:
+        self._decay_epsilon(env_steps)
+        return self.epsilon
+
     def _decay_epsilon(self, env_steps: int):
         if env_steps <= 0:
             return
@@ -552,6 +581,13 @@ class DDQNAgent:
     @staticmethod
     def _add_prefix(state_dict: Dict[str, torch.Tensor], prefix: str) -> Dict[str, torch.Tensor]:
         return {f"{prefix}{key}": value for key, value in state_dict.items()}
+
+    @staticmethod
+    def _state_dict_to_cpu(state_dict: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+        return {
+            key: value.detach().cpu().clone()
+            for key, value in state_dict.items()
+        }
 
     def _load_state_dict_flexible(self, module: nn.Module, state_dict: Dict[str, torch.Tensor], name: str) -> None:
         base = self._strip_known_prefixes(state_dict)

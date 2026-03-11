@@ -3,7 +3,7 @@
 Architecture:
 
     ┌─────────────┐                            ┌──────────────────┐
-    │  Actor 0    │──pipe──┐                   │   Learner Thread │
+    │  Actor 0    │──pipe──┐                   │  Learner Process │
     │ (subprocess)│        │    ┌────────--┐   │   (background)   │
     ├─────────────┤        ├───▸│  Main    │──▸│                  │
     │  Actor 1    │──pipe──┤    │ Process  │   │  replay buffer   │
@@ -33,10 +33,11 @@ Usage:
 """
 
 import os
+import multiprocessing as mp
 import signal
 import sys
 import time
-import threading
+import traceback
 import queue
 from typing import Any, Dict, cast
 
@@ -112,77 +113,382 @@ def _resolve_parallel_env_config(drl_cfg):
     return num_workers, num_envs_per_worker, total_envs
 
 
-class BackgroundLearner:
-    """Runs gradient updates in a background thread, never blocking env stepping.
+def _clone_transition_batch(states, actions, rewards, next_states, dones):
+    return (
+        np.asarray(states, dtype=np.float32).copy(),
+        np.asarray(actions, dtype=np.int64).copy(),
+        np.asarray(rewards, dtype=np.float32).copy(),
+        np.asarray(next_states, dtype=np.float32).copy(),
+        np.asarray(dones, dtype=np.float32).copy(),
+    )
 
-    Matches Sample Factory's ``train_in_background_thread=True`` mode: the main
-    loop enqueues transition batches and the learner thread continuously drains
-    them into the replay buffer + runs training steps.
-    """
 
-    def __init__(self, agent, train_freq, min_replay, maxsize=32968):
-        self.agent = agent
-        self.train_freq = max(1, int(train_freq))
-        self.min_replay = min_replay
-        self._queue = queue.Queue(maxsize=maxsize)
-        self._stop = threading.Event()
-        self._steps_ingested = 0
-        self._next_train_step = min_replay
-        self._train_steps_done = 0
-        self._latest_loss = None
-        self._last_queue_full_warn = 0.0
-        self._lock = threading.Lock()
-        self._thread = threading.Thread(target=self._run, daemon=True, name="LearnerThread")
-        self._thread.start()
+def _safe_queue_size(queue_obj) -> int:
+    try:
+        return int(queue_obj.qsize())
+    except (AttributeError, NotImplementedError, OSError):
+        return -1
 
-    def submit(self, states, actions, rewards, next_states, dones):
-        """Backpressure-aware enqueue of a transition batch from the main thread."""
+
+def _replace_latest_queue_value(queue_obj, value) -> None:
+    while True:
         try:
-            self._queue.put((states, actions, rewards, next_states, dones), timeout=0.1)
-            return True
+            queue_obj.put_nowait(value)
+            return
         except queue.Full:
-            now = time.time()
-            if now - self._last_queue_full_warn >= 5.0:
-                print("[BackgroundLearner] queue full, dropping transition batch")
-                self._last_queue_full_warn = now
-            return False
-
-    def _run(self):
-        while not self._stop.is_set():
             try:
-                batch = self._queue.get(timeout=0.02)
+                queue_obj.get_nowait()
             except queue.Empty:
                 continue
 
-            states, actions, rewards, next_states, dones = batch
-            self.agent.store_transition_batch(states, actions, rewards, next_states, dones)
-            self._steps_ingested += len(states)
 
-            # Run training steps at the configured frequency
-            while self._steps_ingested >= self._next_train_step:
-                if not self._do_train_step():
+def _scheduled_train_steps(steps_ingested: int, min_replay: int, train_freq: int) -> int:
+    if steps_ingested < min_replay:
+        return 0
+    return 1 + max(0, (steps_ingested - min_replay) // max(1, train_freq))
+
+
+def _publish_learner_metrics(metrics_queue, transition_queue, agent, steps_ingested, latest_loss, min_replay, train_freq):
+    scheduled_steps = _scheduled_train_steps(steps_ingested, min_replay, train_freq)
+    _replace_latest_queue_value(
+        metrics_queue,
+        {
+            'latest_loss': latest_loss,
+            'train_steps': agent.train_steps,
+            'steps_ingested': steps_ingested,
+            'buffer_size': len(agent.replay_buffer),
+            'queue_size': _safe_queue_size(transition_queue),
+            'train_step_lag': max(0, scheduled_steps - agent.train_steps),
+            'epsilon': float(agent.epsilon),
+        },
+    )
+
+
+def _drain_learner_commands(control_queue, response_queue, agent, shutting_down: bool) -> bool:
+    while True:
+        try:
+            command, payload = control_queue.get_nowait()
+        except queue.Empty:
+            return shutting_down
+
+        if command == 'shutdown':
+            shutting_down = True
+            continue
+
+        if command == 'save':
+            try:
+                agent.save(payload)
+                response_queue.put({'type': 'save', 'path': payload, 'ok': True})
+            except Exception:
+                response_queue.put(
+                    {
+                        'type': 'save',
+                        'path': payload,
+                        'ok': False,
+                        'error': traceback.format_exc(),
+                    }
+                )
+            continue
+
+        response_queue.put(
+            {
+                'type': 'fatal',
+                'error': f'Unknown learner command: {command!r}',
+            }
+        )
+        return True
+
+
+def _learner_process_main(
+    cfg_dict,
+    obs_dim,
+    n_actions,
+    transition_queue,
+    control_queue,
+    response_queue,
+    metrics_queue,
+    weights_queue,
+):
+    try:
+        os.environ['OMP_NUM_THREADS'] = '1'
+        torch.set_num_threads(1)
+
+        drl_cfg = cfg_dict['drl']
+        train_freq = max(1, int(drl_cfg['train_freq']))
+        min_replay = int(drl_cfg['min_replay_size'])
+        max_train_steps_per_cycle = max(1, int(drl_cfg.get('learner_max_train_steps_per_cycle', 1)))
+        metrics_interval_s = max(0.1, float(drl_cfg.get('learner_metrics_interval_s', 1.0)))
+        weight_sync_interval = max(
+            1,
+            int(drl_cfg.get('learner_weight_sync_interval', drl_cfg.get('inference_sync_interval', 1))),
+        )
+
+        agent = _build_agent(cfg_dict, drl_cfg, obs_dim, n_actions)
+        _replace_latest_queue_value(weights_queue, agent.export_inference_state(refresh=True))
+
+        latest_loss = None
+        steps_ingested = 0
+        last_metrics_time = 0.0
+        last_exported_train_step = agent.train_steps
+        shutting_down = False
+
+        while True:
+            shutting_down = _drain_learner_commands(control_queue, response_queue, agent, shutting_down)
+
+            if shutting_down:
+                try:
+                    batch = transition_queue.get_nowait()
+                except queue.Empty:
+                    batch = None
+            else:
+                try:
+                    batch = transition_queue.get(timeout=0.05)
+                except queue.Empty:
+                    batch = None
+
+            batches_ingested = 0
+            while batch is not None:
+                states, actions, rewards, next_states, dones = batch
+                agent.store_transition_batch(states, actions, rewards, next_states, dones)
+                steps_ingested += len(states)
+                batches_ingested += 1
+                try:
+                    batch = transition_queue.get_nowait()
+                except queue.Empty:
+                    batch = None
+
+            scheduled_steps = _scheduled_train_steps(steps_ingested, min_replay, train_freq)
+            train_steps_owed = max(0, scheduled_steps - agent.train_steps)
+            train_steps_budget = min(train_steps_owed, max_train_steps_per_cycle)
+            train_steps_ran = 0
+
+            while train_steps_ran < train_steps_budget:
+                loss = agent.train_step(env_steps=steps_ingested)
+                if loss is None:
                     break
-                self._next_train_step += self.train_freq
+                latest_loss = loss
+                train_steps_ran += 1
 
-    def _do_train_step(self):
-        loss = self.agent.train_step(env_steps=self._steps_ingested)
-        if loss is None:
+            if agent.train_steps > last_exported_train_step:
+                next_sync_step = (
+                    (last_exported_train_step // weight_sync_interval) + 1
+                ) * weight_sync_interval
+                if agent.train_steps >= next_sync_step:
+                    _replace_latest_queue_value(weights_queue, agent.export_inference_state(refresh=True))
+                    last_exported_train_step = agent.train_steps
+
+            now = time.time()
+            if batches_ingested or train_steps_ran or (now - last_metrics_time) >= metrics_interval_s:
+                _publish_learner_metrics(
+                    metrics_queue=metrics_queue,
+                    transition_queue=transition_queue,
+                    agent=agent,
+                    steps_ingested=steps_ingested,
+                    latest_loss=latest_loss,
+                    min_replay=min_replay,
+                    train_freq=train_freq,
+                )
+                last_metrics_time = now
+
+            if shutting_down and batch is None and train_steps_owed == 0:
+                break
+
+        _replace_latest_queue_value(weights_queue, agent.export_inference_state(refresh=True))
+        _publish_learner_metrics(
+            metrics_queue=metrics_queue,
+            transition_queue=transition_queue,
+            agent=agent,
+            steps_ingested=steps_ingested,
+            latest_loss=latest_loss,
+            min_replay=min_replay,
+            train_freq=train_freq,
+        )
+        agent.finalize_profiling()
+    except Exception:
+        try:
+            response_queue.put({'type': 'fatal', 'error': traceback.format_exc()})
+        except Exception:
+            pass
+
+
+class ProcessLearner:
+    def __init__(self, cfg_dict, obs_dim, n_actions, agent):
+        drl_cfg = cfg_dict['drl']
+        self._ctx = mp.get_context('spawn')
+        self._submit_timeout_s = max(0.0, float(drl_cfg.get('learner_queue_put_timeout_s', 0.25)))
+        self._startup_timeout_s = max(5.0, float(drl_cfg.get('learner_startup_timeout_s', 60.0)))
+        self._overload_policy = str(drl_cfg.get('learner_overload_policy', 'block')).lower()
+        if self._overload_policy not in {'block', 'drop_new', 'drop_oldest'}:
+            raise ValueError(
+                'drl.learner_overload_policy must be one of '
+                "{'block', 'drop_new', 'drop_oldest'}"
+            )
+
+        queue_size = max(1, int(drl_cfg.get('learner_queue_size', 256)))
+        self._transition_queue = self._ctx.Queue(maxsize=queue_size)
+        self._control_queue = self._ctx.Queue()
+        self._response_queue = self._ctx.Queue()
+        self._metrics_queue = self._ctx.Queue(maxsize=8)
+        self._weights_queue = self._ctx.Queue(maxsize=1)
+        self._pending_responses = []
+        self._last_queue_full_warn = 0.0
+
+        self._latest_loss = None
+        self._train_steps_done = 0
+        self._steps_ingested = 0
+        self._buffer_size = 0
+        self._queue_size = 0
+        self._train_step_lag = 0
+        self._last_weight_sync_step = 0
+        self._dropped_batches = 0
+
+        self._process = self._ctx.Process(
+            target=_learner_process_main,
+            args=(
+                cfg_dict,
+                obs_dim,
+                n_actions,
+                self._transition_queue,
+                self._control_queue,
+                self._response_queue,
+                self._metrics_queue,
+                self._weights_queue,
+            ),
+            daemon=True,
+            name='LearnerProcess',
+        )
+        self._process.start()
+        self._wait_for_initial_state(agent)
+
+    def _record_drop(self) -> None:
+        self._dropped_batches += 1
+        now = time.time()
+        if now - self._last_queue_full_warn >= 5.0:
+            print('[ProcessLearner] queue saturated, dropping transition batch')
+            self._last_queue_full_warn = now
+
+    def _ensure_process_alive(self) -> None:
+        if self._process.is_alive():
+            return
+        self._drain_responses()
+        raise RuntimeError('Learner process exited unexpectedly.')
+
+    def _drain_responses(self) -> None:
+        while True:
+            try:
+                response = self._response_queue.get_nowait()
+            except queue.Empty:
+                return
+
+            if response.get('type') == 'fatal':
+                raise RuntimeError(response.get('error', 'Learner process failed.'))
+            self._pending_responses.append(response)
+
+    def _wait_for_response(self, response_type: str, path: str, timeout_s: float):
+        deadline = time.time() + timeout_s
+        while time.time() < deadline:
+            self._drain_responses()
+            for index, response in enumerate(self._pending_responses):
+                if response.get('type') == response_type and response.get('path') == path:
+                    return self._pending_responses.pop(index)
+            self._ensure_process_alive()
+            time.sleep(0.05)
+        raise TimeoutError(f'Timed out waiting for learner response {response_type!r} for {path!r}')
+
+    def _wait_for_initial_state(self, agent) -> None:
+        deadline = time.time() + self._startup_timeout_s
+        while time.time() < deadline:
+            self._drain_responses()
+            try:
+                state = self._weights_queue.get(timeout=0.2)
+            except queue.Empty:
+                self._ensure_process_alive()
+                continue
+
+            agent.load_inference_state(state)
+            self._last_weight_sync_step = int(state.get('train_steps', 0))
+            return
+
+        raise TimeoutError('Learner process did not publish initial inference weights in time.')
+
+    def submit(self, states, actions, rewards, next_states, dones):
+        self._drain_responses()
+        self._ensure_process_alive()
+        payload = _clone_transition_batch(states, actions, rewards, next_states, dones)
+
+        if self._overload_policy == 'drop_new':
+            try:
+                self._transition_queue.put_nowait(payload)
+                return True
+            except queue.Full:
+                self._record_drop()
+                return False
+
+        if self._overload_policy == 'drop_oldest':
+            try:
+                self._transition_queue.put_nowait(payload)
+                return True
+            except queue.Full:
+                try:
+                    self._transition_queue.get_nowait()
+                except queue.Empty:
+                    pass
+                try:
+                    self._transition_queue.put_nowait(payload)
+                    self._record_drop()
+                    return True
+                except queue.Full:
+                    self._record_drop()
+                    return False
+
+        try:
+            self._transition_queue.put(payload, timeout=self._submit_timeout_s)
+            return True
+        except queue.Full:
+            self._record_drop()
             return False
 
-        with self._lock:
-            self._latest_loss = loss
-            self._train_steps_done += 1
-        return True
+    def poll(self, agent) -> None:
+        self._drain_responses()
+
+        latest_metrics = None
+        while True:
+            try:
+                latest_metrics = self._metrics_queue.get_nowait()
+            except queue.Empty:
+                break
+
+        if latest_metrics is not None:
+            self._latest_loss = latest_metrics.get('latest_loss')
+            self._train_steps_done = int(latest_metrics.get('train_steps', self._train_steps_done))
+            self._steps_ingested = int(latest_metrics.get('steps_ingested', self._steps_ingested))
+            self._buffer_size = int(latest_metrics.get('buffer_size', self._buffer_size))
+            self._queue_size = int(latest_metrics.get('queue_size', self._queue_size))
+            self._train_step_lag = int(latest_metrics.get('train_step_lag', self._train_step_lag))
+
+        latest_state = None
+        while True:
+            try:
+                latest_state = self._weights_queue.get_nowait()
+            except queue.Empty:
+                break
+
+        if latest_state is not None:
+            agent.load_inference_state(latest_state)
+            self._last_weight_sync_step = int(latest_state.get('train_steps', self._last_weight_sync_step))
+
+        if self._queue_size < 0:
+            self._queue_size = _safe_queue_size(self._transition_queue)
+
+        self._ensure_process_alive()
 
     @property
     def latest_loss(self):
-        with self._lock:
-            return self._latest_loss
+        return self._latest_loss
 
     @property
     def train_steps(self):
-        with self._lock:
-            return self._train_steps_done
+        return self._train_steps_done
 
     @property
     def steps(self):
@@ -190,11 +496,45 @@ class BackgroundLearner:
 
     @property
     def buffer_size(self):
-        return len(self.agent.replay_buffer)
+        return self._buffer_size
+
+    @property
+    def queue_size(self):
+        return self._queue_size
+
+    @property
+    def train_step_lag(self):
+        return self._train_step_lag
+
+    @property
+    def last_weight_sync_step(self):
+        return self._last_weight_sync_step
+
+    @property
+    def dropped_batches(self):
+        return self._dropped_batches
+
+    def save(self, path: str, timeout_s: float = 120.0) -> None:
+        self._drain_responses()
+        self._ensure_process_alive()
+        self._control_queue.put(('save', path))
+        response = self._wait_for_response('save', path, timeout_s)
+        if not response.get('ok', False):
+            raise RuntimeError(response.get('error', f'Learner failed to save checkpoint to {path}'))
 
     def stop(self):
-        self._stop.set()
-        self._thread.join(timeout=5.0)
+        if not self._process.is_alive():
+            return
+
+        try:
+            self._control_queue.put(('shutdown', None))
+        except Exception:
+            pass
+
+        self._process.join(timeout=10.0)
+        if self._process.is_alive():
+            self._process.terminate()
+            self._process.join(timeout=5.0)
 
 def _resolve_training_device(cfg_dict, drl_cfg):
     device = cfg_dict['device']
@@ -253,7 +593,7 @@ def _build_agent(cfg_dict, drl_cfg, obs_dim, n_actions):
 
 
 def _print_training_header(num_workers, num_envs_per_worker, num_envs, vec_env_cls, train_in_bg, obs_dim, n_actions):
-    bg_label = 'BackgroundLearner' if train_in_bg else 'SyncLearner'
+    bg_label = 'ProcessLearner' if train_in_bg else 'SyncLearner'
     print(f"\n{'='*60}")
     print(
         f"Training: {num_workers} workers x {num_envs_per_worker} envs/worker "
@@ -327,6 +667,14 @@ def _write_episode_metrics(writer, learner, agent, ep_reward, ep_length, info, e
     writer.add_scalar('train/goal_achieved', float(info.get('goal_achieved', False)), episodes_completed)
     if loss_val is not None:
         writer.add_scalar('train/loss', loss_val, episodes_completed)
+    if learner is not None:
+        writer.add_scalar('learner/replay_size', learner.buffer_size, episodes_completed)
+        writer.add_scalar('learner/train_steps', learner.train_steps, episodes_completed)
+        writer.add_scalar('learner/train_step_lag', learner.train_step_lag, episodes_completed)
+        writer.add_scalar('learner/dropped_batches', learner.dropped_batches, episodes_completed)
+        if learner.queue_size >= 0:
+            writer.add_scalar('learner/queue_size', learner.queue_size, episodes_completed)
+        writer.add_scalar('learner/last_weight_sync_step', learner.last_weight_sync_step, episodes_completed)
 
 
 def _maybe_print_episode_log(
@@ -347,6 +695,13 @@ def _maybe_print_episode_log(
     fps = int(global_step / elapsed)
     buf_sz = learner.buffer_size if learner else len(agent.replay_buffer)
     train_steps = learner.train_steps if learner else agent.train_steps
+    queue_fragment = ''
+    if learner is not None:
+        queue_fragment = (
+            f' | q={learner.queue_size:4d}'
+            f' | lag={learner.train_step_lag:4d}'
+            f' | dropped={learner.dropped_batches:4d}'
+        )
     print(
         f'Episode {episodes_completed:5d} | '
         f'avg_reward={avg_rew:8.2f} | '
@@ -354,16 +709,20 @@ def _maybe_print_episode_log(
         f'goal_dist={info.get("goal_dist", float("inf")):.1f} | '
         f'buf={buf_sz:6d} | '
         f'env_steps={global_step} | '
-        f'train_steps={train_steps} | '
-        f'fps={fps}'
+        f'train_steps={train_steps}'
+        f'{queue_fragment}'
+        f' | fps={fps}'
     )
 
 
-def _maybe_save_checkpoint(episodes_completed, save_interval, checkpoint_dir, agent):
+def _maybe_save_checkpoint(episodes_completed, save_interval, checkpoint_dir, agent, learner):
     if episodes_completed % save_interval != 0:
         return
     path = os.path.join(checkpoint_dir, f'ddqn_ep{episodes_completed}.pth')
-    agent.save(path)
+    if learner is not None:
+        learner.save(path)
+    else:
+        agent.save(path)
     print(f'  → Saved checkpoint: {path}')
 
 
@@ -406,7 +765,7 @@ def _process_done_episodes(
             agent=agent,
             info=info,
         )
-        _maybe_save_checkpoint(episodes_completed, save_interval, checkpoint_dir, agent)
+        _maybe_save_checkpoint(episodes_completed, save_interval, checkpoint_dir, agent, learner)
 
         episode_rewards[env_idx] = 0.0
         episode_lengths[env_idx] = 0
@@ -448,6 +807,9 @@ def _run_training_loop(
         vec_env.step_async(current_actions)
 
     while episodes_completed < num_episodes and running_state['running']:
+        if learner is not None:
+            learner.poll(agent)
+
         step_batch, obs, current_obs, current_actions, step_size = _collect_transition_batch(
             vec_env=vec_env,
             vec_env_mode=vec_env_mode,
@@ -475,6 +837,10 @@ def _run_training_loop(
             train_freq=train_freq,
             global_step=global_step,
         )
+
+        if learner is not None:
+            agent.update_exploration(global_step)
+            learner.poll(agent)
 
         episode_rewards[ready_ids] += rewards
         episode_lengths[ready_ids] += 1
@@ -549,8 +915,8 @@ def main(cfg):
 
     learner = None
     if train_in_bg:
-        learner = BackgroundLearner(agent, train_freq, min_replay)
-        print("Background learner thread started.")
+        learner = ProcessLearner(cfg_dict, obs_dim, n_actions, agent)
+        print('Learner process started.')
 
     start_time = time.time()
     episodes_completed = 0
@@ -578,16 +944,28 @@ def main(cfg):
         print(f'\nTraining finished after {elapsed:.1f}s. Cleaning up...')
 
         if learner is not None:
-            print(f'  Learner: {learner.train_steps} gradient steps, '
-                  f'{learner.buffer_size} transitions in buffer')
-            learner.stop()
+            learner.poll(agent)
+            print(
+                f'  Learner: {learner.train_steps} gradient steps, '
+                f'{learner.buffer_size} transitions in buffer, '
+                f'dropped_batches={learner.dropped_batches}, '
+                f'train_step_lag={learner.train_step_lag}'
+            )
 
-        agent.finalize_profiling()
         vec_env.close()
 
         final_path = os.path.join(checkpoint_dir, 'ddqn_final.pth')
-        agent.save(final_path)
-        print(f'  Final checkpoint: {final_path}')
+        if learner is not None:
+            try:
+                learner.save(final_path)
+                print(f'  Final checkpoint: {final_path}')
+            finally:
+                learner.stop()
+        else:
+            agent.finalize_profiling()
+            agent.save(final_path)
+            print(f'  Final checkpoint: {final_path}')
+
         print(f'  Total episodes: {episodes_completed}, env_steps: {global_step}, '
               f'avg fps: {int(global_step / max(elapsed, 1e-3))}')
 
