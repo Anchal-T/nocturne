@@ -81,9 +81,9 @@ drl:
   log_interval: 1000
   save_interval: 100000
   checkpoint_dir: checkpoints/drl_collision_avoidance
-  num_workers: 2
-  num_envs_per_worker: 1
-  num_envs: 2
+  num_workers: 24
+  num_envs_per_worker: 2
+  num_envs: 48
   vec_env_mode: async   # async | sync | dummy
   train_in_background: true
   learner_queue_size: 256
