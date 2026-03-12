@@ -81,12 +81,12 @@ drl:
   log_interval: 1000
   save_interval: 100000
   checkpoint_dir: checkpoints/drl_collision_avoidance
-  num_workers: 24
+  num_workers: 48
   num_envs_per_worker: 2
-  num_envs: 48
+  num_envs: 96
   vec_env_mode: async   # async | sync | dummy
   train_in_background: true
-  learner_queue_size: 256
+  learner_queue_size: 1048576
   learner_queue_put_timeout_s: 0.25
   learner_overload_policy: block
   learner_max_train_steps_per_cycle: 32
@@ -124,7 +124,7 @@ occupancy_grid:
 
 reward:
   goal_bonus: 100.0
-  collision_penalty: 50.0
+  collision_penalty: 100.0
   step_penalty: 0.1
   progress_scale: 2.0
   ttz_safe_threshold: 3.0

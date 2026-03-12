@@ -116,7 +116,7 @@ class QNetwork(nn.Module):
             nn.Unflatten(1, (grid_channels, grid_rows, grid_cols)),
             nn.Conv2d(grid_channels, 16, kernel_size=3, stride=1, padding=1, bias=False),
             nn.GroupNorm(min(8, 16), 16),
-            nn.ReLU(inplace=True),
+            nn.SiLU(),
             ResidualBlock(16, 16),
             ResidualBlock(16, 32, stride=2),
             ResidualBlock(32, 32),
@@ -130,25 +130,25 @@ class QNetwork(nn.Module):
         self.grid_encoder = nn.Sequential(
             *conv_backbone,
             nn.Linear(flat_dim, enc_dim),
-            nn.ReLU(),
+            nn.SiLU(),
         )
 
         head_input_dim = enc_dim + extra_dim
         if self.dueling:
             self.advantage_head = nn.Sequential(
                 linear_cls(head_input_dim, hd_dim),
-                nn.ReLU(),
+                nn.SiLU(),
                 linear_cls(hd_dim, n_actions),
             )
             self.value_head = nn.Sequential(
                 linear_cls(head_input_dim, hd_dim),
-                nn.ReLU(),
+                nn.SiLU(),
                 linear_cls(hd_dim, 1),
             )
         else:
             self.head = nn.Sequential(
                 linear_cls(head_input_dim, hd_dim),
-                nn.ReLU(),
+                nn.SiLU(),
                 linear_cls(hd_dim, n_actions),
             )
 
