@@ -34,6 +34,7 @@ class DDQNAgentConfig:
     target_update_freq: int = 1000
     dueling: bool = True
     noisy: bool = True
+    mlp_depth: int = 2
     alpha: float = 0.6
     beta_start: float = 0.4
     beta_frames: int = 100000
@@ -81,6 +82,7 @@ class DDQNAgentConfig:
             target_update_freq=drl_cfg["target_update_freq"],
             dueling=bool(drl_cfg["dueling"]),
             noisy=bool(drl_cfg["noisy"]),
+            mlp_depth=int(drl_cfg["mlp_depth"]),
             alpha=drl_cfg["alpha"],
             beta_start=drl_cfg["beta_start"],
             beta_frames=drl_cfg["beta_frames"],
@@ -183,6 +185,7 @@ class DDQNAgent:
                 grid_cols=config.grid_cols,
                 dueling=self.dueling,
                 noisy=self.noisy,
+                mlp_depth=config.mlp_depth,
             ).to(self.device)
 
         online = _make_net()
@@ -511,6 +514,7 @@ class DDQNAgent:
         )
         ckpt_dueling = bool(checkpoint["dueling"])
         ckpt_noisy = bool(checkpoint["noisy"])
+        ckpt_mlp_depth = int(checkpoint.get("mlp_depth", 2))
 
         needs_rebuild = (
             ckpt_hl != online_base.hidden_layers
@@ -520,6 +524,7 @@ class DDQNAgent:
             or ckpt_cols != self.grid_cols
             or ckpt_dueling != online_base.dueling
             or ckpt_noisy != getattr(online_base, "noisy", True)
+            or ckpt_mlp_depth != getattr(online_base, "mlp_depth", 2)
         )
 
         if needs_rebuild:
@@ -531,6 +536,7 @@ class DDQNAgent:
                 ckpt_cols,
                 ckpt_dueling,
                 ckpt_noisy,
+                ckpt_mlp_depth,
             )
 
         self.grid_channels = ckpt_channels
@@ -538,19 +544,20 @@ class DDQNAgent:
         self.grid_cols = ckpt_cols
         self.dueling = ckpt_dueling
         self.noisy = ckpt_noisy
+        self.config.mlp_depth = ckpt_mlp_depth
 
     def _rebuild_networks(
-        self, grid_size, grid_channels, hidden_layers, grid_rows, grid_cols, dueling, noisy,
+        self, grid_size, grid_channels, hidden_layers, grid_rows, grid_cols, dueling, noisy, mlp_depth,
     ):
-        def _make(d, n):
+        def _make(d, n, md):
             return QNetwork(
                 self.obs_dim, self.n_actions, grid_size, hidden_layers,
-                grid_channels, grid_rows, grid_cols, d, noisy=n,
+                grid_channels, grid_rows, grid_cols, d, noisy=n, mlp_depth=md,
             ).to(self.device)
 
-        self.online_net = _make(dueling, noisy)
-        self.target_net = _make(dueling, noisy)
-        self.inference_net = _make(dueling, noisy)
+        self.online_net = _make(dueling, noisy, mlp_depth)
+        self.target_net = _make(dueling, noisy, mlp_depth)
+        self.inference_net = _make(dueling, noisy, mlp_depth)
         self.online_net, self.target_net, self.inference_net = self._maybe_compile(
             self.online_net, self.target_net, self.inference_net,
         )

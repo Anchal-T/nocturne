@@ -37,6 +37,51 @@ def test_ddqn_forward_and_train():
     print(f'[PASS] DDQN forward + train  (Q shape={q.shape}, loss={loss:.4f})')
 
 
+def test_mlp_depth_and_optimizers():
+    from examples.drl_collision_avoidance.dqn_modules.q_network import QNetwork
+    from examples.drl_collision_avoidance.dqn_modules.optimizers import build_optimizer
+    import torch
+
+    grid_channels = 3
+    grid_size = grid_channels * 25 * 14
+    obs_dim = grid_size + 4 + 2 + 3
+    n_actions = 15
+
+    # Test shallow
+    net_shallow = QNetwork(
+        obs_dim=obs_dim, n_actions=n_actions, grid_size=grid_size,
+        grid_channels=grid_channels, grid_rows=25, grid_cols=14,
+        dueling=True, noisy=False, mlp_depth=2
+    )
+    
+    # Test deep
+    net_deep = QNetwork(
+        obs_dim=obs_dim, n_actions=n_actions, grid_size=grid_size,
+        grid_channels=grid_channels, grid_rows=25, grid_cols=14,
+        dueling=True, noisy=False, mlp_depth=16
+    )
+
+    state = torch.randn(2, obs_dim)
+    q_shallow = net_shallow(state)
+    q_deep = net_deep(state)
+    
+    assert q_shallow.shape == (2, n_actions)
+    assert q_deep.shape == (2, n_actions)
+    
+    shallow_params = sum(p.numel() for p in net_shallow.parameters())
+    deep_params = sum(p.numel() for p in net_deep.parameters())
+    assert deep_params > shallow_params, f"Deep net should have more params: {deep_params} vs {shallow_params}"
+    
+    # Check Optimizer
+    opt_shallow = build_optimizer(net_shallow, lr=1e-3, device_type='cpu', use_muon=True)
+    opt_deep = build_optimizer(net_deep, lr=1e-3, device_type='cpu', use_muon=True)
+    
+    # In deep net, there are many layers, but Muon should grab most of them
+    assert len(opt_deep.muon.param_groups[0]['params']) > len(opt_shallow.muon.param_groups[0]['params'])
+    print(f'[PASS] MLP depth + Optimizers (Shallow: {shallow_params}, Deep: {deep_params})')
+
+
+
 def test_env_interface():
     set_display_window()
     from examples.drl_collision_avoidance.collision_avoidance_env import CollisionAvoidanceEnv
@@ -134,5 +179,6 @@ def test_env_interface():
 
 if __name__ == '__main__':
     test_ddqn_forward_and_train()
+    test_mlp_depth_and_optimizers()
     test_env_interface()
     print('\nAll smoke tests passed!')

@@ -67,6 +67,7 @@ drl:
   n_step: 3
   dueling: true
   noisy: true
+  mlp_depth: 2
   epsilon_start: 1.0
   epsilon_end: 0.05
   epsilon_decay_steps: 500000

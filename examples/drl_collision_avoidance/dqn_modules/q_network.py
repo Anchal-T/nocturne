@@ -39,6 +39,63 @@ class ResidualBlock(nn.Module):
         return self.relu(out + identity)
 
 
+class ResidualMLPBlock(nn.Module):
+    """A residual block for 1D features, inspired by Scaling CRL."""
+    def __init__(self, channels: int, linear_cls: type, use_silu: bool = True):
+        super().__init__()
+        act_cls = nn.SiLU if use_silu else nn.ReLU
+        
+        # Following Scaling CRL paper: 4 layers per residual block
+        self.layers = nn.Sequential(
+            linear_cls(channels, channels),
+            nn.LayerNorm(channels),
+            act_cls(),
+            linear_cls(channels, channels),
+            nn.LayerNorm(channels),
+            act_cls(),
+            linear_cls(channels, channels),
+            nn.LayerNorm(channels),
+            act_cls(),
+            linear_cls(channels, channels),
+            nn.LayerNorm(channels),
+            act_cls(),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x + self.layers(x)
+
+
+class ResidualMLP(nn.Module):
+    """An MLP head that relies on stacking residual blocks for depth.
+    
+    If mlp_depth = 2, behaves like a standard 2-layer MLP (1 hidden layer).
+    If mlp_depth > 3, builds floor(mlp_depth / 4) residual blocks.
+    """
+    def __init__(self, in_features: int, hidden_features: int, out_features: int, 
+                 mlp_depth: int, linear_cls: type):
+        super().__init__()
+        
+        act_cls = nn.SiLU
+        self.initial_layer = nn.Sequential(
+            linear_cls(in_features, hidden_features),
+            nn.LayerNorm(hidden_features) if mlp_depth > 3 else nn.Identity(),
+            act_cls()
+        )
+        
+        num_residual_blocks = mlp_depth // 4
+        self.residual_blocks = nn.Sequential(*[
+            ResidualMLPBlock(hidden_features, linear_cls, use_silu=True)
+            for _ in range(num_residual_blocks)
+        ])
+        
+        self.final_layer = linear_cls(hidden_features, out_features)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.initial_layer(x)
+        x = self.residual_blocks(x)
+        return self.final_layer(x)
+
+
 def _parse_hidden_layers(
     hidden_layers: Optional[List[int]],
     encoder_dim: Optional[int],
@@ -96,6 +153,7 @@ class QNetwork(nn.Module):
         encoder_dim: Optional[int] = None,
         head_dim: Optional[int] = None,
         noisy: bool = True,
+        mlp_depth: int = 2,
     ):
         super().__init__()
         enc_dim, hd_dim = _parse_hidden_layers(hidden_layers, encoder_dim, head_dim)
@@ -108,6 +166,7 @@ class QNetwork(nn.Module):
         self.grid_cols = grid_cols
         self.dueling = dueling
         self.noisy = noisy
+        self.mlp_depth = mlp_depth
 
         extra_dim = obs_dim - grid_size
         linear_cls = NoisyLinear if noisy else nn.Linear
@@ -135,21 +194,27 @@ class QNetwork(nn.Module):
 
         head_input_dim = enc_dim + extra_dim
         if self.dueling:
-            self.advantage_head = nn.Sequential(
-                linear_cls(head_input_dim, hd_dim),
-                nn.SiLU(),
-                linear_cls(hd_dim, n_actions),
+            self.advantage_head = ResidualMLP(
+                in_features=head_input_dim,
+                hidden_features=hd_dim,
+                out_features=n_actions,
+                mlp_depth=self.mlp_depth,
+                linear_cls=linear_cls,
             )
-            self.value_head = nn.Sequential(
-                linear_cls(head_input_dim, hd_dim),
-                nn.SiLU(),
-                linear_cls(hd_dim, 1),
+            self.value_head = ResidualMLP(
+                in_features=head_input_dim,
+                hidden_features=hd_dim,
+                out_features=1,
+                mlp_depth=self.mlp_depth,
+                linear_cls=linear_cls,
             )
         else:
-            self.head = nn.Sequential(
-                linear_cls(head_input_dim, hd_dim),
-                nn.SiLU(),
-                linear_cls(hd_dim, n_actions),
+            self.head = ResidualMLP(
+                in_features=head_input_dim,
+                hidden_features=hd_dim,
+                out_features=n_actions,
+                mlp_depth=self.mlp_depth,
+                linear_cls=linear_cls,
             )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:

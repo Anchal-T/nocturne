@@ -74,7 +74,7 @@ def build_optimizer(
     adamw_params = []
     # Muon convention: 2D weight matrices from hidden layers get Muon,
     # but final output heads and non-weight tensors get AdamW.
-    output_head_markers = ("advantage_head.2", "value_head.2", "head.2")
+    output_head_markers = ("advantage_head.final_layer", "value_head.final_layer", "head.final_layer")
     for name, param in network.named_parameters():
         is_hidden_weight = param.ndim == 2 and "weight" in name
         is_output_head = any(m in name for m in output_head_markers)
