@@ -462,6 +462,7 @@ class DDQNAgent:
                 "grid_cols": self.grid_cols,
                 "dueling": online_base.dueling,
                 "noisy": getattr(online_base, "noisy", True),
+                "mlp_depth": int(getattr(online_base, "mlp_depth", self.config.mlp_depth)),
                 "use_muon": self.use_muon,
             },
             path,
@@ -514,7 +515,12 @@ class DDQNAgent:
         )
         ckpt_dueling = bool(checkpoint["dueling"])
         ckpt_noisy = bool(checkpoint["noisy"])
-        ckpt_mlp_depth = int(checkpoint.get("mlp_depth", 2))
+        ckpt_mlp_depth = int(
+            checkpoint.get(
+                "mlp_depth",
+                self._infer_mlp_depth_from_state_dict(checkpoint.get("online_net")),
+            )
+        )
 
         needs_rebuild = (
             ckpt_hl != online_base.hidden_layers
@@ -589,8 +595,31 @@ class DDQNAgent:
         return out
 
     @staticmethod
-    def _add_prefix(state_dict: Dict[str, torch.Tensor], prefix: str) -> Dict[str, torch.Tensor]:
-        return {f"{prefix}{key}": value for key, value in state_dict.items()}
+    def _infer_mlp_depth_from_state_dict(state_dict: Optional[Dict[str, torch.Tensor]]) -> int:
+        if not state_dict:
+            return 2
+
+        keys = DDQNAgent._strip_known_prefixes(state_dict).keys()
+        max_block_idx = -1
+        for key in keys:
+            parts = key.split(".")
+            if len(parts) < 3:
+                continue
+            if parts[0] not in {"advantage_head", "value_head", "head"}:
+                continue
+            if parts[1] != "residual_blocks":
+                continue
+            try:
+                max_block_idx = max(max_block_idx, int(parts[2]))
+            except ValueError:
+                continue
+
+        if max_block_idx >= 0:
+            # ResidualMLP uses floor(mlp_depth / 4) residual blocks.
+            return (max_block_idx + 1) * 4
+
+        # Depths 0..3 map to the same architecture; prefer legacy default.
+        return 2
 
     @staticmethod
     def _state_dict_to_cpu(state_dict: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
@@ -600,15 +629,9 @@ class DDQNAgent:
         }
 
     def _load_state_dict_flexible(self, module: nn.Module, state_dict: Dict[str, torch.Tensor], name: str) -> None:
-        base = self._strip_known_prefixes(state_dict)
-        candidates = [state_dict, base]
-        candidates.append(self._add_prefix(base, "_orig_mod."))
-        candidates.append(self._add_prefix(base, "module."))
-        last_error = None
-        for candidate in candidates:
-            try:
-                module.load_state_dict(candidate, strict=True)
-                return
-            except RuntimeError as exc:
-                last_error = exc
-        raise RuntimeError(f"Failed to load {name} state dict across known key formats: {last_error}")
+        base_module = self._unwrap_module(module)
+        normalized_state = self._strip_known_prefixes(state_dict)
+        try:
+            base_module.load_state_dict(normalized_state, strict=True)
+        except RuntimeError as exc:
+            raise RuntimeError(f"Failed to load {name} state dict across known key formats: {exc}")
