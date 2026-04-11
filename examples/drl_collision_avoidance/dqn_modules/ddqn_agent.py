@@ -1,7 +1,7 @@
 import random
 import threading
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -127,8 +127,7 @@ class DDQNAgent:
         self.epsilon_end = config.epsilon_end
         self.epsilon_decay_steps = config.epsilon_decay_steps
 
-        self._use_amp = self.device.type == "cuda" and not self.use_muon
-        self._scaler = torch.amp.GradScaler(enabled=self._use_amp)
+        self._reset_amp_state()
         self.compile_mode = str(config.compile_mode)
         self._compile_enabled = (
             bool(config.use_torch_compile)
@@ -169,12 +168,20 @@ class DDQNAgent:
             epsilon=config.per_epsilon,
             num_envs=config.num_envs,
         )
+        self._gamma_n: float = self.gamma ** config.n_step
         self.train_steps = 0
         self._grad_accum_counter = 0
         self._pin_buffers = self._init_pin_buffers(config.batch_size, obs_dim)
 
+    def _instantiate_networks(self, make_fn: Callable[[], QNetwork]) -> Tuple[nn.Module, nn.Module, nn.Module]:
+        """Create three networks via make_fn, apply compile and eval modes."""
+        online, target, inference = make_fn(), make_fn(), make_fn()
+        online, target, inference = self._maybe_compile(online, target, inference)
+        self._set_eval_network_modes(target, inference)
+        return online, target, inference
+
     def _build_networks(self, config: DDQNAgentConfig):
-        def _make_net() -> QNetwork:
+        def _make() -> QNetwork:
             return QNetwork(
                 obs_dim=self.obs_dim,
                 n_actions=self.n_actions,
@@ -188,12 +195,7 @@ class DDQNAgent:
                 mlp_depth=config.mlp_depth,
             ).to(self.device)
 
-        online = _make_net()
-        target = _make_net()
-        inference = _make_net()
-        online, target, inference = self._maybe_compile(online, target, inference)
-        self._set_eval_network_modes(target, inference)
-        return online, target, inference
+        return self._instantiate_networks(_make)
 
     def _init_pin_buffers(self, batch_size: int, obs_dim: int) -> Optional[dict]:
         if self.device.type != "cuda":
@@ -223,6 +225,10 @@ class DDQNAgent:
             self._compile_enabled = False
             return online, target, inference
 
+    def _reset_amp_state(self) -> None:
+        self._use_amp = self.device.type == "cuda" and not self.use_muon
+        self._scaler = torch.amp.GradScaler(enabled=self._use_amp)
+
     def _set_eval_network_modes(self, target: nn.Module, inference: nn.Module) -> None:
         target.eval()
         inference.eval()
@@ -232,6 +238,12 @@ class DDQNAgent:
     def _reset_inference_noise_if_needed(self) -> None:
         if self.noisy:
             self._unwrap_module(self.inference_net).reset_noise()
+
+    def _greedy_inference(self, states_t: torch.Tensor) -> torch.Tensor:
+        """Forward pass on inference_net under lock with noise reset. Returns Q-values."""
+        with self.inference_lock:
+            self._reset_inference_noise_if_needed()
+            return self.inference_net(states_t)
 
     @staticmethod
     def _set_noisy_layers_training(module: nn.Module, training: bool) -> None:
@@ -245,11 +257,8 @@ class DDQNAgent:
         if not self.noisy and random.random() < self.epsilon:
             return random.randrange(self.n_actions)
         with torch.no_grad():
-            state_t = torch.FloatTensor(state).unsqueeze(0).to(self.device)
-            with self.inference_lock:
-                self._reset_inference_noise_if_needed()
-                q_values = self.inference_net(state_t)
-            return q_values.argmax(dim=1).item()
+            state_t = torch.from_numpy(np.asarray(state, dtype=np.float32)).unsqueeze(0).to(self.device)
+            return self._greedy_inference(state_t).argmax(dim=1).item()
 
     def select_action_batch(self, states: np.ndarray) -> np.ndarray:
         batch_size = states.shape[0]
@@ -258,11 +267,8 @@ class DDQNAgent:
         if self.noisy:
             # NoisyNet handles exploration — always greedy
             with torch.no_grad():
-                states_t = torch.FloatTensor(states).to(self.device)
-                with self.inference_lock:
-                    self._reset_inference_noise_if_needed()
-                    q_values = self.inference_net(states_t)
-                actions[:] = q_values.argmax(dim=1).cpu().numpy()
+                states_t = torch.from_numpy(np.asarray(states, dtype=np.float32)).to(self.device)
+                actions[:] = self._greedy_inference(states_t).argmax(dim=1).cpu().numpy()
             return actions
 
         random_mask = np.random.rand(batch_size) < self.epsilon
@@ -272,10 +278,8 @@ class DDQNAgent:
         greedy_mask = ~random_mask
         if greedy_mask.any():
             with torch.no_grad():
-                states_t = torch.FloatTensor(states[greedy_mask]).to(self.device)
-                with self.inference_lock:
-                    q_values = self.inference_net(states_t)
-                actions[greedy_mask] = q_values.argmax(dim=1).cpu().numpy()
+                states_t = torch.from_numpy(np.asarray(states[greedy_mask], dtype=np.float32)).to(self.device)
+                actions[greedy_mask] = self._greedy_inference(states_t).argmax(dim=1).cpu().numpy()
         return actions
 
     # --- Replay Buffer ---
@@ -316,12 +320,12 @@ class DDQNAgent:
             )
 
         return (
-            torch.FloatTensor(batch["obs"]).to(self.device),
-            torch.FloatTensor(batch["next_obs"]).to(self.device),
-            torch.LongTensor(batch["acts"]).to(self.device),
-            torch.FloatTensor(batch["rews"]).to(self.device),
-            torch.FloatTensor(batch["done"]).to(self.device),
-            torch.FloatTensor(batch["weights"]).to(self.device),
+            torch.from_numpy(batch["obs"]).to(self.device),
+            torch.from_numpy(batch["next_obs"]).to(self.device),
+            torch.from_numpy(batch["acts"].astype(np.int64, copy=False)).to(self.device),
+            torch.from_numpy(batch["rews"]).to(self.device),
+            torch.from_numpy(batch["done"]).to(self.device),
+            torch.from_numpy(batch["weights"]).to(self.device),
         )
 
     def _compute_loss(self, obs_t, acts_t, next_obs_t, rews_t, dones_t, weights_t):
@@ -330,7 +334,7 @@ class DDQNAgent:
             with torch.no_grad():
                 best_acts = self.online_net(next_obs_t).argmax(dim=1)
                 next_q = self.target_net(next_obs_t).gather(1, best_acts.unsqueeze(1)).squeeze(1)
-                target_q = rews_t + (self.gamma ** self.config.n_step) * next_q * (1.0 - dones_t)
+                target_q = rews_t + self._gamma_n * next_q * (1.0 - dones_t)
             td_errors = current_q - target_q
             loss = (weights_t * F.huber_loss(current_q, target_q, reduction='none')).mean()
         return loss, td_errors
@@ -363,7 +367,7 @@ class DDQNAgent:
 
         self._profiler.maybe_start()
 
-        # Reset noisy layers before each training forward pass
+        # Noisy layers re-sample each forward pass; reset ensures fresh noise for this step.
         self.online_net.train()
         if self.noisy:
             self._unwrap_module(self.online_net).reset_noise()
@@ -374,13 +378,11 @@ class DDQNAgent:
         loss, td_errors = self._compute_loss(obs_t, acts_t, next_obs_t, rews_t, dones_t, weights_t)
         self._apply_gradient_step(loss)
 
-        # Post-step bookkeeping
-        with torch.no_grad():
-            new_priorities = td_errors.abs().cpu().numpy()
+        new_priorities = td_errors.detach().abs().cpu().numpy()
         self.replay_buffer.update_priorities(batch["indices"], new_priorities)
         self.train_steps += 1
         self.replay_buffer.update_beta(env_steps)
-        self._decay_epsilon(env_steps)
+        self.update_exploration(env_steps)
 
         should_sync_inference = (self.train_steps % self.inference_sync_interval) == 0
         if self.train_steps % self.target_update_freq == 0:
@@ -431,14 +433,12 @@ class DDQNAgent:
             self.epsilon = float(state["epsilon"])
 
     def update_exploration(self, env_steps: int) -> float:
-        self._decay_epsilon(env_steps)
+        # At env_steps == 0, epsilon is left unchanged: it holds epsilon_start
+        # on first call, or the last value restored from a checkpoint.
+        if env_steps > 0:
+            fraction = min(1.0, env_steps / max(1, self.epsilon_decay_steps))
+            self.epsilon = self.epsilon_start + fraction * (self.epsilon_end - self.epsilon_start)
         return self.epsilon
-
-    def _decay_epsilon(self, env_steps: int):
-        if env_steps <= 0:
-            return
-        fraction = min(1.0, env_steps / max(1, self.epsilon_decay_steps))
-        self.epsilon = self.epsilon_start + fraction * (self.epsilon_end - self.epsilon_start)
 
     def finalize_profiling(self) -> None:
         self._profiler.finalize(export_trace=True)
@@ -461,8 +461,8 @@ class DDQNAgent:
                 "grid_rows": self.grid_rows,
                 "grid_cols": self.grid_cols,
                 "dueling": online_base.dueling,
-                "noisy": getattr(online_base, "noisy", True),
-                "mlp_depth": int(getattr(online_base, "mlp_depth", self.config.mlp_depth)),
+                "noisy": online_base.noisy,
+                "mlp_depth": int(online_base.mlp_depth),
                 "use_muon": self.use_muon,
             },
             path,
@@ -479,8 +479,7 @@ class DDQNAgent:
                 self.optimizer = build_optimizer(
                     self.online_net, lr, self.device.type, self.use_muon,
                 )
-                self._use_amp = self.device.type == "cuda" and not self.use_muon
-                self._scaler = torch.amp.GradScaler(enabled=self._use_amp)
+                self._reset_amp_state()
 
         self._load_checkpoint_architecture(checkpoint)
         self._load_state_dict_flexible(self.online_net, checkpoint["online_net"], "online_net")
@@ -525,12 +524,12 @@ class DDQNAgent:
         needs_rebuild = (
             ckpt_hl != online_base.hidden_layers
             or ckpt_grid != online_base.grid_size
-            or ckpt_channels != getattr(online_base, "grid_channels", 1)
+            or ckpt_channels != online_base.grid_channels
             or ckpt_rows != self.grid_rows
             or ckpt_cols != self.grid_cols
             or ckpt_dueling != online_base.dueling
-            or ckpt_noisy != getattr(online_base, "noisy", True)
-            or ckpt_mlp_depth != getattr(online_base, "mlp_depth", 2)
+            or ckpt_noisy != online_base.noisy
+            or ckpt_mlp_depth != online_base.mlp_depth
         )
 
         if needs_rebuild:
@@ -550,24 +549,25 @@ class DDQNAgent:
         self.grid_cols = ckpt_cols
         self.dueling = ckpt_dueling
         self.noisy = ckpt_noisy
+        # Intentionally mutate config to mirror the checkpoint architecture so
+        # that subsequent saves/reloads remain self-consistent.
+        self.config.grid_channels = ckpt_channels
+        self.config.grid_rows = ckpt_rows
+        self.config.grid_cols = ckpt_cols
+        self.config.dueling = ckpt_dueling
+        self.config.noisy = ckpt_noisy
         self.config.mlp_depth = ckpt_mlp_depth
 
     def _rebuild_networks(
         self, grid_size, grid_channels, hidden_layers, grid_rows, grid_cols, dueling, noisy, mlp_depth,
     ):
-        def _make(d, n, md):
+        def _make():
             return QNetwork(
                 self.obs_dim, self.n_actions, grid_size, hidden_layers,
-                grid_channels, grid_rows, grid_cols, d, noisy=n, mlp_depth=md,
+                grid_channels, grid_rows, grid_cols, dueling, noisy=noisy, mlp_depth=mlp_depth,
             ).to(self.device)
 
-        self.online_net = _make(dueling, noisy, mlp_depth)
-        self.target_net = _make(dueling, noisy, mlp_depth)
-        self.inference_net = _make(dueling, noisy, mlp_depth)
-        self.online_net, self.target_net, self.inference_net = self._maybe_compile(
-            self.online_net, self.target_net, self.inference_net,
-        )
-        self._set_eval_network_modes(self.target_net, self.inference_net)
+        self.online_net, self.target_net, self.inference_net = self._instantiate_networks(_make)
         lr = get_optimizer_lr(self.optimizer)
         self.optimizer = build_optimizer(self.online_net, lr, self.device.type, self.use_muon)
 
@@ -623,10 +623,7 @@ class DDQNAgent:
 
     @staticmethod
     def _state_dict_to_cpu(state_dict: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
-        return {
-            key: value.detach().cpu().clone()
-            for key, value in state_dict.items()
-        }
+        return {key: value.detach().cpu().clone() for key, value in state_dict.items()}
 
     def _load_state_dict_flexible(self, module: nn.Module, state_dict: Dict[str, torch.Tensor], name: str) -> None:
         base_module = self._unwrap_module(module)

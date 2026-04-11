@@ -34,26 +34,23 @@ class HybridOptimizer:
         self.adamw.load_state_dict(state_dict["adamw"])
 
 
-def _make_adam(params: List[nn.Parameter], lr: float, device_type: str) -> optim.Adam:
-    kwargs = {"lr": float(lr)}
+def _make_optimizer_fused(cls, params, kwargs: dict, device_type: str):
+    """Construct optimizer cls(params, **kwargs), adding fused=True on CUDA with fallback."""
     if device_type == "cuda":
         kwargs["fused"] = True
     try:
-        return optim.Adam(params, **kwargs)
+        return cls(params, **kwargs)
     except TypeError:
         kwargs.pop("fused", None)
-        return optim.Adam(params, **kwargs)
+        return cls(params, **kwargs)
+
+
+def _make_adam(params: List[nn.Parameter], lr: float, device_type: str) -> optim.Adam:
+    return _make_optimizer_fused(optim.Adam, params, {"lr": float(lr)}, device_type)
 
 
 def _make_adamw(params: List[nn.Parameter], lr: float, device_type: str) -> optim.AdamW:
-    kwargs = {"lr": lr * 0.5, "weight_decay": 0.01}
-    if device_type == "cuda":
-        kwargs["fused"] = True
-    try:
-        return optim.AdamW(params, **kwargs)
-    except TypeError:
-        kwargs.pop("fused", None)
-        return optim.AdamW(params, **kwargs)
+    return _make_optimizer_fused(optim.AdamW, params, {"lr": lr * 0.5, "weight_decay": 0.01}, device_type)
 
 
 def build_optimizer(

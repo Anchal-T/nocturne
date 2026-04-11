@@ -236,7 +236,6 @@ def _learner_process_main(
 
         while True:
             shutting_down = _drain_learner_commands(control_queue, response_queue, agent, shutting_down)
-
             if shutting_down:
                 try:
                     batch = transition_queue.get_nowait()
@@ -553,7 +552,7 @@ def _resolve_training_device(cfg_dict, drl_cfg):
     return device
 
 
-def _build_vec_env(cfg_dict, num_envs, vec_env_mode):
+def _build_vec_env(cfg_dict, num_envs, num_envs_per_worker, vec_env_mode):
     from examples.drl_collision_avoidance.vec_env import (
         AsyncSubprocVecEnv,
         DummyVecEnv,
@@ -570,7 +569,8 @@ def _build_vec_env(cfg_dict, num_envs, vec_env_mode):
     if vec_env_cls is None:
         raise ValueError(f"Unknown vec_env_mode={vec_env_mode!r}, expected one of {list(vec_env_classes)}")
 
-    return vec_env_cls(env_fns), vec_env_cls
+    kwargs = {"num_envs_per_worker": num_envs_per_worker} if vec_env_mode == "async" else {}
+    return vec_env_cls(env_fns, **kwargs), vec_env_cls
 
 
 def _build_agent(cfg_dict, drl_cfg, obs_dim, n_actions, num_envs: int = 1):
@@ -617,9 +617,11 @@ def _collect_transition_batch(
     current_actions,
     num_envs,
     agent,
+    min_ready_fraction=0.5,
 ):
     if vec_env_mode == 'async':
-        ready_ids, next_obs, rewards, dones, infos = vec_env.step_wait(min_ready=1)
+        min_ready = max(1, int(num_envs * min_ready_fraction))
+        ready_ids, next_obs, rewards, dones, infos = vec_env.step_wait(min_ready=min_ready)
         if len(ready_ids) == 0:
             return None, obs, current_obs, current_actions, 0
 
@@ -791,6 +793,7 @@ def _run_training_loop(
     num_episodes,
     min_replay,
     train_freq,
+    min_ready_fraction,
     log_interval,
     save_interval,
     checkpoint_dir,
@@ -824,6 +827,7 @@ def _run_training_loop(
             current_actions=current_actions,
             num_envs=num_envs,
             agent=agent,
+            min_ready_fraction=min_ready_fraction,
         )
         if step_batch is None:
             continue
@@ -888,7 +892,7 @@ def main(cfg):
     vec_env_mode = str(drl_cfg['vec_env_mode']).lower()
     train_in_bg = drl_cfg['train_in_background']
 
-    vec_env, vec_env_cls = _build_vec_env(cfg_dict, num_envs, vec_env_mode)
+    vec_env, vec_env_cls = _build_vec_env(cfg_dict, num_envs, num_envs_per_worker, vec_env_mode)
     obs_dim = vec_env.observation_space.shape[0]
     n_actions = vec_env.action_space.n
     _print_training_header(
@@ -939,6 +943,7 @@ def main(cfg):
             num_episodes=num_episodes,
             min_replay=min_replay,
             train_freq=train_freq,
+            min_ready_fraction=float(drl_cfg.get('min_ready_fraction', 0.5)),
             log_interval=log_interval,
             save_interval=save_interval,
             checkpoint_dir=checkpoint_dir,

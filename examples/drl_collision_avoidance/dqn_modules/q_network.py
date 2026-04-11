@@ -6,17 +6,49 @@ import torch.nn as nn
 from .noisy_layer import NoisyLinear
 
 
+def _lecun_init_linear(m: nn.Linear) -> None:
+    """LeCun uniform init used by the CRL modules.
+
+    Matches variance_scaling(1/3, "fan_in", "uniform"), i.e.
+    Uniform(-sqrt(1 / fan_in), sqrt(1 / fan_in)).
+    """
+    fan_in, _ = nn.init._calculate_fan_in_and_fan_out(m.weight)
+    bound = (1.0 / max(1, fan_in)) ** 0.5
+    nn.init.uniform_(m.weight, -bound, bound)
+    if m.bias is not None:
+        nn.init.zeros_(m.bias)
+
+
+def _apply_lecun_init(module: nn.Module) -> None:
+    """Apply _lecun_init_linear to every nn.Linear sub-layer in module.
+
+    Skips NoisyLinear (not a subclass of nn.Linear) since it self-initializes
+    via its own reset_parameters().
+    """
+    for m in module.modules():
+        if isinstance(m, nn.Linear):
+            _lecun_init_linear(m)
+
+
 class ResidualBlock(nn.Module):
     def __init__(self, in_channels: int, out_channels: int, stride: int = 1):
         super().__init__()
         self.conv1 = nn.Conv2d(
-            in_channels, out_channels,
-            kernel_size=3, stride=stride, padding=1, bias=False,
+            in_channels,
+            out_channels,
+            kernel_size=3,
+            stride=stride,
+            padding=1,
+            bias=False,
         )
         self.norm1 = nn.GroupNorm(min(8, out_channels), out_channels)
         self.conv2 = nn.Conv2d(
-            out_channels, out_channels,
-            kernel_size=3, stride=1, padding=1, bias=False,
+            out_channels,
+            out_channels,
+            kernel_size=3,
+            stride=1,
+            padding=1,
+            bias=False,
         )
         self.norm2 = nn.GroupNorm(min(8, out_channels), out_channels)
         self.relu = nn.ReLU(inplace=True)
@@ -24,8 +56,11 @@ class ResidualBlock(nn.Module):
         if stride != 1 or in_channels != out_channels:
             self.shortcut = nn.Sequential(
                 nn.Conv2d(
-                    in_channels, out_channels,
-                    kernel_size=1, stride=stride, bias=False,
+                    in_channels,
+                    out_channels,
+                    kernel_size=1,
+                    stride=stride,
+                    bias=False,
                 ),
                 nn.GroupNorm(min(8, out_channels), out_channels),
             )
@@ -41,10 +76,11 @@ class ResidualBlock(nn.Module):
 
 class ResidualMLPBlock(nn.Module):
     """A residual block for 1D features, inspired by Scaling CRL."""
+
     def __init__(self, channels: int, linear_cls: type, use_silu: bool = True):
         super().__init__()
         act_cls = nn.SiLU if use_silu else nn.ReLU
-        
+
         # Following Scaling CRL paper: 4 layers per residual block
         self.layers = nn.Sequential(
             linear_cls(channels, channels),
@@ -60,6 +96,7 @@ class ResidualMLPBlock(nn.Module):
             nn.LayerNorm(channels),
             act_cls(),
         )
+        _apply_lecun_init(self.layers)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return x + self.layers(x)
@@ -67,28 +104,40 @@ class ResidualMLPBlock(nn.Module):
 
 class ResidualMLP(nn.Module):
     """An MLP head that relies on stacking residual blocks for depth.
-    
-    If mlp_depth = 2, behaves like a standard 2-layer MLP (1 hidden layer).
-    If mlp_depth > 3, builds floor(mlp_depth / 4) residual blocks.
+
+    Uses a plain 2-layer head for mlp_depth < 4 so legacy checkpoints with
+    mlp_depth=2 still load without residual-block parameters. Each additional
+    multiple of 4 layers adds one residual block. LayerNorm is added after the
+    input projection only when mlp_depth > 3.
     """
-    def __init__(self, in_features: int, hidden_features: int, out_features: int, 
-                 mlp_depth: int, linear_cls: type):
+
+    def __init__(
+        self,
+        in_features: int,
+        hidden_features: int,
+        out_features: int,
+        mlp_depth: int,
+        linear_cls: type,
+    ):
         super().__init__()
-        
+
         act_cls = nn.SiLU
         self.initial_layer = nn.Sequential(
             linear_cls(in_features, hidden_features),
             nn.LayerNorm(hidden_features) if mlp_depth > 3 else nn.Identity(),
-            act_cls()
+            act_cls(),
         )
-        
+
         num_residual_blocks = mlp_depth // 4
-        self.residual_blocks = nn.Sequential(*[
-            ResidualMLPBlock(hidden_features, linear_cls, use_silu=True)
-            for _ in range(num_residual_blocks)
-        ])
-        
+        self.residual_blocks = nn.Sequential(
+            *[
+                ResidualMLPBlock(hidden_features, linear_cls, use_silu=True)
+                for _ in range(num_residual_blocks)
+            ]
+        )
+
         self.final_layer = linear_cls(hidden_features, out_features)
+        _apply_lecun_init(self.final_layer)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.initial_layer(x)
@@ -173,7 +222,9 @@ class QNetwork(nn.Module):
 
         conv_backbone = nn.Sequential(
             nn.Unflatten(1, (grid_channels, grid_rows, grid_cols)),
-            nn.Conv2d(grid_channels, 16, kernel_size=3, stride=1, padding=1, bias=False),
+            nn.Conv2d(
+                grid_channels, 16, kernel_size=3, stride=1, padding=1, bias=False
+            ),
             nn.GroupNorm(min(8, 16), 16),
             nn.SiLU(),
             ResidualBlock(16, 16),
@@ -191,6 +242,7 @@ class QNetwork(nn.Module):
             nn.Linear(flat_dim, enc_dim),
             nn.SiLU(),
         )
+        _apply_lecun_init(self.grid_encoder)
 
         head_input_dim = enc_dim + extra_dim
         if self.dueling:
@@ -218,8 +270,8 @@ class QNetwork(nn.Module):
             )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        grid_features = self.grid_encoder(x[:, :self.grid_size])
-        combined = torch.cat([grid_features, x[:, self.grid_size:]], dim=1)
+        grid_features = self.grid_encoder(x[:, : self.grid_size])
+        combined = torch.cat([grid_features, x[:, self.grid_size :]], dim=1)
         if self.dueling:
             advantage = self.advantage_head(combined)
             value = self.value_head(combined)

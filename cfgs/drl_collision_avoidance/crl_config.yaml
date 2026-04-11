@@ -1,0 +1,110 @@
+# CRL training configuration for nocturne collision avoidance
+# Based on: "1000 Layer Networks for Self-Supervised RL" (Wang et al. 2025)
+seed: 42
+device: 'cuda:0'
+experiment: crl_collision_avoidance
+
+single_agent_mode: True
+max_num_vehicles: 1
+episode_length: 80
+num_files: -1
+scenario_split: train
+scenario_path: null
+dt: 0.1
+
+discretize_actions: False
+accel_lower_bound: -3.0
+accel_upper_bound: 2.0
+steering_lower_bound: -0.7
+steering_upper_bound: 0.7
+head_angle_lower_bound: 0.0
+head_angle_upper_bound: 0.0
+head_angle_discretization: 1
+
+remove_at_goal: True
+remove_at_collide: True
+
+scenario:
+  start_time: 0
+  allow_non_vehicles: True
+  moving_threshold: 0.2
+  speed_threshold: 0.05
+  max_visible_objects: 16
+  max_visible_road_points: 1000
+  max_visible_traffic_lights: 20
+  max_visible_stop_signs: 4
+  sample_every_n: 1
+  road_edge_first: False
+
+# rew_cfg used only for base_env done-condition bookkeeping (not as CRL reward)
+rew_cfg:
+  shared_reward: False
+  goal_tolerance: 2.0
+  reward_scaling: 1.0
+  collision_penalty: 0.0
+  shaped_goal_distance: False
+  shaped_goal_distance_scaling: 0.0
+  goal_distance_penalty: False
+  goal_achieved_bonus: 0.0
+  position_target: True
+  position_target_tolerance: 5.0
+  speed_target: False
+  speed_target_tolerance: 1.0
+  heading_target: False
+  heading_target_tolerance: 0.3
+
+subscriber:
+  view_angle: 2.1
+  view_dist: 80
+  use_ego_state: True
+  use_observations: True
+  keep_inactive_agents: False
+  n_frames_stacked: 1        # CRL uses single-frame observations
+  render_img_width: 640
+  render_img_height: 480
+  render_padding: 30.0
+
+occupancy_grid:
+  rows: 20
+  cols: 10
+  forward_dist: 40.0
+  backward_dist: 5.0
+  lateral_dist: 10.0
+  vru_weight: 2.0
+  vehicle_weight: 1.0
+  road_edge_weight: 3.0
+
+# CRL-specific settings (passed to CRLAgentConfig in train_crl.py)
+crl:
+  # --- Architecture (depth=16 is baseline; scale to 64/256 for full benefit) ---
+  critic_depth: 16          # total residual layers for SA/G encoders  (16 = 4 blocks)
+  actor_depth: 16           # total residual layers for actor
+  network_width: 256        # hidden width of all residual blocks
+  embed_dim: 64             # dimension of SA/G encoder output embeddings
+
+  # --- Optimisation ---
+  critic_lr: 3.0e-4
+  actor_lr: 3.0e-4
+  alpha_lr: 3.0e-4
+  batch_size: 512
+  gamma: 0.99
+  target_entropy_factor: 0.5       # target_entropy = -0.5 * action_dim
+  logsumexp_penalty_coeff: 0.1     # from paper
+  gradient_steps_per_episode: 10   # gradient updates after each episode
+
+  # --- HER buffer ---
+  her_max_episodes: 50000
+  min_replay_episodes: 200         # wait for this many episodes before training
+
+  # --- Training loop ---
+  total_episodes: 1000000
+  num_envs: 8                      # number of environments (run sequentially)
+  max_episode_steps: 80
+
+  # --- Logging / checkpointing ---
+  log_interval: 100
+  save_interval: 10000
+  checkpoint_dir: checkpoints/crl_collision_avoidance
+
+  # --- Optional: resume from checkpoint ---
+  resume_checkpoint: null

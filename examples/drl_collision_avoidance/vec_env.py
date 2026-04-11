@@ -10,8 +10,10 @@ PPO ``env_wrappers.py``:
                             buffers (closest to Sample Factory)
 """
 
+import math
 import os
 import time
+import traceback
 from multiprocessing.connection import wait
 
 import numpy as np
@@ -20,9 +22,15 @@ import torch.multiprocessing as mp
 
 # Set start method to spawn for proper CUDA/PyTorch sharing
 try:
-    mp.set_start_method('spawn', force=True)
+    mp.set_start_method("spawn", force=True)
 except RuntimeError:
     pass
+
+
+# Info buffer column order — must match between _write_info_to_buffer and step_wait.
+_INFO_KEYS = ("collided", "goal_achieved", "goal_dist")
+_INFO_CASTS = (bool, bool, float)
+
 
 # Serialization helper
 class CloudpickleWrapper:
@@ -33,133 +41,19 @@ class CloudpickleWrapper:
 
     def __getstate__(self):
         import cloudpickle
+
         return cloudpickle.dumps(self.fn)
 
     def __setstate__(self, ob):
         import pickle
+
         self.fn = pickle.loads(ob)
 
     def __call__(self):
         return self.fn()
 
 
-# Worker functions
-def _worker(remote, parent_remote, env_fn_wrapper):
-    """Basic synchronous subprocess worker (for SubprocVecEnv)."""
-    parent_remote.close()
-    env = env_fn_wrapper()
-
-    while True:
-        cmd, data = remote.recv()
-        if cmd == 'step':
-            obs, reward, done, info = env.step(data)
-            if done:
-                obs = env.reset()
-            remote.send((obs, reward, done, info))
-        elif cmd == 'reset':
-            remote.send(env.reset())
-        elif cmd == 'get_spaces':
-            remote.send((env.observation_space, env.action_space))
-        elif cmd == 'close':
-            env.close()
-            remote.close()
-            break
-        else:
-            raise NotImplementedError(f"Unknown command: {cmd}")
-
-
-def _async_worker(
-    worker_id,
-    remote,
-    parent_remote,
-    env_fn_wrapper,
-    obs_buffer,
-    action_buffer,
-    reward_buffer,
-    done_buffer,
-    info_buffer,
-    decorrelation_steps,
-    cpu_cores,
-):
-    """Fully-async worker with zero-copy PyTorch shared memory for full trajectories."""
-    parent_remote.close()
-
-    if cpu_cores:
-        try:
-            os.sched_setaffinity(0, cpu_cores)
-            print(f"[Actor {worker_id}] pid {os.getpid()} pinned to cores {sorted(cpu_cores)}")
-        except (AttributeError, OSError):
-            pass
-
-    os.environ['OMP_NUM_THREADS'] = '1'
-    torch.set_num_threads(1)
-
-    env = env_fn_wrapper()
-
-    # Initial reset + decorrelation
-    obs = env.reset()
-    for _ in range(decorrelation_steps):
-        action = env.action_space.sample()
-        try:
-            obs, _, done, _ = env.step(action)
-        except Exception:
-            done = True
-        if done:
-            obs = env.reset()
-
-    # Write initial obs
-    obs_buffer[worker_id].copy_(torch.from_numpy(obs).float())
-
-    try:
-        while True:
-            cmd, data = remote.recv()
-            if cmd == 'step':
-                # Read action from shared memory
-                if len(action_buffer.shape) == 1:
-                    action = action_buffer[worker_id].item()
-                else:
-                    action = action_buffer[worker_id].numpy()
-
-                try:
-                    obs, reward, done, info = env.step(action)
-                except Exception:
-                    obs = env.reset()
-                    reward, done, info = 0.0, True, {}
-
-                # Write results to shared memory
-                reward_buffer[worker_id] = float(reward)
-                done_buffer[worker_id] = bool(done)
-                info_buffer[worker_id, 0] = float(info.get('collided', False))
-                info_buffer[worker_id, 1] = float(info.get('goal_achieved', False))
-                info_buffer[worker_id, 2] = float(info.get('goal_dist', 0.0))
-
-                if done:
-                    obs = env.reset()
-
-                obs_buffer[worker_id].copy_(torch.from_numpy(obs).float())
-
-                remote.send('step_done')
-            elif cmd == 'reset':
-                obs = env.reset()
-                obs_buffer[worker_id].copy_(torch.from_numpy(obs).float())
-                remote.send('reset_done')
-            elif cmd == 'get_spaces':
-                remote.send((env.observation_space, env.action_space))
-            elif cmd == 'close':
-                env.close()
-                remote.close()
-                break
-            else:
-                raise NotImplementedError(f"Unknown command: {cmd}")
-    except Exception as e:
-        print(f"[Actor {worker_id}] Error: {e}")
-    finally:
-        pass
-
-
-# ---------------------------------------------------------------------------
 # DummyVecEnv — sequential, single-process (for debugging)
-# ---------------------------------------------------------------------------
 class DummyVecEnv:
     """Runs all envs sequentially in the main process."""
 
@@ -194,9 +88,141 @@ class DummyVecEnv:
             env.close()
 
 
-# ---------------------------------------------------------------------------
+# Worker functions
+def _worker(remote, parent_remote, env_fn_wrapper):
+    """Basic synchronous subprocess worker (for SubprocVecEnv)."""
+    parent_remote.close()
+    env = env_fn_wrapper()
+
+    while True:
+        cmd, data = remote.recv()
+        if cmd == "step":
+            obs, reward, done, info = env.step(data)
+            if done:
+                obs = env.reset()
+            remote.send((obs, reward, done, info))
+        elif cmd == "reset":
+            remote.send(env.reset())
+        elif cmd == "get_spaces":
+            remote.send((env.observation_space, env.action_space))
+        elif cmd == "close":
+            env.close()
+            remote.close()
+            break
+        else:
+            raise NotImplementedError(f"Unknown command: {cmd}")
+
+
+def _setup_worker_env(worker_id, cpu_cores):
+    """Configures CPU affinity and threading for the async worker."""
+    if cpu_cores:
+        try:
+            os.sched_setaffinity(0, cpu_cores)
+            print(f"[Actor {worker_id}] pid {os.getpid()} pinned to cores {sorted(cpu_cores)}")
+        except (AttributeError, OSError):
+            pass
+    os.environ["OMP_NUM_THREADS"] = "1"
+    torch.set_num_threads(1)
+
+
+def _decorrelate_envs(envs, steps, obs_buffer, env_indices, max_consecutive_failures=5):
+    """Performs initial random steps to decorrelate environment streams."""
+    obs = envs.reset()
+    consecutive_failures = 0
+    for _ in range(steps):
+        actions = np.random.randint(0, envs.action_space.n, size=envs.n_envs)
+        try:
+            obs, _, _, _ = envs.step(actions)
+            consecutive_failures = 0
+        except Exception:
+            consecutive_failures += 1
+            print(f"[decorrelate] Exception during random step:\n{traceback.format_exc()}")
+            if consecutive_failures >= max_consecutive_failures:
+                print(f"[decorrelate] {max_consecutive_failures} consecutive failures, aborting decorrelation.")
+                break
+            obs = envs.reset()
+    obs_buffer[env_indices].copy_(torch.from_numpy(obs).float())
+
+
+def _write_info_to_buffer(info_buffer, env_indices, infos):
+    """Extracts _INFO_KEYS metrics from info dicts into the shared memory buffer."""
+    data = np.array(
+        [[float(info.get(k, 0.0)) for k in _INFO_KEYS] for info in infos],
+        dtype=np.float32,
+    )
+    info_buffer[env_indices] = torch.from_numpy(data)
+
+
+def _handle_worker_step(envs, worker_id, env_indices, buffers):
+    """Executes a vectorized step and updates shared memory buffers."""
+    obs_buf, act_buf, rew_buf, done_buf, info_buf = buffers
+    actions = act_buf[env_indices].numpy()
+
+    try:
+        obs, reward, done, infos = envs.step(actions)
+    except Exception:
+        print(f"[Actor {worker_id}] Exception in step:\n{traceback.format_exc()}")
+        obs = envs.reset()
+        reward = np.zeros(envs.n_envs, dtype=np.float32)
+        done = np.ones(envs.n_envs, dtype=bool)
+        infos = [{} for _ in range(envs.n_envs)]
+
+    rew_buf[env_indices] = torch.from_numpy(reward)
+    done_buf[env_indices] = torch.from_numpy(done)
+    _write_info_to_buffer(info_buf, env_indices, infos)
+    obs_buf[env_indices].copy_(torch.from_numpy(obs).float())
+
+
+def _async_worker(
+    worker_id,
+    remote,
+    parent_remote,
+    env_fn_wrappers,
+    obs_buffer,
+    action_buffer,
+    reward_buffer,
+    done_buffer,
+    info_buffer,
+    decorrelation_steps,
+    cpu_cores,
+    env_indices,
+):
+    """Fully-async worker with zero-copy PyTorch shared memory and internal vectorization."""
+    parent_remote.close()
+    _setup_worker_env(worker_id, cpu_cores)
+    envs = DummyVecEnv(env_fn_wrappers)
+    _decorrelate_envs(envs, decorrelation_steps, obs_buffer, env_indices)
+
+    buffers = (obs_buffer, action_buffer, reward_buffer, done_buffer, info_buffer)
+
+    try:
+        while True:
+            cmd, _ = remote.recv()
+            if cmd == "step":
+                _handle_worker_step(envs, worker_id, env_indices, buffers)
+                remote.send("step_done")
+            elif cmd == "reset":
+                obs = envs.reset()
+                obs_buffer[env_indices].copy_(torch.from_numpy(obs).float())
+                remote.send("reset_done")
+            elif cmd == "get_spaces":
+                remote.send((envs.observation_space, envs.action_space))
+            elif cmd == "close":
+                envs.close()
+                remote.close()
+                break
+            else:
+                raise NotImplementedError(f"Unknown command: {cmd}")
+    except Exception as e:
+        print(f"[Actor {worker_id}] Fatal error: {e}\n{traceback.format_exc()}")
+        # Notify the main process so step_wait doesn't hang waiting for this worker.
+        try:
+            remote.send(e)
+        except Exception:
+            pass
+
+
 # SubprocVecEnv — one subprocess per env, synchronous lock-step
-# ---------------------------------------------------------------------------
 class SubprocVecEnv:
     """Vectorized env with one subprocess per env and pipe-based IPC.
 
@@ -212,32 +238,39 @@ class SubprocVecEnv:
 
         self.processes = []
         for wr, r, fn in zip(self.work_remotes, self.remotes, env_fns):
-            p = mp.Process(target=_worker, args=(wr, r, CloudpickleWrapper(fn)), daemon=True)
+            p = mp.Process(
+                target=_worker, args=(wr, r, CloudpickleWrapper(fn)), daemon=True
+            )
             p.start()
             self.processes.append(p)
         for wr in self.work_remotes:
             wr.close()
 
-        self.remotes[0].send(('get_spaces', None))
+        self.remotes[0].send(("get_spaces", None))
         self.observation_space, self.action_space = self.remotes[0].recv()
 
     def step(self, actions):
         for remote, action in zip(self.remotes, actions):
-            remote.send(('step', action))
+            remote.send(("step", action))
         results = [remote.recv() for remote in self.remotes]
         obs, rewards, dones, infos = zip(*results)
-        return np.stack(obs), np.array(rewards, dtype=np.float32), np.array(dones, dtype=bool), list(infos)
+        return (
+            np.stack(obs),
+            np.array(rewards, dtype=np.float32),
+            np.array(dones, dtype=bool),
+            list(infos),
+        )
 
     def reset(self):
         for remote in self.remotes:
-            remote.send(('reset', None))
+            remote.send(("reset", None))
         return np.stack([remote.recv() for remote in self.remotes])
 
     def close(self):
         if self.closed:
             return
         for remote in self.remotes:
-            remote.send(('close', None))
+            remote.send(("close", None))
         for p in self.processes:
             p.join(timeout=5)
             if p.is_alive():
@@ -255,6 +288,8 @@ class AsyncSubprocVecEnv:
     Features (mirroring Sample Factory):
     * **Zero-copy shared memory** — uses PyTorch tensors for obs, actions,
       rewards, dones, and info, eliminating pipe overhead.
+    * **Internal Vectorization** — workers use DummyVecEnv to execute multiple
+      environments sequentially, writing batches to shared memory.
     * **Experience decorrelation** — each worker executes a staggered
       number of random steps during init.
     * **CPU core affinity** — workers are pinned to specific cores.
@@ -262,10 +297,17 @@ class AsyncSubprocVecEnv:
       main thread can overlap inference with env execution.
     """
 
-    def __init__(self, env_fns, decorrelation_base=20):
+    def __init__(self, env_fns, num_envs_per_worker=1, decorrelation_base=20):
         self.n_envs = len(env_fns)
+        if self.n_envs % num_envs_per_worker != 0:
+            raise ValueError(
+                f"Total envs {self.n_envs} must be divisible by num_envs_per_worker {num_envs_per_worker}"
+            )
+
+        self.num_envs_per_worker = num_envs_per_worker
+        self.num_workers = self.n_envs // num_envs_per_worker
         self.closed = False
-        self._pending_envs = set()
+        self._pending_workers = set()
 
         # Probe observation space from a temporary env
         tmp_env = env_fns[0]()
@@ -277,16 +319,24 @@ class AsyncSubprocVecEnv:
         self._obs_shape = obs_shape
 
         # Allocate zero-copy shared memory using PyTorch Tensors
-        self._obs_buf = torch.zeros((self.n_envs, *obs_shape), dtype=torch.float32).share_memory_()
-        
-        if hasattr(self.action_space, 'n'):
-            self._action_buf = torch.zeros(self.n_envs, dtype=torch.int64).share_memory_()
+        self._obs_buf = torch.zeros(
+            (self.n_envs, *obs_shape), dtype=torch.float32
+        ).share_memory_()
+
+        if hasattr(self.action_space, "n"):
+            self._action_buf = torch.zeros(
+                self.n_envs, dtype=torch.int64
+            ).share_memory_()
         else:
-            self._action_buf = torch.zeros((self.n_envs, *self.action_space.shape), dtype=torch.float32).share_memory_()
-            
+            self._action_buf = torch.zeros(
+                (self.n_envs, *self.action_space.shape), dtype=torch.float32
+            ).share_memory_()
+
         self._reward_buf = torch.zeros(self.n_envs, dtype=torch.float32).share_memory_()
         self._done_buf = torch.zeros(self.n_envs, dtype=torch.bool).share_memory_()
-        self._info_buf = torch.zeros((self.n_envs, 3), dtype=torch.float32).share_memory_() # [collided, goal_achieved, goal_dist]
+        self._info_buf = torch.zeros(
+            (self.n_envs, 3), dtype=torch.float32
+        ).share_memory_()  # [collided, goal_achieved, goal_dist]
 
         # Assign CPU cores round-robin
         try:
@@ -295,22 +345,41 @@ class AsyncSubprocVecEnv:
             available_cores = list(range(os.cpu_count() or 1))
 
         # Spawn async workers
-        self.remotes, self.work_remotes = zip(*[mp.Pipe() for _ in range(self.n_envs)])
-        self._remote_to_id = {}
+        self.remotes, self.work_remotes = zip(
+            *[mp.Pipe() for _ in range(self.num_workers)]
+        )
         self.processes = []
 
-        print(f"[AsyncSubprocVecEnv] Initializing {self.n_envs} PyTorch mp workers...")
+        print(
+            f"[AsyncSubprocVecEnv] Initializing {self.num_workers} PyTorch mp workers (each with {self.num_envs_per_worker} envs)..."
+        )
 
-        for i, (wr, r, fn) in enumerate(zip(self.work_remotes, self.remotes, env_fns)):
+        for i in range(self.num_workers):
             core = [available_cores[i % len(available_cores)]]
-            decorr_steps = (i * decorrelation_base) % (decorrelation_base * self.n_envs)
+            decorr_steps = (i * decorrelation_base) % (
+                decorrelation_base * self.num_workers
+            )
+            start_idx = i * self.num_envs_per_worker
+            end_idx = start_idx + self.num_envs_per_worker
+            worker_env_fns = env_fns[start_idx:end_idx]
+            wrappers = [CloudpickleWrapper(fn) for fn in worker_env_fns]
+            env_indices = list(range(start_idx, end_idx))
+
             p = mp.Process(
                 target=_async_worker,
                 args=(
-                    i, wr, r, CloudpickleWrapper(fn),
-                    self._obs_buf, self._action_buf, self._reward_buf,
-                    self._done_buf, self._info_buf,
-                    decorr_steps, core
+                    i,
+                    self.work_remotes[i],
+                    self.remotes[i],
+                    wrappers,
+                    self._obs_buf,
+                    self._action_buf,
+                    self._reward_buf,
+                    self._done_buf,
+                    self._info_buf,
+                    decorr_steps,
+                    core,
+                    env_indices,
                 ),
                 daemon=True,
             )
@@ -323,19 +392,14 @@ class AsyncSubprocVecEnv:
 
         # Wait for all workers to finish init
         for i, remote in enumerate(self.remotes):
-            remote.send(('get_spaces', None))
+            remote.send(("get_spaces", None))
             remote.recv()
             print(f"  Worker {i} initialized (pid {self.processes[i].pid})")
 
-        print(f"[AsyncSubprocVecEnv] All {self.n_envs} workers ready.")
+        print(f"[AsyncSubprocVecEnv] All {self.num_workers} workers ready.")
 
     def get_obs(self, env_ids=None, copy=True):
-        """Read current observations from shared memory.
-
-        By default this returns copies so callers cannot keep exported
-        pointers to shared memory alive past shutdown. Set ``copy=False``
-        only for transient, read-only access.
-        """
+        """Read current observations from shared memory."""
         if env_ids is None:
             return self._obs_buf.numpy().copy() if copy else self._obs_buf.numpy()
         obs = self._obs_buf[np.asarray(env_ids, dtype=np.int64)].numpy()
@@ -348,35 +412,62 @@ class AsyncSubprocVecEnv:
         else:
             env_ids = np.asarray(env_ids, dtype=np.int64).reshape(-1)
 
+        if env_ids.size == 0:
+            return
+
+        unique_positions = np.sort(np.unique(env_ids, return_index=True)[1])
+        unique_env_ids = env_ids[unique_positions]
+        unique_ids_list = unique_env_ids.tolist()
+        worker_ids = sorted(set(eid // self.num_envs_per_worker for eid in unique_ids_list))
+        requested_ids = set(unique_ids_list)
+
+        for worker_id in worker_ids:
+            start_idx = worker_id * self.num_envs_per_worker
+            end_idx = min(start_idx + self.num_envs_per_worker, self.n_envs)
+            worker_env_ids = set(range(start_idx, end_idx))
+            missing = sorted(worker_env_ids - requested_ids)
+            if missing:
+                # Each worker atomically steps all its envs together. Allowing
+                # partial worker updates would race with the worker's own reset
+                # logic and corrupt shared-memory observations.
+                raise ValueError(
+                    f"Partial worker step is not allowed: worker {worker_id} requires env_ids "
+                    f"{list(range(start_idx, end_idx))}, missing {missing}"
+                )
+
         # Write actions to shared memory tensor
         if torch.is_tensor(actions):
-            self._action_buf[env_ids] = actions.detach().cpu().to(self._action_buf.dtype)
+            action_values = actions.detach().cpu().to(self._action_buf.dtype)
         else:
-            self._action_buf[env_ids] = torch.tensor(actions, dtype=self._action_buf.dtype)
+            action_values = torch.as_tensor(actions, dtype=self._action_buf.dtype)
+        self._action_buf[unique_env_ids] = action_values[unique_positions]
 
-        for env_id in env_ids.tolist():
-            if env_id in self._pending_envs:
-                raise RuntimeError(f"Env {env_id} already has a pending step")
-            self.remotes[env_id].send(('step', None))
-            self._pending_envs.add(env_id)
+        for worker_id in worker_ids:
+            if worker_id in self._pending_workers:
+                raise RuntimeError(f"Worker {worker_id} already has a pending step")
+            self.remotes[worker_id].send(("step", None))
+            self._pending_workers.add(worker_id)
 
     def step_wait(self, min_ready=1, timeout=None):
         """Wait for signals from workers and read results from shared memory."""
         if min_ready < 1:
             raise ValueError("min_ready must be >= 1")
-        if not self._pending_envs:
+        if not self._pending_workers:
             empty_ids = np.empty((0,), dtype=np.int64)
             empty_obs = np.empty((0, *self._obs_shape), dtype=np.float32)
             empty_rewards = np.empty((0,), dtype=np.float32)
             empty_dones = np.empty((0,), dtype=bool)
             return empty_ids, empty_obs, empty_rewards, empty_dones, []
 
-        target_ready = min(min_ready, len(self._pending_envs))
+        target_ready_workers = min(
+            max(1, math.ceil(min_ready / self.num_envs_per_worker)),
+            len(self._pending_workers),
+        )
         deadline = None if timeout is None else (time.monotonic() + timeout)
 
-        ready_ids = []
-        while len(ready_ids) < target_ready and self._pending_envs:
-            pending_remotes = [self.remotes[i] for i in self._pending_envs]
+        ready_workers = []
+        while len(ready_workers) < target_ready_workers and self._pending_workers:
+            pending_remotes = [self.remotes[i] for i in self._pending_workers]
             wait_timeout = None
             if deadline is not None:
                 wait_timeout = max(0.0, deadline - time.monotonic())
@@ -386,34 +477,38 @@ class AsyncSubprocVecEnv:
             if not ready_remotes:
                 break
             for remote in ready_remotes:
-                env_id = self._remote_to_id[remote]
-                remote.recv() # Wait for 'step_done' signal
-                self._pending_envs.discard(env_id)
-                ready_ids.append(env_id)
+                worker_id = self._remote_to_id[remote]
+                msg = remote.recv()
+                self._pending_workers.discard(worker_id)
+                if isinstance(msg, Exception):
+                    raise RuntimeError(
+                        f"Worker {worker_id} died with exception: {msg}"
+                    ) from msg
+                ready_workers.append(worker_id)
 
-        if not ready_ids:
+        if not ready_workers:
             empty_ids = np.empty((0,), dtype=np.int64)
             empty_obs = np.empty((0, *self._obs_shape), dtype=np.float32)
             empty_rewards = np.empty((0,), dtype=np.float32)
             empty_dones = np.empty((0,), dtype=bool)
             return empty_ids, empty_obs, empty_rewards, empty_dones, []
 
-        ready_ids = np.array(ready_ids, dtype=np.int64)
-        
+        ready_ids = np.concatenate([
+            np.arange(w * self.num_envs_per_worker, (w + 1) * self.num_envs_per_worker, dtype=np.int64)
+            for w in ready_workers
+        ])
+
         # Zero-copy read from shared memory
         obs = self.get_obs(ready_ids, copy=False)
         rewards = self._reward_buf[ready_ids].numpy().copy()
         dones = self._done_buf[ready_ids].numpy().copy()
-        
-        # Reconstruct info dictionaries
+
+        # Reconstruct info dictionaries using the same column order as _write_info_to_buffer
         info_data = self._info_buf[ready_ids].numpy()
-        infos = []
-        for idx in range(len(ready_ids)):
-            infos.append({
-                'collided': bool(info_data[idx, 0]),
-                'goal_achieved': bool(info_data[idx, 1]),
-                'goal_dist': float(info_data[idx, 2]),
-            })
+        infos = [
+            {k: cast(info_data[idx, j]) for j, (k, cast) in enumerate(zip(_INFO_KEYS, _INFO_CASTS))}
+            for idx in range(len(ready_ids))
+        ]
 
         return (
             ready_ids,
@@ -431,9 +526,9 @@ class AsyncSubprocVecEnv:
         return obs[order], rewards[order], dones[order], [infos[i] for i in order]
 
     def reset(self):
-        self._pending_envs.clear()
+        self._pending_workers.clear()
         for remote in self.remotes:
-            remote.send(('reset', None))
+            remote.send(("reset", None))
         for remote in self.remotes:
             remote.recv()
         return self.get_obs(copy=True)
@@ -441,10 +536,10 @@ class AsyncSubprocVecEnv:
     def close(self):
         if self.closed:
             return
-        self._pending_envs.clear()
+        self._pending_workers.clear()
         for remote in self.remotes:
             try:
-                remote.send(('close', None))
+                remote.send(("close", None))
             except (BrokenPipeError, EOFError, OSError):
                 pass
         for p in self.processes:
