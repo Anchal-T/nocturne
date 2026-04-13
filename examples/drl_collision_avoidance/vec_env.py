@@ -20,16 +20,19 @@ import numpy as np
 import torch
 import torch.multiprocessing as mp
 
-# Set start method to spawn for proper CUDA/PyTorch sharing
-try:
-    mp.set_start_method("spawn", force=True)
-except RuntimeError:
-    pass
-
 
 # Info buffer column order — must match between _write_info_to_buffer and step_wait.
 _INFO_KEYS = ("collided", "goal_achieved", "goal_dist")
 _INFO_CASTS = (bool, bool, float)
+
+
+def _probe_spaces_from_env_fn(env_fn):
+    """Create one env instance to read observation/action spaces safely."""
+    env = env_fn()
+    try:
+        return env.observation_space, env.action_space
+    finally:
+        env.close()
 
 
 # Serialization helper
@@ -297,8 +300,17 @@ class AsyncSubprocVecEnv:
       main thread can overlap inference with env execution.
     """
 
-    def __init__(self, env_fns, num_envs_per_worker=1, decorrelation_base=20):
+    def __init__(
+        self,
+        env_fns,
+        num_envs_per_worker=1,
+        decorrelation_base=20,
+        observation_space=None,
+        action_space=None,
+    ):
         self.n_envs = len(env_fns)
+        if self.n_envs == 0:
+            raise ValueError("env_fns must contain at least one env factory")
         if self.n_envs % num_envs_per_worker != 0:
             raise ValueError(
                 f"Total envs {self.n_envs} must be divisible by num_envs_per_worker {num_envs_per_worker}"
@@ -309,12 +321,18 @@ class AsyncSubprocVecEnv:
         self.closed = False
         self._pending_workers = set()
 
-        # Probe observation space from a temporary env
-        tmp_env = env_fns[0]()
-        self.observation_space = tmp_env.observation_space
-        self.action_space = tmp_env.action_space
+        if (observation_space is None) != (action_space is None):
+            raise ValueError(
+                "observation_space and action_space must be provided together"
+            )
+
+        if observation_space is None:
+            # Shared-memory buffers need shapes before worker startup.
+            self.observation_space, self.action_space = _probe_spaces_from_env_fn(env_fns[0])
+        else:
+            self.observation_space = observation_space
+            self.action_space = action_space
         obs_shape = self.observation_space.shape
-        tmp_env.close()
 
         self._obs_shape = obs_shape
 
@@ -553,6 +571,258 @@ class AsyncSubprocVecEnv:
             except Exception:
                 pass
 
+        self.closed = True
+
+    def __del__(self):
+        if not self.closed:
+            self.close()
+
+
+# ---------------------------------------------------------------------------
+# RayAsyncVecEnv — multi-node async actors via Ray (for Anyscale)
+# ---------------------------------------------------------------------------
+
+# Module-level cache: @ray.remote is applied only once per process.
+_RAY_WORKER_ACTOR_CLS = None
+
+
+def _get_ray_worker_actor_cls():
+    """Return the Ray remote actor class, defining it lazily on first call."""
+    global _RAY_WORKER_ACTOR_CLS
+    if _RAY_WORKER_ACTOR_CLS is None:
+        import ray
+
+        @ray.remote
+        class _RayEnvWorkerActor:
+            """Ray remote actor — runs a DummyVecEnv, returns results via Ray object store."""
+
+            def __init__(self, env_fn_wrappers, decorrelation_steps):
+                import os
+                import torch
+
+                os.environ["OMP_NUM_THREADS"] = "1"
+                torch.set_num_threads(1)
+                self._envs = DummyVecEnv(env_fn_wrappers)
+                self._envs.reset()
+                for _ in range(decorrelation_steps):
+                    random_actions = np.asarray(
+                        [self._envs.action_space.sample() for _ in range(self._envs.n_envs)]
+                    )
+                    self._envs.step(random_actions)
+
+            def step(self, actions):
+                return self._envs.step(actions)
+
+            def reset(self):
+                return self._envs.reset()
+
+            def get_spaces(self):
+                return self._envs.observation_space, self._envs.action_space
+
+        _RAY_WORKER_ACTOR_CLS = _RayEnvWorkerActor
+    return _RAY_WORKER_ACTOR_CLS
+
+
+class RayAsyncVecEnv:
+    """Async vectorized env using Ray remote actors (multi-node capable).
+
+    Drop-in replacement for AsyncSubprocVecEnv when vec_env_mode='ray'.
+    Exposes the same step_async / step_wait interface. Workers run as
+    @ray.remote actors scheduled by Ray across the cluster. Observations
+    travel through Ray's object store — no shared memory needed.
+    """
+
+    def __init__(
+        self,
+        env_fns,
+        num_envs_per_worker=1,
+        decorrelation_base=20,
+        observation_space=None,
+        action_space=None,
+    ):
+        import ray as _ray
+
+        self._ray = _ray
+        if not _ray.is_initialized():
+            raise RuntimeError(
+                "ray.init() must be called before constructing RayAsyncVecEnv. "
+                "Set vec_env_mode=ray in config — main() calls ray.init() automatically."
+            )
+
+        self.n_envs = len(env_fns)
+        if self.n_envs == 0:
+            raise ValueError("env_fns must contain at least one env factory")
+        if self.n_envs % num_envs_per_worker != 0:
+            raise ValueError(
+                f"Total envs {self.n_envs} must be divisible by "
+                f"num_envs_per_worker {num_envs_per_worker}"
+            )
+        self.num_envs_per_worker = num_envs_per_worker
+        self.num_workers = self.n_envs // num_envs_per_worker
+        self.closed = False
+        self._last_obs = None  # updated by reset() and step_wait(); used by get_obs()
+
+        if (observation_space is None) != (action_space is None):
+            raise ValueError(
+                "observation_space and action_space must be provided together"
+            )
+
+        print(
+            f"[RayAsyncVecEnv] Initializing {self.num_workers} Ray actors "
+            f"(each with {num_envs_per_worker} envs)..."
+        )
+        actor_cls = _get_ray_worker_actor_cls()
+        self._workers = []
+        for i in range(self.num_workers):
+            decorr_steps = i * decorrelation_base
+            worker_fns = [
+                CloudpickleWrapper(fn)
+                for fn in env_fns[i * num_envs_per_worker : (i + 1) * num_envs_per_worker]
+            ]
+            self._workers.append(actor_cls.remote(worker_fns, decorr_steps))
+
+        if observation_space is None:
+            self.observation_space, self.action_space = self._ray.get(
+                self._workers[0].get_spaces.remote()
+            )
+        else:
+            self.observation_space = observation_space
+            self.action_space = action_space
+        self._obs_shape = self.observation_space.shape
+
+        self._pending: dict = {}  # worker_id -> ObjectRef
+        print(f"[RayAsyncVecEnv] {self.num_workers} Ray actors submitted.")
+
+    # ------------------------------------------------------------------
+    # Core interface — mirrors AsyncSubprocVecEnv
+    # ------------------------------------------------------------------
+
+    def _empty_result(self):
+        return (
+            np.empty((0,), dtype=np.int64),
+            np.empty((0, *self._obs_shape), dtype=np.float32),
+            np.empty((0,), dtype=np.float32),
+            np.empty((0,), dtype=bool),
+            [],
+        )
+
+    def step_async(self, actions, env_ids=None):
+        """Non-blocking: dispatch step.remote() to relevant workers."""
+        if torch.is_tensor(actions):
+            actions_np = actions.detach().cpu().numpy()
+        else:
+            actions_np = np.asarray(actions)
+
+        if env_ids is None:
+            worker_ids = range(self.num_workers)
+            for wid in worker_ids:
+                start = wid * self.num_envs_per_worker
+                end = (wid + 1) * self.num_envs_per_worker
+                self._pending[wid] = self._workers[wid].step.remote(actions_np[start:end])
+            return
+
+        env_ids = np.asarray(env_ids, dtype=np.int64).reshape(-1)
+        if env_ids.size == 0:
+            return
+
+        unique_positions = np.sort(np.unique(env_ids, return_index=True)[1])
+        unique_env_ids = env_ids[unique_positions]
+        unique_actions = actions_np[unique_positions]
+        worker_ids = sorted(set(int(eid) // self.num_envs_per_worker for eid in unique_env_ids))
+        action_by_env = {int(eid): action for eid, action in zip(unique_env_ids, unique_actions)}
+
+        for wid in worker_ids:
+            start = wid * self.num_envs_per_worker
+            end = min(start + self.num_envs_per_worker, self.n_envs)
+            worker_env_ids = list(range(start, end))
+            missing = [eid for eid in worker_env_ids if eid not in action_by_env]
+            if missing:
+                raise ValueError(
+                    f"Partial worker step is not allowed: worker {wid} requires env_ids "
+                    f"{worker_env_ids}, missing {missing}"
+                )
+            worker_actions = np.asarray([action_by_env[eid] for eid in worker_env_ids])
+            self._pending[wid] = self._workers[wid].step.remote(worker_actions)
+
+    def step_wait(self, min_ready=1, timeout=None):
+        """Wait for at least min_ready env results and return a batch.
+
+        Returns (ready_ids, obs, rewards, dones, infos) — same signature as
+        AsyncSubprocVecEnv.step_wait().
+        """
+        if not self._pending:
+            return self._empty_result()
+
+        n_workers_needed = min(
+            max(1, math.ceil(min_ready / self.num_envs_per_worker)),
+            len(self._pending),
+        )
+        wids = list(self._pending.keys())
+        futures = [self._pending[wid] for wid in wids]
+        # ray.wait() returns the same ObjectRef objects from the input list, so id() is stable.
+        id_to_wid = {id(f): wid for f, wid in zip(futures, wids)}
+
+        ready_futures, _ = self._ray.wait(futures, num_returns=n_workers_needed, timeout=timeout)
+        if not ready_futures:
+            return self._empty_result()
+
+        ready_wids = sorted(id_to_wid[id(f)] for f in ready_futures)
+
+        all_obs, all_rew, all_done, all_info, ready_env_ids = [], [], [], [], []
+        for wid in ready_wids:
+            obs, rewards, dones, infos = self._ray.get(self._pending.pop(wid))
+            start = wid * self.num_envs_per_worker
+            all_obs.append(np.asarray(obs, dtype=np.float32))
+            all_rew.append(np.asarray(rewards, dtype=np.float32))
+            all_done.append(np.asarray(dones, dtype=bool))
+            all_info.extend(infos)
+            ready_env_ids.extend(range(start, start + self.num_envs_per_worker))
+
+        obs_arr = np.concatenate(all_obs, axis=0)
+        # Keep a local obs cache so get_obs() doesn't need to contact workers.
+        if self._last_obs is None:
+            self._last_obs = np.zeros((self.n_envs, *self._obs_shape), dtype=np.float32)
+        self._last_obs[ready_env_ids] = obs_arr
+
+        return (
+            np.array(ready_env_ids, dtype=np.int64),
+            obs_arr,
+            np.concatenate(all_rew, axis=0),
+            np.concatenate(all_done, axis=0),
+            all_info,
+        )
+
+    def step(self, actions):
+        """Synchronous step: step_async + step_wait for all envs."""
+        self.step_async(actions)
+        env_ids, obs, rew, done, info = self.step_wait(min_ready=self.n_envs)
+        order = np.argsort(env_ids)
+        return obs[order], rew[order], done[order], [info[i] for i in order]
+
+    def reset(self):
+        self._pending.clear()
+        obs_list = self._ray.get([w.reset.remote() for w in self._workers])
+        self._last_obs = np.concatenate(
+            [np.asarray(o, dtype=np.float32) for o in obs_list], axis=0
+        )
+        return self._last_obs.copy()
+
+    def get_obs(self, env_ids=None, copy=True):
+        """Return last-seen observations (updated by reset() and step_wait())."""
+        if self._last_obs is None:
+            raise RuntimeError("get_obs() called before reset() — call reset() first.")
+        obs = self._last_obs if env_ids is None else self._last_obs[np.asarray(env_ids, dtype=np.int64)]
+        return obs.copy() if copy else obs
+
+    def close(self):
+        if self.closed:
+            return
+        self._pending.clear()
+        for w in self._workers:
+            try:
+                self._ray.kill(w, no_restart=True)
+            except Exception:
+                pass
         self.closed = True
 
     def __del__(self):

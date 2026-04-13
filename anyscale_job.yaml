@@ -1,0 +1,30 @@
+name: drl-nocturne-collision
+
+# Single-line entrypoint via YAML block scalar
+entrypoint: >-
+  python -m examples.drl_collision_avoidance.train
+  drl.vec_env_mode=ray
+  drl.ray_address=auto
+  drl.num_workers=128
+  drl.num_envs_per_worker=2
+
+# Anyscale uploads this directory to every node in the cluster.
+# Keep it under 500 MB — use .rayignore to exclude large files.
+working_dir: .
+
+# Python dependencies installed on every node before the job starts.
+requirements: requirements-anyscale.txt
+
+image_uri: anyscale/ray:2.47.0-slim-py311-cpu    # head node overrides below
+
+compute_config:
+  head_node:
+    instance_type: g4dn.xlarge    # 1x T4 GPU — learner (ProcessLearner) + main process
+  worker_nodes:
+    - instance_type: m5.4xlarge   # 16 vCPU, 64 GB — Ray env actor workers
+      min_nodes: 1
+      max_nodes: 16
+      market_type: PREFER_SPOT    # cheaper; falls back to on-demand if unavailable
+
+max_retries: 1
+timeout_s: 86400                  # 24 h hard cap

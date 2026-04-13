@@ -556,6 +556,7 @@ def _build_vec_env(cfg_dict, num_envs, num_envs_per_worker, vec_env_mode):
     from examples.drl_collision_avoidance.vec_env import (
         AsyncSubprocVecEnv,
         DummyVecEnv,
+        RayAsyncVecEnv,
         SubprocVecEnv,
     )
 
@@ -564,12 +565,13 @@ def _build_vec_env(cfg_dict, num_envs, num_envs_per_worker, vec_env_mode):
         'async': AsyncSubprocVecEnv,
         'sync': SubprocVecEnv,
         'dummy': DummyVecEnv,
+        'ray': RayAsyncVecEnv,
     }
     vec_env_cls = vec_env_classes.get(vec_env_mode)
     if vec_env_cls is None:
         raise ValueError(f"Unknown vec_env_mode={vec_env_mode!r}, expected one of {list(vec_env_classes)}")
 
-    kwargs = {"num_envs_per_worker": num_envs_per_worker} if vec_env_mode == "async" else {}
+    kwargs = {"num_envs_per_worker": num_envs_per_worker} if vec_env_mode in ("async", "ray") else {}
     return vec_env_cls(env_fns, **kwargs), vec_env_cls
 
 
@@ -609,6 +611,10 @@ def _print_training_header(num_workers, num_envs_per_worker, num_envs, vec_env_c
     print(f"{'='*60}\n")
 
 
+def _uses_async_collection(vec_env_mode):
+    return vec_env_mode in ('async', 'ray')
+
+
 def _collect_transition_batch(
     vec_env,
     vec_env_mode,
@@ -619,7 +625,7 @@ def _collect_transition_batch(
     agent,
     min_ready_fraction=0.5,
 ):
-    if vec_env_mode == 'async':
+    if _uses_async_collection(vec_env_mode):
         min_ready = max(1, int(num_envs * min_ready_fraction))
         ready_ids, next_obs, rewards, dones, infos = vec_env.step_wait(min_ready=min_ready)
         if len(ready_ids) == 0:
@@ -812,7 +818,7 @@ def _run_training_loop(
 
     current_obs = obs.copy()
     current_actions = agent.select_action_batch(current_obs)
-    if vec_env_mode == 'async':
+    if _uses_async_collection(vec_env_mode):
         vec_env.step_async(current_actions)
 
     while episodes_completed < num_episodes and running_state['running']:
@@ -892,6 +898,21 @@ def main(cfg):
     vec_env_mode = str(drl_cfg['vec_env_mode']).lower()
     train_in_bg = drl_cfg['train_in_background']
 
+    # Set spawn start method before any subprocess or Ray initialization.
+    # Must happen here (not in vec_env.py at import time) so it runs before
+    # ray.init() — changing the start method after Ray starts corrupts Ray's
+    # internal worker context on Linux.
+    try:
+        mp.set_start_method("spawn", force=True)
+    except RuntimeError:
+        pass
+
+    if vec_env_mode == 'ray':
+        import ray
+        ray_address = drl_cfg.get('ray_address', None)  # None = local; "auto" = Anyscale
+        # include_dashboard=False: avoids a Ray 2.x/Python 3.8 dashboard import bug
+        ray.init(address=ray_address, ignore_reinit_error=True, include_dashboard=False)
+
     vec_env, vec_env_cls = _build_vec_env(cfg_dict, num_envs, num_envs_per_worker, vec_env_mode)
     obs_dim = vec_env.observation_space.shape[0]
     n_actions = vec_env.action_space.n
@@ -965,6 +986,13 @@ def main(cfg):
             )
 
         vec_env.close()
+
+        if vec_env_mode == 'ray':
+            try:
+                import ray
+                ray.shutdown()
+            except Exception:
+                pass
 
         final_path = os.path.join(checkpoint_dir, 'ddqn_final.pth')
         if learner is not None:
