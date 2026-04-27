@@ -1,6 +1,5 @@
 name: drl-nocturne-collision
 
-# Single-line entrypoint via YAML block scalar
 entrypoint: >-
   python -m examples.drl_collision_avoidance.train
   drl.vec_env_mode=ray
@@ -9,20 +8,41 @@ entrypoint: >-
   drl.num_envs_per_worker=2
 
 # Anyscale uploads this directory to every node in the cluster.
-# Keep it under 500 MB — use .rayignore to exclude large files.
 working_dir: .
+
+# Exclude heavy local artifacts that are not needed on the cluster.
+excludes:
+  - "venv/"
+  - "build/"
+  - "dist/"
+  - "*.egg-info/"
+  - "dataset/"
+  - "logs/"
+  - "__pycache__/"
+  - "*.pyc"
 
 # Python dependencies installed on every node before the job starts.
 requirements: requirements-anyscale.txt
 
-image_uri: anyscale/ray:2.47.0-slim-py311-cpu    # head node overrides below
+# containerfile installs system packages (SFML, cmake, build-essential, xvfb)
+# and pre-builds the nocturne C++ extension so all nodes can import it.
+# NOTE: containerfile and image_uri are mutually exclusive — use only one.
+containerfile: Containerfile
+
+# S3 paths for scenario data — picked up by scenario_utils._default_path_for_split()
+# via os.environ.get('PROCESSED_TRAIN_NO_TL', ...).
+# Workers sync these to /tmp/nocturne_s3_cache/ at env-creation time via _sync_s3_to_local().
+# IAM: the Anyscale cloud IAM role must have s3:GetObject + s3:ListBucket on btp-rl-data-mumbai.
+env_vars:
+  PROCESSED_TRAIN_NO_TL: "s3://btp-rl-data-mumbai/extracted/formatted_json_v2_no_tl_train/"
+  PROCESSED_VALID_NO_TL: "s3://btp-rl-data-mumbai/extracted/formatted_json_v2_no_tl_valid/"
 
 compute_config:
   head_node:
     instance_type: g4dn.xlarge    # 1x T4 GPU — learner (ProcessLearner) + main process
   worker_nodes:
     - instance_type: m5.4xlarge   # 16 vCPU, 64 GB — Ray env actor workers
-      min_nodes: 1
+      min_nodes: 4                 # raised from 1: ensures meaningful parallelism before training starts
       max_nodes: 16
       market_type: PREFER_SPOT    # cheaper; falls back to on-demand if unavailable
 

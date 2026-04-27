@@ -226,8 +226,11 @@ class DDQNAgent:
             return online, target, inference
 
     def _reset_amp_state(self) -> None:
-        self._use_amp = self.device.type == "cuda" and not self.use_muon
-        self._scaler = torch.amp.GradScaler(enabled=self._use_amp)
+        # autocast (bf16/fp16 forward) is compatible with Muon; only GradScaler
+        # (FP16 loss scaling) conflicts because Muon updates from unscaled grads.
+        self._use_amp = self.device.type == "cuda"
+        self._use_scaler = self._use_amp and not self.use_muon
+        self._scaler = torch.amp.GradScaler(enabled=self._use_scaler)
 
     def _set_eval_network_modes(self, target: nn.Module, inference: nn.Module) -> None:
         target.eval()
@@ -341,7 +344,7 @@ class DDQNAgent:
 
     def _apply_gradient_step(self, loss: torch.Tensor) -> None:
         scale = 1.0 / self.grad_accum_steps
-        if self._use_amp:
+        if self._use_scaler:
             self._scaler.scale(loss * scale).backward()
         else:
             (loss * scale).backward()
@@ -350,10 +353,10 @@ class DDQNAgent:
         if self._grad_accum_counter < self.grad_accum_steps:
             return
 
-        if self._use_amp:
+        if self._use_scaler:
             self._scaler.unscale_(self.optimizer)
         nn.utils.clip_grad_norm_(self.online_net.parameters(), max_norm=self.max_grad_norm)
-        if self._use_amp:
+        if self._use_scaler:
             self._scaler.step(self.optimizer)
             self._scaler.update()
         else:

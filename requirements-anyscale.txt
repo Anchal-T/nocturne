@@ -1,0 +1,10 @@
+torch
+hydra-core
+omegaconf
+gym==0.21.0
+wandb
+tensorboard
+boto3
+pyvirtualdisplay
+dm-tree
+tabulate

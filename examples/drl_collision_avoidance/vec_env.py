@@ -19,6 +19,10 @@ from multiprocessing.connection import wait
 import numpy as np
 import torch
 import torch.multiprocessing as mp
+import logging
+
+# Module logger
+logger = logging.getLogger(__name__)
 
 
 # Info buffer column order — must match between _write_info_to_buffer and step_wait.
@@ -121,7 +125,7 @@ def _setup_worker_env(worker_id, cpu_cores):
     if cpu_cores:
         try:
             os.sched_setaffinity(0, cpu_cores)
-            print(f"[Actor {worker_id}] pid {os.getpid()} pinned to cores {sorted(cpu_cores)}")
+            logger.info("[Actor %s] pid %s pinned to cores %s", worker_id, os.getpid(), sorted(cpu_cores))
         except (AttributeError, OSError):
             pass
     os.environ["OMP_NUM_THREADS"] = "1"
@@ -139,9 +143,9 @@ def _decorrelate_envs(envs, steps, obs_buffer, env_indices, max_consecutive_fail
             consecutive_failures = 0
         except Exception:
             consecutive_failures += 1
-            print(f"[decorrelate] Exception during random step:\n{traceback.format_exc()}")
+            logger.exception("[decorrelate] Exception during random step")
             if consecutive_failures >= max_consecutive_failures:
-                print(f"[decorrelate] {max_consecutive_failures} consecutive failures, aborting decorrelation.")
+                logger.warning("[decorrelate] %s consecutive failures, aborting decorrelation.", max_consecutive_failures)
                 break
             obs = envs.reset()
     obs_buffer[env_indices].copy_(torch.from_numpy(obs).float())
@@ -164,7 +168,7 @@ def _handle_worker_step(envs, worker_id, env_indices, buffers):
     try:
         obs, reward, done, infos = envs.step(actions)
     except Exception:
-        print(f"[Actor {worker_id}] Exception in step:\n{traceback.format_exc()}")
+        logger.exception("[Actor %s] Exception in step", worker_id)
         obs = envs.reset()
         reward = np.zeros(envs.n_envs, dtype=np.float32)
         done = np.ones(envs.n_envs, dtype=bool)
@@ -217,7 +221,7 @@ def _async_worker(
             else:
                 raise NotImplementedError(f"Unknown command: {cmd}")
     except Exception as e:
-        print(f"[Actor {worker_id}] Fatal error: {e}\n{traceback.format_exc()}")
+        logger.exception("[Actor %s] Fatal error", worker_id)
         # Notify the main process so step_wait doesn't hang waiting for this worker.
         try:
             remote.send(e)
@@ -368,8 +372,10 @@ class AsyncSubprocVecEnv:
         )
         self.processes = []
 
-        print(
-            f"[AsyncSubprocVecEnv] Initializing {self.num_workers} PyTorch mp workers (each with {self.num_envs_per_worker} envs)..."
+        logger.info(
+            "[AsyncSubprocVecEnv] Initializing %s PyTorch mp workers (each with %s envs)...",
+            self.num_workers,
+            self.num_envs_per_worker,
         )
 
         for i in range(self.num_workers):
@@ -412,9 +418,9 @@ class AsyncSubprocVecEnv:
         for i, remote in enumerate(self.remotes):
             remote.send(("get_spaces", None))
             remote.recv()
-            print(f"  Worker {i} initialized (pid {self.processes[i].pid})")
+            logger.info("  Worker %s initialized (pid %s)", i, self.processes[i].pid)
 
-        print(f"[AsyncSubprocVecEnv] All {self.num_workers} workers ready.")
+        logger.info("[AsyncSubprocVecEnv] All %s workers ready.", self.num_workers)
 
     def get_obs(self, env_ids=None, copy=True):
         """Read current observations from shared memory."""
@@ -592,7 +598,7 @@ def _get_ray_worker_actor_cls():
     if _RAY_WORKER_ACTOR_CLS is None:
         import ray
 
-        @ray.remote
+        @ray.remote(num_cpus=1)
         class _RayEnvWorkerActor:
             """Ray remote actor — runs a DummyVecEnv, returns results via Ray object store."""
 
@@ -611,10 +617,31 @@ def _get_ray_worker_actor_cls():
                     self._envs.step(random_actions)
 
             def step(self, actions):
-                return self._envs.step(actions)
+                try:
+                    return self._envs.step(actions)
+                except Exception as exc:
+                    import traceback
+                    obs = self._envs.reset()
+                    n = self._envs.n_envs
+                    import logging
+                    logger = logging.getLogger(__name__)
+                    logger.exception("[RayEnvWorkerActor] step() error (reset performed): %s", exc)
+                    return (
+                        obs,
+                        np.zeros(n, dtype=np.float32),
+                        np.ones(n, dtype=bool),
+                        [{} for _ in range(n)],
+                    )
 
             def reset(self):
-                return self._envs.reset()
+                try:
+                    return self._envs.reset()
+                except Exception as exc:
+                    import traceback
+                    import logging
+                    logger = logging.getLogger(__name__)
+                    logger.exception("[RayEnvWorkerActor] reset() error: %s", exc)
+                    raise
 
             def get_spaces(self):
                 return self._envs.observation_space, self._envs.action_space
@@ -667,9 +694,10 @@ class RayAsyncVecEnv:
                 "observation_space and action_space must be provided together"
             )
 
-        print(
-            f"[RayAsyncVecEnv] Initializing {self.num_workers} Ray actors "
-            f"(each with {num_envs_per_worker} envs)..."
+        logger.info(
+            "[RayAsyncVecEnv] Initializing %s Ray actors (each with %s envs)...",
+            self.num_workers,
+            num_envs_per_worker,
         )
         actor_cls = _get_ray_worker_actor_cls()
         self._workers = []
@@ -691,7 +719,7 @@ class RayAsyncVecEnv:
         self._obs_shape = self.observation_space.shape
 
         self._pending: dict = {}  # worker_id -> ObjectRef
-        print(f"[RayAsyncVecEnv] {self.num_workers} Ray actors submitted.")
+        logger.info("[RayAsyncVecEnv] %s Ray actors submitted.", self.num_workers)
 
     # ------------------------------------------------------------------
     # Core interface — mirrors AsyncSubprocVecEnv

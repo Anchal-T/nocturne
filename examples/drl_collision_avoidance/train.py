@@ -68,8 +68,14 @@ def _make_env_fn(cfg_dict, env_index):
         os.environ['OMP_NUM_THREADS'] = '1'
         torch.set_num_threads(1)
         from examples.drl_collision_avoidance.collision_avoidance_env import CollisionAvoidanceEnv
+        from examples.drl_collision_avoidance.scenario_utils import _is_s3_path, _sync_s3_to_local
         env_cfg = dict(cfg_dict)
         env_cfg['seed'] = cfg_dict.get('seed', 42) + env_index * 1000
+        # Sync S3 data to this node's local disk before the C++ Simulation class
+        # opens it. _sync_s3_to_local caches per-process so multiple envs in the
+        # same Ray actor worker only download once.
+        if _is_s3_path(env_cfg.get('scenario_path', '')):
+            env_cfg['scenario_path'] = _sync_s3_to_local(env_cfg['scenario_path'])
         return CollisionAvoidanceEnv(env_cfg)
     return _thunk
 
@@ -933,7 +939,11 @@ def main(cfg):
     min_replay = drl_cfg['min_replay_size']
     log_interval = drl_cfg['log_interval']
     save_interval = drl_cfg['save_interval']
-    checkpoint_dir = drl_cfg['checkpoint_dir']
+    # Hydra changes cwd to outputs/<date>/<time>/; resolve checkpoint_dir
+    # against the original working directory so checkpoints land in a stable,
+    # predictable location regardless of how Hydra is configured.
+    _original_cwd = hydra.utils.get_original_cwd()
+    checkpoint_dir = os.path.join(_original_cwd, drl_cfg['checkpoint_dir'])
     os.makedirs(checkpoint_dir, exist_ok=True)
 
     writer = _make_writer(checkpoint_dir)

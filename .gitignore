@@ -51,3 +51,5 @@ outputs/
 .agents/rules/nocturne-rules.md
 .agents
 .github/instructions/test.instructions.md
+
+venv/
