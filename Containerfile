@@ -1,4 +1,4 @@
-FROM anyscale/ray:2.47.0-py311-gpu
+FROM anyscale/ray:2.55.1-py311-cu128
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
