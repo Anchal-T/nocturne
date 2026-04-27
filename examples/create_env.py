@@ -15,7 +15,7 @@ def create_rl_env(cfg):
     """Test step and rendering functions."""
     set_display_window()
     env = create_env(cfg)
-    _ = env.reset()
+    _, _ = env.reset()
     # quick check that rendering works
     _ = env.scenario.getConeImage(
         env.scenario.getVehicles()[0],
@@ -38,7 +38,7 @@ def create_rl_env(cfg):
         # 'veh_veh_collision': did the agent collide with a vehicle
         # 'veh_edge_collision': did the agent collide with a road edge
         # 'goal_achieved': did we get to our target
-        _, _, _, _ = env.step({
+        _, _, _, _, _ = env.step({
             veh.id: Action(acceleration=2.0, steering=1.0, head_angle=0.5)
             for veh in moving_vehs
         })

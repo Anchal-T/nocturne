@@ -73,9 +73,10 @@ class DummyVecEnv:
     def step(self, actions):
         obs_list, rew_list, done_list, info_list = [], [], [], []
         for env, action in zip(self.envs, actions):
-            obs, reward, done, info = env.step(action)
+            obs, reward, terminated, truncated, info = env.step(action)
+            done = terminated or truncated
             if done:
-                obs = env.reset()
+                obs, _ = env.reset()
             obs_list.append(obs)
             rew_list.append(reward)
             done_list.append(done)
@@ -88,7 +89,7 @@ class DummyVecEnv:
         )
 
     def reset(self):
-        return np.stack([env.reset() for env in self.envs])
+        return np.stack([env.reset()[0] for env in self.envs])
 
     def close(self):
         for env in self.envs:
@@ -104,12 +105,14 @@ def _worker(remote, parent_remote, env_fn_wrapper):
     while True:
         cmd, data = remote.recv()
         if cmd == "step":
-            obs, reward, done, info = env.step(data)
+            obs, reward, terminated, truncated, info = env.step(data)
+            done = terminated or truncated
             if done:
-                obs = env.reset()
+                obs, _ = env.reset()
             remote.send((obs, reward, done, info))
         elif cmd == "reset":
-            remote.send(env.reset())
+            obs, _ = env.reset()
+            remote.send(obs)
         elif cmd == "get_spaces":
             remote.send((env.observation_space, env.action_space))
         elif cmd == "close":

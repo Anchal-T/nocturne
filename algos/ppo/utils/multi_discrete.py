@@ -3,13 +3,13 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 # Code modified from https://github.com/marlbenchmark/on-policy
-import gym
+import gymnasium as gym
 import numpy as np
 
 
 # An old version of OpenAI Gym's multi_discrete.py. (Was getting affected by Gym updates)
 # (https://github.com/openai/gym/blob/1fb81d4e3fb780ccf77fec731287ba07da35eb84/gym/spaces/multi_discrete.py)
-class MultiDiscrete(gym.Space):
+class MultiDiscrete(gym.spaces.Space):
     """
     - The multi-discrete action space consists of a series of discrete action spaces with different parameters
     - It can be adapted to both a Discrete action space or a continuous (Box) action space

@@ -50,7 +50,7 @@ def _capture_step_frames(env, writers: Dict[str, Any]) -> None:
 
 
 def _run_episode(env, agent, max_steps: int, writers: Dict[str, Any]):
-    state = env.reset()
+    state, _ = env.reset()
     total_reward = 0.0
     collided = False
     goal_achieved = False
@@ -59,7 +59,8 @@ def _run_episode(env, agent, max_steps: int, writers: Dict[str, Any]):
     for step in range(max_steps):
         _capture_step_frames(env, writers)
         action = agent.select_action(state)
-        state, reward, done, info = env.step(action)
+        state, reward, terminated, truncated, info = env.step(action)
+        done = terminated or truncated
         total_reward += reward
         collided = collided or info.get('collided', False)
         goal_achieved = goal_achieved or info.get('goal_achieved', False)

@@ -10,8 +10,8 @@ from itertools import islice
 import json
 import os
 
-from gym import Env
-from gym.spaces import Box, Discrete
+from gymnasium import Env
+from gymnasium.spaces import Box, Discrete
 import numpy as np
 import torch
 
@@ -65,7 +65,7 @@ class BaseEnv(Env):
         self.step_num = 0
         self.rank = rank
         self.seed(cfg['seed'])
-        obs_dict = self.reset()
+        obs_dict, _ = self.reset()
         self.observation_space = Box(low=-np.infty,
                                      high=np.infty,
                                      shape=(obs_dict[list(
@@ -292,15 +292,17 @@ class BaseEnv(Env):
                     info_dict[key]['veh_veh_collision'] = False
                     info_dict[key]['veh_edge_collision'] = False
 
+        truncated_dict = {key: False for key in done_dict.keys()}
         if self.step_num >= self.episode_length:
-            done_dict = {key: True for key in done_dict.keys()}
+            truncated_dict = {key: True for key in done_dict.keys()}
 
         all_done = True
         for value in done_dict.values():
             all_done *= value
         done_dict['__all__'] = all_done
+        truncated_dict['__all__'] = any(truncated_dict.values())
 
-        return obs_dict, rew_dict, done_dict, info_dict
+        return obs_dict, rew_dict, done_dict, truncated_dict, info_dict
 
     def reset(self):
         """See superclass."""
@@ -458,7 +460,7 @@ class BaseEnv(Env):
             self.all_vehicle_ids = list(obs_dict.keys())
         else:
             self.dead_agent_ids = []
-        return obs_dict
+        return obs_dict, {}
 
     def get_observation(self, veh_obj):
         """Return the observation for a particular vehicle."""

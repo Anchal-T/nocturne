@@ -1,9 +1,9 @@
 import math
 from typing import Any, Dict, Optional, Tuple
 
-import gym
+import gymnasium as gym
 import numpy as np
-from gym.spaces import Box, Discrete
+from gymnasium.spaces import Box, Discrete
 
 import nocturne
 from nocturne.envs.base_env import BaseEnv
@@ -79,9 +79,10 @@ class CollisionAvoidanceEnv(gym.Env):
         self._ttz_vehicle: float = NO_CONFLICT_TTZ
         self._ttz_pedestrian: float = NO_CONFLICT_TTZ
 
-    def reset(self) -> np.ndarray:
+    def reset(self, *, seed=None, options=None) -> tuple:
+        super().reset(seed=seed)
         for _ in range(MAX_RESET_ATTEMPTS):
-            obs_dict = self.base_env.reset()
+            obs_dict, _ = self.base_env.reset()
             if not obs_dict:
                 continue
             ego_id = next(iter(obs_dict))
@@ -90,7 +91,7 @@ class CollisionAvoidanceEnv(gym.Env):
                 self._ego_id = ego_id
                 self._step_count = 0
                 self._prev_goal_dist = self._get_goal_dist()
-                return self._build_observation()
+                return self._build_observation(), {}
 
         ego_id = self._find_any_ego_id(obs_dict)
         if ego_id is None:
@@ -100,7 +101,7 @@ class CollisionAvoidanceEnv(gym.Env):
         self._ego_id = ego_id
         self._step_count = 0
         self._prev_goal_dist = self._get_goal_dist()
-        return self._build_observation()
+        return self._build_observation(), {}
 
     def _find_any_ego_id(self, obs_dict):
         if obs_dict:
@@ -114,10 +115,10 @@ class CollisionAvoidanceEnv(gym.Env):
             return vehicles[0].getID()
         return None
 
-    def step(self, action: int) -> Tuple[np.ndarray, float, bool, Dict]:
+    def step(self, action: int) -> Tuple[np.ndarray, float, bool, bool, Dict]:
         throttle, steer = self.action_table[action]
         action_dict = {self._ego_id: [throttle, steer, 0.0]}
-        _, rew_dict, done_dict, info_dict = self.base_env.step(action_dict)
+        _, rew_dict, done_dict, truncated_dict, info_dict = self.base_env.step(action_dict)
         self._step_count += 1
 
         obs = self._build_observation()
@@ -125,7 +126,8 @@ class CollisionAvoidanceEnv(gym.Env):
 
         ego_done = done_dict.get(self._ego_id, False)
         all_done = done_dict.get("__all__", False)
-        done = ego_done or all_done or self._step_count >= self._max_steps
+        terminated = ego_done or all_done
+        truncated = truncated_dict.get(self._ego_id, False) or self._step_count >= self._max_steps
 
         info = dict(info_dict.get(self._ego_id, {}))
         info["ttz_vehicle"] = self._ttz_vehicle
@@ -133,7 +135,7 @@ class CollisionAvoidanceEnv(gym.Env):
         info["step_count"] = self._step_count
         info["goal_dist"] = self._get_goal_dist()
 
-        return obs, reward, done, info
+        return obs, reward, terminated, truncated, info
 
     def render(self, mode="human"):
         return self.base_env.render(mode)

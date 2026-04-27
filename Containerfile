@@ -17,7 +17,7 @@ RUN pip install --no-cache-dir \
     torch \
     hydra-core \
     omegaconf \
-    "gym==0.21.0" \
+    "gymnasium==1.0.0" \
     wandb \
     tensorboard \
     boto3 \

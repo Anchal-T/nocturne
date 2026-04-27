@@ -158,18 +158,19 @@ def test_env_interface():
         }
 
         env = CollisionAvoidanceEnv(cfg)
-        obs = env.reset()
+        obs, _ = env.reset()
         expected_dim = 3 * 25 * 14 + 4 + 2 + 3
         assert obs.shape == (expected_dim,), f'Expected ({expected_dim},) got {obs.shape}'
         assert env.action_space.n == 15
 
         for i in range(5):
-            obs, rew, done, info = env.step(4)
+            obs, rew, terminated, truncated, info = env.step(4)
+            done = terminated or truncated
             assert obs.shape == (expected_dim,)
             assert isinstance(rew, float)
             assert isinstance(done, bool)
             if done:
-                obs = env.reset()
+                obs, _ = env.reset()
     finally:
         if os.path.exists(backup_path):
             os.replace(backup_path, valid_path)

@@ -129,7 +129,7 @@ def _run_crl_training(
         env_id = episodes_completed % num_envs
 
         # ---- Episode collection ----------------------------------------
-        obs = env.reset()
+        obs, _ = env.reset()
         state, goal = env.get_state_goal(obs)
         x, y, cos_h, sin_h = env.get_ego_info()
 
@@ -141,7 +141,8 @@ def _run_crl_training(
         while not done and running_state["running"]:
             action = agent.select_action(state, goal)
 
-            next_obs, _reward, done, info = env.step(action)
+            next_obs, _reward, terminated, truncated, info = env.step(action)
+            done = terminated or truncated
             next_state, next_goal = env.get_state_goal(next_obs)
 
             next_x = info["ego_x"]
@@ -271,7 +272,7 @@ def main(cfg) -> None:
 
     # -- Build one env to probe dimensions --
     probe_env = _make_crl_env(cfg_dict, 0)
-    _obs_probe = probe_env.reset()
+    _obs_probe, _ = probe_env.reset()
     state_dim = probe_env.state_dim
     goal_dim = probe_env.goal_dim
     action_dim = probe_env.action_space.shape[0]

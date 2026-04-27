@@ -17,7 +17,7 @@ import math
 from typing import Any, Dict, Optional, Tuple
 
 import numpy as np
-from gym.spaces import Box
+from gymnasium.spaces import Box
 
 from examples.drl_collision_avoidance.collision_avoidance_env import (
     DIST_NORM,
@@ -115,11 +115,11 @@ class CRLCollisionAvoidanceEnv(CollisionAvoidanceEnv):
     # Gym interface
     # ------------------------------------------------------------------
 
-    def reset(self) -> np.ndarray:
+    def reset(self, *, seed=None, options=None) -> tuple:
         """Reset the underlying scenario and return a CRL observation."""
         obs_dict: Optional[Dict] = None
         for _ in range(MAX_RESET_ATTEMPTS):
-            obs_dict = self.base_env.reset()
+            obs_dict, _ = self.base_env.reset()
             if not obs_dict:
                 continue
             ego_id = next(iter(obs_dict))
@@ -128,7 +128,7 @@ class CRLCollisionAvoidanceEnv(CollisionAvoidanceEnv):
                 self._ego_id = ego_id
                 self._step_count = 0
                 self._prev_goal_dist = self._get_goal_dist()
-                return self._build_crl_obs()
+                return self._build_crl_obs(), {}
 
         # Fallback: use any reachable vehicle id.
         ego_id = self._find_any_ego_id(obs_dict or {})
@@ -140,9 +140,9 @@ class CRLCollisionAvoidanceEnv(CollisionAvoidanceEnv):
         self._ego_id = ego_id
         self._step_count = 0
         self._prev_goal_dist = self._get_goal_dist()
-        return self._build_crl_obs()
+        return self._build_crl_obs(), {}
 
-    def step(self, action: np.ndarray) -> Tuple[np.ndarray, float, bool, Dict]:
+    def step(self, action: np.ndarray) -> Tuple[np.ndarray, float, bool, bool, Dict]:
         """Accept a tanh-squashed continuous action in [-1, 1]^2.
 
         Internally scales to throttle in [-3, 2] and steer in [-0.7, 0.7].
@@ -161,13 +161,15 @@ class CRLCollisionAvoidanceEnv(CollisionAvoidanceEnv):
 
         ego_id: int = self._ego_id  # type: ignore[assignment]  # always set by reset()
         action_dict = {ego_id: [throttle, steer, 0.0]}
-        _, _rew_dict, done_dict, info_dict = self.base_env.step(action_dict)
+        _, _rew_dict, done_dict, truncated_dict, info_dict = self.base_env.step(action_dict)
         self._step_count += 1
 
         obs = self._build_crl_obs()
         ego_done = bool(done_dict.get(ego_id, False))
         all_done = bool(done_dict.get("__all__", False))
-        done = ego_done or all_done or self._step_count >= self._max_steps
+        terminated = ego_done or all_done
+        truncated = bool(truncated_dict.get(ego_id, False)) or self._step_count >= self._max_steps
+        done = terminated or truncated
 
         info = dict(info_dict.get(ego_id, {}))
 
@@ -185,7 +187,7 @@ class CRLCollisionAvoidanceEnv(CollisionAvoidanceEnv):
             info["ego_sin_h"] = 0.0
 
         # CRL is self-supervised: reward is always 0 regardless of outcome.
-        return obs, 0.0, done, info
+        return obs, 0.0, terminated, truncated, info
 
     # ------------------------------------------------------------------
     # Helpers exposed to the training loop

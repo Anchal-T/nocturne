@@ -26,7 +26,7 @@ def test_rl_env():
     env = create_env(cfg)
     env.files = [str(PROJECT_PATH / "tests/large_file_tfrecord.json")]
     times = []
-    _ = env.reset()
+    _, _ = env.reset()
     # quick check that rendering works
     _ = env.scenario.getConeImage(env.scenario.getVehicles()[0],
                                   80.0,
@@ -40,7 +40,7 @@ def test_rl_env():
             for veh in vehs
         }
         t = time.perf_counter()
-        obs, rew, done, info = env.step(
+        obs, rew, done, _truncated, info = env.step(
             {veh.id: Action(acceleration=2.0, steering=1.0)
              for veh in vehs})
         times.append(time.perf_counter() - t)

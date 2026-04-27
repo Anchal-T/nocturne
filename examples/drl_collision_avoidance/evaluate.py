@@ -35,7 +35,7 @@ def evaluate(checkpoint_path: str, scenario_path: Optional[str] = None,
     }
 
     for ep in range(1, num_episodes + 1):
-        state = env.reset()
+        state, _ = env.reset()
         total_reward = 0.0
         collided = False
         goal = False
@@ -43,7 +43,8 @@ def evaluate(checkpoint_path: str, scenario_path: Optional[str] = None,
 
         for t in range(cfg['drl']['max_episode_steps']):
             action = agent.select_action(state)
-            state, reward, done, info = env.step(action)
+            state, reward, terminated, truncated, info = env.step(action)
+            done = terminated or truncated
             total_reward += reward
             collided = collided or info.get('collided', False)
             goal = goal or info.get('goal_achieved', False)

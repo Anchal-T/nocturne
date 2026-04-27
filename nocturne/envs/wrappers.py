@@ -3,7 +3,7 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 """Wrappers and env constructors for the environments."""
-from gym.spaces import Box
+from gymnasium.spaces import Box
 import numpy as np
 
 from nocturne.envs import BaseEnv
@@ -24,7 +24,7 @@ class OnPolicyPPOWrapper(object):
         self.use_images = use_images
 
         self.n = self.cfg.max_num_vehicles
-        obs_dict = self.reset()
+        obs_dict, _ = self.reset()
         # tracker used to match observations to actions
         self.agent_ids = []
         self.feature_shape = obs_dict[0].shape
@@ -50,7 +50,7 @@ class OnPolicyPPOWrapper(object):
         agent_actions = {}
         for action_vec, agent_id in zip(actions, self.agent_ids):
             agent_actions[agent_id] = action_vec
-        next_obses, rew, done, info = self._env.step(agent_actions)
+        next_obses, rew, done, _truncated, info = self._env.step(agent_actions)
         obs_n = []
         rew_n = []
         done_n = []
@@ -69,7 +69,7 @@ class OnPolicyPPOWrapper(object):
 
     def reset(self):
         """Convert observation dict to list."""
-        obses = self._env.reset()
+        obses, _ = self._env.reset()
         obs_n = []
         self.agent_ids = []
         for key in obses.keys():
