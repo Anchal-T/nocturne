@@ -1,5 +1,7 @@
 FROM anyscale/ray:2.55.1-py311-cu128
 
+USER root
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     cmake \
