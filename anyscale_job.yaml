@@ -41,8 +41,8 @@ compute_config:
     instance_type: g4dn.xlarge    # 1x T4 GPU — learner (ProcessLearner) + main process
   worker_nodes:
     - instance_type: m5.4xlarge   # 16 vCPU, 64 GB — Ray env actor workers
-      min_nodes: 4                 # raised from 1: ensures meaningful parallelism before training starts
-      max_nodes: 16
+      min_nodes: 2                 # raised from 1: ensures meaningful parallelism before training starts
+      max_nodes: 2
       market_type: PREFER_SPOT    # cheaper; falls back to on-demand if unavailable
 
 max_retries: 1
