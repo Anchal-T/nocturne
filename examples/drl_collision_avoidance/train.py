@@ -62,6 +62,19 @@ def _make_cfg_dict(cfg) -> Dict[str, Any]:
     return cast(Dict[str, Any], cfg_dict)
 
 
+def _verify_nocturne_cpp_import() -> None:
+    try:
+        import nocturne_cpp  # noqa: F401
+    except Exception as exc:
+        raise RuntimeError(
+            "Failed to import `nocturne_cpp` on the driver process. Build and install a wheel "
+            "before training (for example: `python -m pip wheel . --no-deps --no-build-isolation -w dist`), "
+            "then install that wheel on every Ray node via runtime_env.setup_commands. "
+            "Also add a worker smoke check: "
+            "`python -c \"import nocturne_cpp; print(nocturne_cpp.__file__)\"`."
+        ) from exc
+
+
 def _make_env_fn(cfg_dict, env_index):
     """Return a zero-arg factory for a CollisionAvoidanceEnv with a unique seed."""
     def _thunk():
@@ -918,11 +931,24 @@ def main(cfg):
         ray_address = drl_cfg.get('ray_address', None)  # None = local; "auto" = Anyscale
         runtime_env = None
         if ray_address == "auto":
+            wheel_path = os.environ.get("NOCTURNE_WHEEL_PATH")
+            if not wheel_path:
+                raise RuntimeError(
+                    "drl.ray_address=auto requires NOCTURNE_WHEEL_PATH to point to a prebuilt wheel "
+                    "(for example dist/<wheel>.whl built once in the job entrypoint)."
+                )
             # setup_commands propagates to every worker node in the cluster.
             # RAY_OVERRIDE_JOB_RUNTIME_ENV=1 (set in anyscale_job.yaml env_vars) lets
             # this merge with the Job's runtime env instead of raising a conflict.
-            runtime_env = {"setup_commands": ["pip install . --no-build-isolation -q"]}
+            runtime_env = {
+                "env_vars": {"NOCTURNE_WHEEL_PATH": wheel_path},
+                "setup_commands": [
+                    'python -m pip install --no-deps -q "$NOCTURNE_WHEEL_PATH"',
+                    'python -c "import nocturne_cpp; print(nocturne_cpp.__file__)"',
+                ],
+            }
         # include_dashboard=False: avoids a Ray 2.x/Python 3.8 dashboard import bug
+        _verify_nocturne_cpp_import()
         ray.init(
             address=ray_address,
             ignore_reinit_error=True,
