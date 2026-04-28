@@ -918,10 +918,9 @@ def main(cfg):
         ray_address = drl_cfg.get('ray_address', None)  # None = local; "auto" = Anyscale
         runtime_env = None
         if ray_address == "auto":
-            # On Anyscale, working_dir is synced to all nodes but the C++ extension
-            # must be compiled per-node. setup_commands runs before any worker starts.
+            # On Anyscale, the Job runtime env already sets working_dir (S3 zip).
+            # Only setup_commands is needed here to compile the C++ extension per-node.
             runtime_env = {
-                "working_dir": ".",
                 "setup_commands": ["pip install . --no-build-isolation -q"],
             }
         # include_dashboard=False: avoids a Ray 2.x/Python 3.8 dashboard import bug
