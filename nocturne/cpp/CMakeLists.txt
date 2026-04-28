@@ -11,8 +11,6 @@ set(
 
 project(nocturne)
 
-include(FetchContent)
-
 add_library(
   nocturne_geometry
   STATIC
@@ -46,17 +44,12 @@ add_library(
   ${CMAKE_CURRENT_SOURCE_DIR}/src/view_field.cc
 )
 # set_property(TARGET nocturne_lib PROPERTY POSITION_INDEPENDENT_CODE 1)
-FetchContent_Declare(
-  nlohmann_json
-  GIT_REPOSITORY https://github.com/nlohmann/json.git
-  GIT_TAG        v3.11.3
-)
-FetchContent_MakeAvailable(nlohmann_json)
+# nlohmann_json is pre-installed in the image via apt nlohmann-json3-dev
+find_package(nlohmann_json REQUIRED)
 
 target_include_directories(
   nocturne_core
   PUBLIC
-  ${nlohmann_json_SOURCE_DIR}/include
   ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
 
@@ -64,20 +57,15 @@ target_include_directories(
 find_package(SFML 2.5 COMPONENTS window system graphics audio REQUIRED)
 set(SFML_LIBS sfml-window sfml-system sfml-graphics sfml-audio)
 
-target_link_libraries(nocturne_core PUBLIC ${SFML_LIBS} nocturne_geometry)
+target_link_libraries(nocturne_core PUBLIC ${SFML_LIBS} nocturne_geometry nlohmann_json::nlohmann_json)
 
-# Google Test
-FetchContent_Declare(
-  googletest
-  GIT_REPOSITORY https://github.com/google/googletest.git
-  GIT_TAG main
-)
-
-set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
-FetchContent_MakeAvailable(googletest)
-
-enable_testing()
-add_subdirectory(
-  ${CMAKE_CURRENT_SOURCE_DIR}/tests
-  ${CMAKE_CURRENT_BINARY_DIR}/tests
-)
+if(CMAKE_PROJECT_NAME STREQUAL PROJECT_NAME)
+  find_package(GTest QUIET)
+  if(GTest_FOUND)
+    enable_testing()
+    add_subdirectory(
+      ${CMAKE_CURRENT_SOURCE_DIR}/tests
+      ${CMAKE_CURRENT_BINARY_DIR}/tests
+    )
+  endif()
+endif()

@@ -601,7 +601,7 @@ def _get_ray_worker_actor_cls():
     if _RAY_WORKER_ACTOR_CLS is None:
         import ray
 
-        @ray.remote(num_cpus=1, runtime_env={"setup_commands": ["pip install . --no-build-isolation -q"]})
+        @ray.remote(num_cpus=1)
         class _RayEnvWorkerActor:
             """Ray remote actor — runs a DummyVecEnv, returns results via Ray object store."""
 

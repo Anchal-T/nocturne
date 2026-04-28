@@ -1,6 +1,7 @@
 name: drl-nocturne-collision
 
 entrypoint: >-
+  pip install . --no-build-isolation -q &&
   python -m examples.drl_collision_avoidance.train
   drl.vec_env_mode=ray
   drl.ray_address=auto
@@ -21,9 +22,10 @@ excludes:
   - "__pycache__/"
   - "*.pyc"
 
-# containerfile installs system packages (SFML, cmake, build-essential, xvfb) and
-# Python deps. The C++ extension is built per-node via runtime_env.setup_commands
-# passed to ray.init() in train.py (Anyscale containerfile cannot COPY local files).
+# containerfile bakes in system packages (cmake, SFML, etc.), Python deps, pybind11, and
+# nlohmann_json so pip install . can compile nocturne_cpp without network access on any node.
+# setup_commands in ray.init() (train.py) propagates the build to every worker node;
+# RAY_OVERRIDE_JOB_RUNTIME_ENV=1 allows it to merge with this Job's runtime env.
 # NOTE: containerfile and image_uri are mutually exclusive — use only one.
 containerfile: Containerfile
 
@@ -34,6 +36,7 @@ containerfile: Containerfile
 env_vars:
   PROCESSED_TRAIN_NO_TL: "s3://btp-rl-data-mumbai/extracted/formatted_json_v2_no_tl_train/"
   PROCESSED_VALID_NO_TL: "s3://btp-rl-data-mumbai/extracted/formatted_json_v2_no_tl_valid/"
+  RAY_OVERRIDE_JOB_RUNTIME_ENV: "1"
 
 compute_config:
   head_node:

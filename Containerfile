@@ -8,12 +8,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libsfml-dev \
     xvfb \
     libgl1-mesa-glx \
+    nlohmann-json3-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Pre-install Python dependencies into the image for faster node startup.
 # Anyscale containerfile does not allow COPY from local directories, so
 # packages are listed inline rather than sourced from requirements-anyscale.txt.
+# pybind11[global] exposes CMake find_package support — no FetchContent needed at build time.
 RUN pip install --no-cache-dir \
+    "pybind11[global]" \
     torch \
     hydra-core \
     omegaconf \

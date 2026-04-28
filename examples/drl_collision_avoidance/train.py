@@ -916,11 +916,18 @@ def main(cfg):
     if vec_env_mode == 'ray':
         import ray
         ray_address = drl_cfg.get('ray_address', None)  # None = local; "auto" = Anyscale
+        runtime_env = None
+        if ray_address == "auto":
+            # setup_commands propagates to every worker node in the cluster.
+            # RAY_OVERRIDE_JOB_RUNTIME_ENV=1 (set in anyscale_job.yaml env_vars) lets
+            # this merge with the Job's runtime env instead of raising a conflict.
+            runtime_env = {"setup_commands": ["pip install . --no-build-isolation -q"]}
         # include_dashboard=False: avoids a Ray 2.x/Python 3.8 dashboard import bug
         ray.init(
             address=ray_address,
             ignore_reinit_error=True,
             include_dashboard=False,
+            runtime_env=runtime_env,
         )
 
     vec_env, vec_env_cls = _build_vec_env(cfg_dict, num_envs, num_envs_per_worker, vec_env_mode)
