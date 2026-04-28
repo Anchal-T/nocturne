@@ -5,7 +5,7 @@ entrypoint: >-
   python -m examples.drl_collision_avoidance.train
   drl.vec_env_mode=ray
   drl.ray_address=auto
-  drl.num_workers=128
+  drl.num_workers=32
   drl.num_envs_per_worker=2
 
 # Anyscale uploads this directory to every node in the cluster.
