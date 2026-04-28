@@ -1,7 +1,6 @@
 name: drl-nocturne-collision
 
 entrypoint: >-
-  pip install . --no-build-isolation -q &&
   python -m examples.drl_collision_avoidance.train
   drl.vec_env_mode=ray
   drl.ray_address=auto
@@ -22,9 +21,9 @@ excludes:
   - "__pycache__/"
   - "*.pyc"
 
-# containerfile installs system packages (SFML, cmake, build-essential, xvfb)
-# and Python deps. The nocturne C++ extension is built at job startup via
-# entrypoint because Anyscale containerfile forbids COPY from local directories.
+# containerfile installs system packages (SFML, cmake, build-essential, xvfb) and
+# Python deps. The C++ extension is built per-node via runtime_env.setup_commands
+# passed to ray.init() in train.py (Anyscale containerfile cannot COPY local files).
 # NOTE: containerfile and image_uri are mutually exclusive — use only one.
 containerfile: Containerfile
 

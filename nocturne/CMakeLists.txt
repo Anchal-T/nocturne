@@ -16,11 +16,14 @@ add_subdirectory(
   ${CMAKE_CURRENT_BINARY_DIR}/cpp
 )
 
-# pybind11
-add_subdirectory(
-  ${CMAKE_CURRENT_SOURCE_DIR}/../third_party/pybind11
-  ${CMAKE_CURRENT_BINARY_DIR}/third_party/pybind11
+# pybind11 — fetched at configure time so git submodule init is not required
+include(FetchContent)
+FetchContent_Declare(
+  pybind11
+  GIT_REPOSITORY https://github.com/pybind/pybind11.git
+  GIT_TAG        v2.11.1
 )
+FetchContent_MakeAvailable(pybind11)
 
 pybind11_add_module(
   nocturne_cpp

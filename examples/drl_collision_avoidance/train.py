@@ -916,8 +916,21 @@ def main(cfg):
     if vec_env_mode == 'ray':
         import ray
         ray_address = drl_cfg.get('ray_address', None)  # None = local; "auto" = Anyscale
+        runtime_env = None
+        if ray_address == "auto":
+            # On Anyscale, working_dir is synced to all nodes but the C++ extension
+            # must be compiled per-node. setup_commands runs before any worker starts.
+            runtime_env = {
+                "working_dir": ".",
+                "setup_commands": ["pip install . --no-build-isolation -q"],
+            }
         # include_dashboard=False: avoids a Ray 2.x/Python 3.8 dashboard import bug
-        ray.init(address=ray_address, ignore_reinit_error=True, include_dashboard=False)
+        ray.init(
+            address=ray_address,
+            ignore_reinit_error=True,
+            include_dashboard=False,
+            runtime_env=runtime_env,
+        )
 
     vec_env, vec_env_cls = _build_vec_env(cfg_dict, num_envs, num_envs_per_worker, vec_env_mode)
     obs_dim = vec_env.observation_space.shape[0]

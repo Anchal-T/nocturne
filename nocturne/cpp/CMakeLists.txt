@@ -11,6 +11,8 @@ set(
 
 project(nocturne)
 
+include(FetchContent)
+
 add_library(
   nocturne_geometry
   STATIC
@@ -44,10 +46,17 @@ add_library(
   ${CMAKE_CURRENT_SOURCE_DIR}/src/view_field.cc
 )
 # set_property(TARGET nocturne_lib PROPERTY POSITION_INDEPENDENT_CODE 1)
+FetchContent_Declare(
+  nlohmann_json
+  GIT_REPOSITORY https://github.com/nlohmann/json.git
+  GIT_TAG        v3.11.3
+)
+FetchContent_MakeAvailable(nlohmann_json)
+
 target_include_directories(
   nocturne_core
   PUBLIC
-  ${CMAKE_CURRENT_SOURCE_DIR}/../../third_party/json/include
+  ${nlohmann_json_SOURCE_DIR}/include
   ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
 
@@ -58,8 +67,6 @@ set(SFML_LIBS sfml-window sfml-system sfml-graphics sfml-audio)
 target_link_libraries(nocturne_core PUBLIC ${SFML_LIBS} nocturne_geometry)
 
 # Google Test
-include(FetchContent)
-
 FetchContent_Declare(
   googletest
   GIT_REPOSITORY https://github.com/google/googletest.git
