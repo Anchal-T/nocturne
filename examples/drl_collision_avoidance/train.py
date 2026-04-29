@@ -95,7 +95,7 @@ def main(cfg):
     drl_cfg = cfg_dict.get("drl", {})
 
     # ------------------------------------------------------------------ #
-    # Ray initialisation                                                   #
+    # Ray initialization                                                   #
     # ------------------------------------------------------------------ #
     ray_address = drl_cfg.get("ray_address")
     vec_env_mode = drl_cfg.get("vec_env_mode", "local")
@@ -109,7 +109,7 @@ def main(cfg):
         ray.init(local_mode=True)
 
     # ------------------------------------------------------------------ #
-    # Worker / batch-size configuration                                    #
+    # Worker and batch-size configuration                                  #
     # ------------------------------------------------------------------ #
     num_workers = int(drl_cfg.get("num_workers", 2))
     num_envs_per_worker = int(drl_cfg.get("num_envs_per_worker", 1))

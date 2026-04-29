@@ -125,7 +125,7 @@ drl:
   num_sgd_iter: 5
   # number of environment steps each worker collects before updating
   rollout_fragment_length: 20
-  # entropy regularisation coefficient (higher encourages more exploration)
+  # entropy regularisation coefficient (0.0 disables entropy bonus; increase to encourage exploration)
   entropy_coeff: 0.0
   # whether to use an LSTM layer in the policy network
   use_lstm: False
@@ -133,7 +133,7 @@ drl:
   stop_episodes: 60000
   # save a checkpoint every this many training iterations
   checkpoint_freq: 100
-  # directory to store Ray/RLlib results; null falls back to ~/ray_results
+  # directory to store Ray/RLlib results; null falls back to ~/ray_results/nocturne
   results_dir: null
 
 hydra:
