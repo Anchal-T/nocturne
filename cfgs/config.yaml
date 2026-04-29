@@ -106,6 +106,36 @@ subscriber:
 
 results_dir: ${oc.env:NOCTURNE_LOG_DIR}
 
+drl:
+  # vectorized environment mode: 'ray' uses Ray distributed workers, 'local' runs in a single process
+  vec_env_mode: local
+  # Ray cluster address; set to 'auto' to connect to an existing cluster or null to start a new local cluster
+  ray_address: null
+  # number of Ray rollout workers for collecting experience
+  num_workers: 2
+  # number of environments instantiated on each rollout worker
+  num_envs_per_worker: 1
+  # number of GPUs available to the trainer (0 for CPU-only)
+  num_gpus: 0
+  # total number of timesteps to collect per training iteration (null = auto-computed from workers)
+  train_batch_size: null
+  # size of each SGD minibatch within a training iteration (null = auto-computed)
+  sgd_minibatch_size: null
+  # number of SGD passes per training iteration
+  num_sgd_iter: 5
+  # number of environment steps each worker collects before updating
+  rollout_fragment_length: 20
+  # entropy regularisation coefficient (higher encourages more exploration)
+  entropy_coeff: 0.0
+  # whether to use an LSTM layer in the policy network
+  use_lstm: False
+  # stop training after this many total episodes
+  stop_episodes: 60000
+  # save a checkpoint every this many training iterations
+  checkpoint_freq: 100
+  # directory to store Ray/RLlib results; null falls back to ~/ray_results
+  results_dir: null
+
 hydra:
   run:
     dir: ${results_dir}/test/${now:%Y.%m.%d}/${experiment}/${now:%H.%M.%S}/${hydra.job.override_dirname}
