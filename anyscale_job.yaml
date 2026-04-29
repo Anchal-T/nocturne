@@ -1,9 +1,11 @@
 name: drl-nocturne-collision
 
 entrypoint: >-
-  python -m pip wheel . --no-deps --no-build-isolation -q -w dist &&
+  python -m pip wheel . --no-deps --no-build-isolation -v -w dist &&
   export NOCTURNE_WHEEL_PATH="$(python -c 'import glob, os; wheels = sorted(glob.glob("dist/*.whl")); print(os.path.abspath(wheels[-1]))')" &&
-  python -m pip install --no-deps -q "$NOCTURNE_WHEEL_PATH" &&
+  aws s3 cp "$NOCTURNE_WHEEL_PATH" s3://btp-rl-data-mumbai/wheels/nocturne-0.0.1-cp311-cp311-linux_x86_64.whl &&
+  export NOCTURNE_WHEEL_URL="s3://btp-rl-data-mumbai/wheels/nocturne-0.0.1-cp311-cp311-linux_x86_64.whl" &&
+  python -m pip install --no-deps --force-reinstall "$NOCTURNE_WHEEL_PATH" &&
   python -c "import nocturne_cpp; print(nocturne_cpp.__file__)" &&
   python -m examples.drl_collision_avoidance.train
   drl.vec_env_mode=ray

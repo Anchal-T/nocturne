@@ -932,17 +932,15 @@ def main(cfg):
         ray_address = drl_cfg.get('ray_address', None)  # None = local; "auto" = Anyscale
         runtime_env = None
         if ray_address == "auto":
-            wheel_path = os.environ.get("NOCTURNE_WHEEL_PATH")
-            if not wheel_path:
-                raise RuntimeError(
-                    "drl.ray_address=auto requires NOCTURNE_WHEEL_PATH to point to a prebuilt wheel "
-                    "(for example dist/<wheel>.whl built once in the job entrypoint)."
-                )
+            wheel_url = os.environ.get(
+                "NOCTURNE_WHEEL_URL",
+                "s3://btp-rl-data-mumbai/wheels/nocturne-0.0.1-cp311-cp311-linux_x86_64.whl"
+            )
             # setup_commands propagates to every worker node in the cluster.
             # RAY_OVERRIDE_JOB_RUNTIME_ENV=1 (set in anyscale_job.yaml env_vars) lets
             # this merge with the Job's runtime env instead of raising a conflict.
             runtime_env = {
-                "pip": [wheel_path],
+                "pip": [f"--no-deps {wheel_url}"],
                 "setup_commands": [
                     'python -c "import nocturne_cpp; print(nocturne_cpp.__file__)"',
                 ],
