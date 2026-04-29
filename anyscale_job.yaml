@@ -2,7 +2,7 @@ name: drl-nocturne-collision
 
 entrypoint: >-
   python -m pip wheel . --no-deps --no-build-isolation -q -w dist &&
-  export NOCTURNE_WHEEL_PATH="$(python -c 'import glob, os; wheels = sorted(glob.glob(\"dist/*.whl\")); print(os.path.abspath(wheels[-1]))')" &&
+  export NOCTURNE_WHEEL_PATH="$(python -c 'import glob, os; wheels = sorted(glob.glob("dist/*.whl")); print(os.path.abspath(wheels[-1]))')" &&
   python -m pip install --no-deps -q "$NOCTURNE_WHEEL_PATH" &&
   python -c "import nocturne_cpp; print(nocturne_cpp.__file__)" &&
   python -m examples.drl_collision_avoidance.train

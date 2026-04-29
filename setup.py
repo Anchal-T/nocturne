@@ -5,9 +5,11 @@
 
 """Run via ```python setup.py develop``` to install Nocturne in your environment."""
 import logging
+import glob
 import multiprocessing
 import os
 import re
+import shutil
 import subprocess
 import sys
 
@@ -49,11 +51,12 @@ class CMakeBuild(build_ext):
 
     def build_extension(self, ext):
         """Run the C++ build commands."""
-        ext_dir = os.path.abspath(
-            os.path.dirname(self.get_ext_fullpath(ext.name)))
+        expected_ext_path = os.path.abspath(self.get_ext_fullpath(ext.name))
+        ext_dir = os.path.abspath(os.path.dirname(expected_ext_path))
 
         cmake_args = [
             "-DCMAKE_LIBRARY_OUTPUT_DIRECTORY=" + ext_dir,
+            "-DCMAKE_RUNTIME_OUTPUT_DIRECTORY=" + ext_dir,
             "-DPYTHON_EXECUTABLE=" + sys.executable
         ]
 
@@ -61,6 +64,10 @@ class CMakeBuild(build_ext):
         build_args = ["--config", cfg]
 
         cmake_args += ["-DCMAKE_BUILD_TYPE=" + cfg]
+        cmake_args += [
+            f"-DCMAKE_LIBRARY_OUTPUT_DIRECTORY_{cfg.upper()}={ext_dir}",
+            f"-DCMAKE_RUNTIME_OUTPUT_DIRECTORY_{cfg.upper()}={ext_dir}",
+        ]
         build_args += ["--", f"-j{multiprocessing.cpu_count()}"]
 
         env = os.environ.copy()
@@ -83,6 +90,29 @@ class CMakeBuild(build_ext):
         except subprocess.CalledProcessError:
             logging.error(f"Aborting due to errors when running command {cmd}")
             sys.exit(1)
+
+        if not os.path.exists(expected_ext_path):
+            module_name = ext.name.rsplit(".", 1)[-1]
+            candidate_patterns = [
+                os.path.join(ext_dir, f"{module_name}*.so"),
+                os.path.join(ext_dir, f"{module_name}*.pyd"),
+                os.path.join(ext_dir, f"{module_name}*.dylib"),
+                os.path.join(self.build_temp, "**", f"{module_name}*.so"),
+                os.path.join(self.build_temp, "**", f"{module_name}*.pyd"),
+                os.path.join(self.build_temp, "**", f"{module_name}*.dylib"),
+            ]
+            candidates = [
+                path
+                for pattern in candidate_patterns
+                for path in glob.glob(pattern, recursive=True)
+                if os.path.isfile(path)
+            ]
+            if not candidates:
+                raise RuntimeError(
+                    f"CMake finished, but did not produce the Python extension {expected_ext_path!r}."
+                )
+            os.makedirs(os.path.dirname(expected_ext_path), exist_ok=True)
+            shutil.copy2(candidates[0], expected_ext_path)
 
         print()  # Add an empty line for cleaner output
 
