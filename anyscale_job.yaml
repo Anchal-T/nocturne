@@ -2,7 +2,7 @@ name: drl-nocturne-collision
 
 entrypoint: >-
   python -m pip wheel . --no-deps --no-build-isolation -q -w dist &&
-  export NOCTURNE_WHEEL_PATH="$(ls -1t dist/*.whl | head -n1)" &&
+  export NOCTURNE_WHEEL_PATH="$(python -c 'import glob, os; wheels = sorted(glob.glob(\"dist/*.whl\")); print(os.path.abspath(wheels[-1]))')" &&
   python -m pip install --no-deps -q "$NOCTURNE_WHEEL_PATH" &&
   python -c "import nocturne_cpp; print(nocturne_cpp.__file__)" &&
   python -m examples.drl_collision_avoidance.train
@@ -27,7 +27,7 @@ excludes:
 
 # containerfile bakes in system packages (cmake, SFML, etc.), Python deps, pybind11, and
 # nlohmann_json so this entrypoint can build one wheel on the head node.
-# train.py installs that same wheel on worker nodes via runtime_env.setup_commands;
+# train.py distributes and installs that same wheel on worker nodes via runtime_env.pip;
 # RAY_OVERRIDE_JOB_RUNTIME_ENV=1 allows it to merge with this Job's runtime env.
 # NOTE: containerfile and image_uri are mutually exclusive — use only one.
 containerfile: Containerfile

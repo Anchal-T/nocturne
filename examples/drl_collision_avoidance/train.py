@@ -65,11 +65,11 @@ def _make_cfg_dict(cfg) -> Dict[str, Any]:
 def _verify_nocturne_cpp_import() -> None:
     try:
         import nocturne_cpp  # noqa: F401
-    except Exception as exc:
+    except ImportError as exc:
         raise RuntimeError(
             "Failed to import `nocturne_cpp` on the driver process. Build and install a wheel "
             "before training (for example: `python -m pip wheel . --no-deps --no-build-isolation -w dist`), "
-            "then install that wheel on every Ray node via runtime_env.setup_commands. "
+            "then install that wheel on every Ray node via runtime_env.pip. "
             "Also add a worker smoke check: "
             "`python -c \"import nocturne_cpp; print(nocturne_cpp.__file__)\"`."
         ) from exc
@@ -926,6 +926,7 @@ def main(cfg):
     except RuntimeError:
         pass
 
+    _verify_nocturne_cpp_import()
     if vec_env_mode == 'ray':
         import ray
         ray_address = drl_cfg.get('ray_address', None)  # None = local; "auto" = Anyscale
@@ -941,14 +942,12 @@ def main(cfg):
             # RAY_OVERRIDE_JOB_RUNTIME_ENV=1 (set in anyscale_job.yaml env_vars) lets
             # this merge with the Job's runtime env instead of raising a conflict.
             runtime_env = {
-                "env_vars": {"NOCTURNE_WHEEL_PATH": wheel_path},
+                "pip": [wheel_path],
                 "setup_commands": [
-                    'python -m pip install --no-deps -q "$NOCTURNE_WHEEL_PATH"',
                     'python -c "import nocturne_cpp; print(nocturne_cpp.__file__)"',
                 ],
             }
         # include_dashboard=False: avoids a Ray 2.x/Python 3.8 dashboard import bug
-        _verify_nocturne_cpp_import()
         ray.init(
             address=ray_address,
             ignore_reinit_error=True,
