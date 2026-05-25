@@ -85,12 +85,21 @@ class Runner(object):
                              device=self.device)
 
         if self.model_dir is not None:
+            self._pending_lagrangian_state = None
             self.restore()
 
         # algorithm
         self.trainer = TrainAlgo(self.all_args,
                                  self.policy,
                                  device=self.device)
+
+        # Apply any Lagrangian state captured during restore (the trainer
+        # owns the multiplier and cost value normalizer, but doesn't exist
+        # until after `restore()` runs).
+        if getattr(self, '_pending_lagrangian_state', None):
+            self.trainer.load_lagrangian_state_dict(
+                self._pending_lagrangian_state)
+            self._pending_lagrangian_state = None
 
         # buffer
         self.buffer = SharedReplayBuffer(self.all_args, self.num_agents,
@@ -129,6 +138,17 @@ class Runner(object):
             np.split(_t2n(next_values), self.n_rollout_threads))
         self.buffer.compute_returns(next_values, self.trainer.value_normalizer)
 
+        # Compute cost returns for PPO-Lagrangian.
+        if getattr(self.trainer, 'use_lagrangian', False):
+            next_cost_values = self.trainer.policy.get_cost_values(
+                np.concatenate(self.buffer.share_obs[-1]),
+                np.concatenate(self.buffer.rnn_states_critic[-1]),
+                np.concatenate(self.buffer.masks[-1]))
+            next_cost_values = np.array(
+                np.split(_t2n(next_cost_values), self.n_rollout_threads))
+            self.buffer.compute_cost_returns(
+                next_cost_values, self.trainer.cost_value_normalizer)
+
     def train(self):
         """Train policies with data in buffer. """
         self.trainer.prep_training()
@@ -143,6 +163,12 @@ class Runner(object):
         policy_critic = self.trainer.policy.critic
         torch.save(policy_critic.state_dict(),
                    str(self.save_dir) + "/critic.pt")
+        if getattr(self.trainer.policy, 'use_lagrangian', False):
+            policy_cost_critic = self.trainer.policy.cost_critic
+            torch.save(policy_cost_critic.state_dict(),
+                       str(self.save_dir) + "/cost_critic.pt")
+            torch.save(self.trainer.lagrangian_state_dict(),
+                       str(self.save_dir) + "/lagrangian.pt")
 
     def restore(self):
         """Restore policy's networks from a saved model."""
@@ -152,6 +178,15 @@ class Runner(object):
             policy_critic_state_dict = torch.load(
                 str(self.model_dir) + '/critic.pt')
             self.policy.critic.load_state_dict(policy_critic_state_dict)
+            if getattr(self.policy, 'use_lagrangian', False):
+                policy_cost_critic_state_dict = torch.load(
+                    str(self.model_dir) + '/cost_critic.pt')
+                self.policy.cost_critic.load_state_dict(
+                    policy_cost_critic_state_dict)
+                lagrangian_path = (str(self.model_dir) + '/lagrangian.pt')
+                if os.path.exists(lagrangian_path):
+                    self._pending_lagrangian_state = torch.load(
+                        lagrangian_path)
 
     def log_train(self, train_infos, total_num_steps):
         """

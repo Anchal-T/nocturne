@@ -12,10 +12,15 @@ wandb: ${wandb}
 use_obs_instead_of_state: True # Whether to use global state or concatenated obs
 episode_length: ${episode_length} # Max length for any episode
 share_policy: True # Whether all agents share the same policy
-use_centralized_V: False # Whether to use a centralized value function
+use_centralized_V: True # Whether to use a centralized value function
 stacked_frames: 1 # number of stacked observations
 use_stacked_frames: True # whether to use stacked frames
 hidden_size: 64 # Dimension of hidden layers for actor/critic networks
+# Separate hidden size for the critic. When null, falls back to hidden_size.
+# When use_centralized_V is True with many agents, the critic input dimension
+# is n_agents * obs_dim which can be very large (e.g. 800k+). In that case,
+# set this to a larger value (e.g. 256 or 512) to avoid severe underfitting.
+critic_hidden_size: null
 layer_N: 2 # "Number of layers for actor/critic networks"
 use_ReLU: True # Whether to use ReLU activation or Tanh
 use_popart: False # Use PopART to normalize rewards
@@ -53,6 +58,17 @@ use_value_active_masks: True # whether to mask useless data in value loss
 use_policy_active_masks: True # whether to mask useless data in policy loss
 huber_delta: 10.0 # coefficient of huber loss
 use_linear_lr_decay: False
+
+# safety-constrained PPO-Lagrangian options
+use_lagrangian: False
+cost_limit: 0.05
+lambda_lr: 0.005
+lambda_init: 0.001
+# Upper bound on the Lagrange multiplier. Prevents lambda from running
+# away on transient cost spikes; tune together with lambda_lr.
+lambda_max: 100.0
+cost_gamma: 0.99
+cost_gae_lambda: 0.95
 
 # saving and logging
 save_interval: 1 # time duration between contiunous twice models saving

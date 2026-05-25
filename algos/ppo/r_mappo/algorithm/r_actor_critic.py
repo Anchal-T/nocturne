@@ -145,7 +145,10 @@ class R_Critic(nn.Module):
 
     def __init__(self, args, cent_obs_space, device=torch.device("cpu")):
         super(R_Critic, self).__init__()
-        self.hidden_size = args.hidden_size
+        # Allow a separate hidden size for the critic (important for
+        # centralized V where the input dimension can be very large).
+        critic_hidden = getattr(args, 'critic_hidden_size', None) or args.hidden_size
+        self.hidden_size = critic_hidden
         self._use_orthogonal = args.use_orthogonal
         self._use_naive_recurrent_policy = args.use_naive_recurrent_policy
         self._use_recurrent_policy = args.use_recurrent_policy
@@ -156,8 +159,13 @@ class R_Critic(nn.Module):
                        nn.init.orthogonal_][self._use_orthogonal]
 
         cent_obs_shape = get_shape_from_obs_space(cent_obs_space)
-        base = MLPBase
-        self.base = base(args, cent_obs_shape)
+        # Use a shallow-copied args with the critic-specific hidden size so
+        # MLPBase reads the right dimension without mutating the shared
+        # config object held by the rest of the trainer.
+        import copy
+        base_args = copy.copy(args)
+        base_args.hidden_size = critic_hidden
+        self.base = MLPBase(base_args, cent_obs_shape)
 
         if self._use_naive_recurrent_policy or self._use_recurrent_policy:
             self.rnn = RNNLayer(self.hidden_size, self.hidden_size,
@@ -195,3 +203,23 @@ class R_Critic(nn.Module):
         values = self.v_out(critic_features)
 
         return values, rnn_states
+
+
+class R_CostCritic(R_Critic):
+    """Critic network for expected future safety costs.
+
+    Non-recurrent by design: the cost critic operates on the same
+    centralized observations as the reward critic but does not maintain
+    its own recurrent state.  This avoids the need for a separate RNN
+    state buffer while still producing reasonable cost value estimates.
+
+    The reward critic's RNN state is passed through ``forward()`` for
+    interface compatibility but is **not** processed by an RNN layer.
+    """
+
+    def __init__(self, args, cent_obs_space, device=torch.device("cpu")):
+        import copy
+        cost_args = copy.copy(args)
+        cost_args.use_recurrent_policy = False
+        cost_args.use_naive_recurrent_policy = False
+        super(R_CostCritic, self).__init__(cost_args, cent_obs_space, device)

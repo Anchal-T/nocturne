@@ -17,6 +17,7 @@ import torch
 
 from cfgs.config import ERR_VAL as INVALID_POSITION, get_scenario_dict
 from nocturne import Action, Simulation
+from nocturne.utils.occlusion_features import compute_occlusion_features
 
 
 class BaseEnv(Env):
@@ -98,16 +99,18 @@ class BaseEnv(Env):
                         i += 1
         else:
             self.action_space = Box(
-                low=-np.array([
-                    np.abs(self.cfg['accel_lower_bound']),
+                low=np.array([
+                    self.cfg['accel_lower_bound'],
                     self.cfg['steering_lower_bound'],
                     self.cfg['head_angle_lower_bound']
-                ]),
+                ],
+                             dtype=np.float32),
                 high=np.array([
-                    np.abs(self.cfg['accel_upper_bound']),
+                    self.cfg['accel_upper_bound'],
                     self.cfg['steering_upper_bound'],
                     self.cfg['head_angle_upper_bound']
-                ]),
+                ],
+                              dtype=np.float32),
             )
 
     def apply_actions(
@@ -170,6 +173,8 @@ class BaseEnv(Env):
             info_dict[veh_id]['collided'] = False
             info_dict[veh_id]['veh_veh_collision'] = False
             info_dict[veh_id]['veh_edge_collision'] = False
+            info_dict[veh_id]['cost'] = 0.0
+            info_dict[veh_id]['near_miss'] = 0.0
             obj_pos = veh_obj.position
             goal_pos = veh_obj.target_position
             '''############################################
@@ -254,6 +259,7 @@ class BaseEnv(Env):
                 done_dict[veh_id] = True
             if veh_obj.getCollided():
                 info_dict[veh_id]['collided'] = True
+                info_dict[veh_id]['cost'] = 1.0
                 if int(veh_obj.collision_type) == 1:
                     info_dict[veh_id]['veh_veh_collision'] = True
                 if int(veh_obj.collision_type) == 2:
@@ -262,6 +268,17 @@ class BaseEnv(Env):
                     rew_cfg['collision_penalty']) / rew_cfg['reward_scaling']
                 if self.cfg.get('remove_at_collide', True):
                     done_dict[veh_id] = True
+            near_miss_threshold = rew_cfg.get('near_miss_threshold', None)
+            if near_miss_threshold is not None and not info_dict[veh_id][
+                    'collided']:
+                min_distance = np.inf
+                for other_obj in self.scenario.getVehicles():
+                    if other_obj.getID() == veh_id:
+                        continue
+                    min_distance = min(
+                        min_distance, (other_obj.position - obj_pos).norm())
+                info_dict[veh_id]['near_miss'] = float(
+                    min_distance < near_miss_threshold)
             # remove the vehicle so that its trajectory doesn't continue. This is important
             # in the multi-agent setting.
             if done_dict[veh_id]:
@@ -291,6 +308,8 @@ class BaseEnv(Env):
                     info_dict[key]['collided'] = False
                     info_dict[key]['veh_veh_collision'] = False
                     info_dict[key]['veh_edge_collision'] = False
+                    info_dict[key]['cost'] = 0.0
+                    info_dict[key]['near_miss'] = 0.0
 
         truncated_dict = {key: False for key in done_dict.keys()}
         if self.step_num >= self.episode_length:
@@ -465,24 +484,41 @@ class BaseEnv(Env):
     def get_observation(self, veh_obj):
         """Return the observation for a particular vehicle."""
         ego_obs = self.scenario.ego_state(veh_obj)
+        subscriber_cfg = self.cfg['subscriber']
+        use_occlusion_features = subscriber_cfg.get('use_occlusion_features',
+                                                    False)
+        if use_occlusion_features:
+            occ_obs = compute_occlusion_features(
+                self.scenario,
+                veh_obj,
+                subscriber_cfg['view_dist'],
+                subscriber_cfg['view_angle'],
+                head_angle=veh_obj.head_angle,
+            )
         if self.cfg['subscriber']['use_ego_state'] and self.cfg['subscriber'][
                 'use_observations']:
-            obs = np.concatenate(
-                (ego_obs,
-                 self.scenario.flattened_visible_state(
-                     veh_obj,
-                     view_dist=self.cfg['subscriber']['view_dist'],
-                     view_angle=self.cfg['subscriber']['view_angle'],
-                     head_angle=veh_obj.head_angle)))
+            obs_parts = [
+                ego_obs,
+                self.scenario.flattened_visible_state(
+                    veh_obj,
+                    view_dist=self.cfg['subscriber']['view_dist'],
+                    view_angle=self.cfg['subscriber']['view_angle'],
+                    head_angle=veh_obj.head_angle)
+            ]
         elif self.cfg['subscriber']['use_ego_state'] and not self.cfg[
                 'subscriber']['use_observations']:
-            obs = ego_obs
+            obs_parts = [ego_obs]
         else:
-            obs = self.scenario.flattened_visible_state(
-                veh_obj,
-                view_dist=self.cfg['subscriber']['view_dist'],
-                view_angle=self.cfg['subscriber']['view_angle'],
-                head_angle=veh_obj.head_angle)
+            obs_parts = [
+                self.scenario.flattened_visible_state(
+                    veh_obj,
+                    view_dist=self.cfg['subscriber']['view_dist'],
+                    view_angle=self.cfg['subscriber']['view_angle'],
+                    head_angle=veh_obj.head_angle)
+            ]
+        if use_occlusion_features:
+            obs_parts.append(occ_obs)
+        obs = np.concatenate(obs_parts)
         return obs
 
     def make_all_vehicles_experts(self):

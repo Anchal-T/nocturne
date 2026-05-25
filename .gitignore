@@ -8,6 +8,7 @@ bin/
 
 # IDE
 .vscode
+.claude/
 
 # media
 *.mov

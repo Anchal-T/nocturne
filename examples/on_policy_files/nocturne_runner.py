@@ -96,6 +96,26 @@ class NocturneSharedRunner(Runner):
         self.cfg = config['cfg.algo']
         self.render_envs = config['render_envs']
 
+    def _format_actions_for_env(self, actions, action_space):
+        """Convert policy actions to the representation expected by env.step."""
+        if action_space.__class__.__name__ == 'MultiDiscrete':
+            for i in range(action_space.shape):
+                uc_actions_env = np.eye(action_space.high[i] +
+                                        1)[actions[:, :, i]]
+                if i == 0:
+                    actions_env = uc_actions_env
+                else:
+                    actions_env = np.concatenate((actions_env, uc_actions_env),
+                                                 axis=2)
+        elif action_space.__class__.__name__ == 'Discrete':
+            actions_env = np.squeeze(np.eye(action_space.n)[actions], 2)
+        elif action_space.__class__.__name__ == 'Box':
+            actions_env = np.clip(actions, action_space.low,
+                                  action_space.high).astype(np.float32)
+        else:
+            raise NotImplementedError
+        return actions_env
+
     def run(self):
         """Run the training code."""
         self.warmup()
@@ -110,13 +130,13 @@ class NocturneSharedRunner(Runner):
 
             for step in range(self.episode_length):
                 # Sample actions
-                values, actions, action_log_probs, rnn_states, rnn_states_critic, actions_env = self.collect(
+                values, actions, action_log_probs, rnn_states, rnn_states_critic, actions_env, cost_value_preds = self.collect(
                     step)
 
                 # Obser reward and next obs
                 obs, rewards, dones, infos = self.envs.step(actions_env)
 
-                data = obs, rewards, dones, infos, values, actions, action_log_probs, rnn_states, rnn_states_critic
+                data = obs, rewards, dones, infos, values, actions, action_log_probs, rnn_states, rnn_states_critic, cost_value_preds
 
                 # insert data into buffer
                 self.insert(data)
@@ -124,6 +144,14 @@ class NocturneSharedRunner(Runner):
             # compute return and update network
             self.compute()
             train_infos = self.train()
+            if getattr(self.trainer, 'use_lagrangian', False):
+                # Per-episode cost: sum costs over the time dimension,
+                # then average over rollout threads and agents.
+                mean_episode_cost = float(
+                    self.buffer.costs.sum(axis=0).mean())
+                train_infos['mean_episode_cost'] = mean_episode_cost
+                train_infos['lagrangian_multiplier'] = (
+                    self.trainer.update_lagrangian(mean_episode_cost))
 
             # post process
             total_num_steps = (
@@ -150,12 +178,19 @@ class NocturneSharedRunner(Runner):
                 env_infos = {}
                 for agent_id in range(self.num_agents):
                     idv_rews = []
+                    idv_near_miss = []
                     for info in infos:
                         if 'individual_reward' in info[agent_id].keys():
                             idv_rews.append(
                                 info[agent_id]['individual_reward'])
+                        if 'near_miss' in info[agent_id].keys():
+                            idv_near_miss.append(
+                                info[agent_id]['near_miss'])
                     agent_k = 'agent%i/individual_rewards' % agent_id
                     env_infos[agent_k] = idv_rews
+                    if idv_near_miss:
+                        env_infos['agent%i/near_miss' % agent_id] = (
+                            idv_near_miss)
 
                 # TODO(eugenevinitsky) this does not correctly account for the fact that there could be
                 # two episodes in the buffer
@@ -212,27 +247,28 @@ class NocturneSharedRunner(Runner):
             np.split(_t2n(rnn_states), self.n_rollout_threads))
         rnn_states_critic = np.array(
             np.split(_t2n(rnn_states_critic), self.n_rollout_threads))
-        # rearrange action
-        if self.envs.action_space[0].__class__.__name__ == 'MultiDiscrete':
-            for i in range(self.envs.action_space[0].shape):
-                uc_actions_env = np.eye(self.envs.action_space[0].high[i] +
-                                        1)[actions[:, :, i]]
-                if i == 0:
-                    actions_env = uc_actions_env
-                else:
-                    actions_env = np.concatenate((actions_env, uc_actions_env),
-                                                 axis=2)
-        elif self.envs.action_space[0].__class__.__name__ == 'Discrete':
-            actions_env = np.squeeze(
-                np.eye(self.envs.action_space[0].n)[actions], 2)
-        else:
-            raise NotImplementedError
+        actions_env = self._format_actions_for_env(actions,
+                                                   self.envs.action_space[0])
 
-        return values, actions, action_log_probs, rnn_states, rnn_states_critic, actions_env
+        # Collect cost value predictions for PPO-Lagrangian.
+        cost_value_preds = None
+        if getattr(self.trainer, 'use_lagrangian', False):
+            cost_value = self.trainer.policy.get_cost_values(
+                np.concatenate(self.buffer.share_obs[step]),
+                np.concatenate(self.buffer.rnn_states_critic[step]),
+                np.concatenate(self.buffer.masks[step]))
+            cost_value_preds = np.array(
+                np.split(_t2n(cost_value), self.n_rollout_threads))
+
+        return values, actions, action_log_probs, rnn_states, rnn_states_critic, actions_env, cost_value_preds
 
     def insert(self, data):
         """Store the data in the buffers."""
-        obs, rewards, dones, _, values, actions, action_log_probs, rnn_states, rnn_states_critic = data
+        obs, rewards, dones, infos, values, actions, action_log_probs, rnn_states, rnn_states_critic, cost_value_preds = data
+        costs = np.array([[[agent_info.get('cost', 0.0)]
+                           for agent_info in env_info]
+                          for env_info in infos],
+                         dtype=np.float32)
 
         dones_env = np.all(dones, axis=1)
 
@@ -271,6 +307,8 @@ class NocturneSharedRunner(Runner):
                            values,
                            rewards,
                            masks,
+                           costs=costs,
+                           cost_value_preds=cost_value_preds,
                            active_masks=active_masks)
 
     @torch.no_grad()
@@ -307,8 +345,10 @@ class NocturneSharedRunner(Runner):
                 np.split(_t2n(eval_rnn_states), self.n_eval_rollout_threads))
 
             # Observed reward and next obs
+            eval_actions_env = self._format_actions_for_env(
+                eval_actions, self.eval_envs.action_space[0])
             eval_obs, eval_rewards, eval_dones, eval_infos = self.eval_envs.step(
-                eval_actions)
+                eval_actions_env)
             for info_arr in eval_infos:
                 for agent_info_arr in info_arr:
                     if 'goal_achieved' in agent_info_arr and agent_info_arr[
@@ -393,20 +433,8 @@ class NocturneSharedRunner(Runner):
                 actions = np.array(np.split(_t2n(action), 1))
                 rnn_states = np.array(np.split(_t2n(rnn_states), 1))
 
-                if envs.action_space[0].__class__.__name__ == 'MultiDiscrete':
-                    for i in range(envs.action_space[0].shape):
-                        uc_actions_env = np.eye(envs.action_space[0].high[i] +
-                                                1)[actions[:, :, i]]
-                        if i == 0:
-                            actions_env = uc_actions_env
-                        else:
-                            actions_env = np.concatenate(
-                                (actions_env, uc_actions_env), axis=2)
-                elif envs.action_space[0].__class__.__name__ == 'Discrete':
-                    actions_env = np.squeeze(
-                        np.eye(envs.action_space[0].n)[actions], 2)
-                else:
-                    raise NotImplementedError
+                actions_env = self._format_actions_for_env(
+                    actions, envs.action_space[0])
 
                 # Obser reward and next obs
                 obs, rewards, dones, infos = envs.step(actions_env)

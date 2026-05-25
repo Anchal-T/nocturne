@@ -4,7 +4,7 @@
 # LICENSE file in the root directory of this source tree.
 # Code modified from https://github.com/marlbenchmark/on-policy
 import torch
-from algos.ppo.r_mappo.algorithm.r_actor_critic import R_Actor, R_Critic
+from algos.ppo.r_mappo.algorithm.r_actor_critic import R_Actor, R_Critic, R_CostCritic
 from algos.ppo.utils.util import update_linear_schedule
 
 
@@ -37,6 +37,10 @@ class R_MAPPOPolicy:
 
         self.actor = R_Actor(args, self.obs_space, self.act_space, self.device)
         self.critic = R_Critic(args, self.share_obs_space, self.device)
+        self.use_lagrangian = getattr(args, 'use_lagrangian', False)
+        if self.use_lagrangian:
+            self.cost_critic = R_CostCritic(args, self.share_obs_space,
+                                            self.device)
 
         self.actor_optimizer = torch.optim.Adam(self.actor.parameters(),
                                                 lr=self.lr,
@@ -47,6 +51,12 @@ class R_MAPPOPolicy:
             lr=self.critic_lr,
             eps=self.opti_eps,
             weight_decay=self.weight_decay)
+        if self.use_lagrangian:
+            self.cost_critic_optimizer = torch.optim.Adam(
+                self.cost_critic.parameters(),
+                lr=self.critic_lr,
+                eps=self.opti_eps,
+                weight_decay=self.weight_decay)
 
     def lr_decay(self, episode, episodes):
         """
@@ -58,6 +68,9 @@ class R_MAPPOPolicy:
                                self.lr)
         update_linear_schedule(self.critic_optimizer, episode, episodes,
                                self.critic_lr)
+        if self.use_lagrangian:
+            update_linear_schedule(self.cost_critic_optimizer, episode,
+                                   episodes, self.critic_lr)
 
     def get_actions(self,
                     cent_obs,
@@ -102,6 +115,13 @@ class R_MAPPOPolicy:
         """
         values, _ = self.critic(cent_obs, rnn_states_critic, masks)
         return values
+
+    def get_cost_values(self, cent_obs, rnn_states_critic, masks):
+        """Get cost value predictions (requires use_lagrangian=True)."""
+        if not self.use_lagrangian:
+            raise RuntimeError("get_cost_values called but use_lagrangian is False")
+        cost_values, _ = self.cost_critic(cent_obs, rnn_states_critic, masks)
+        return cost_values
 
     def evaluate_actions(self,
                          cent_obs,

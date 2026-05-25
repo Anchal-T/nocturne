@@ -1,0 +1,8 @@
+# Safety-critical R-MAPPO configuration.
+use_lagrangian: True
+cost_limit: 0.05
+lambda_lr: 0.005
+lambda_init: 0.001
+lambda_max: 100.0
+cost_gamma: 0.99
+cost_gae_lambda: 0.95

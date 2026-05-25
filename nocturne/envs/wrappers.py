@@ -28,10 +28,14 @@ class OnPolicyPPOWrapper(object):
         # tracker used to match observations to actions
         self.agent_ids = []
         self.feature_shape = obs_dict[0].shape
+        if self.cfg.algorithm.use_centralized_V:
+            share_feature_shape = (self.n * self.feature_shape[0], )
+        else:
+            share_feature_shape = self.feature_shape
         self.share_observation_space = [
             Box(low=-np.inf,
                 high=+np.inf,
-                shape=self.feature_shape,
+                shape=share_feature_shape,
                 dtype=np.float32) for _ in range(self.n)
         ]
 

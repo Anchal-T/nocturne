@@ -30,6 +30,7 @@ class SharedReplayBuffer(object):
         self.episode_length = args.episode_length
         self.n_rollout_threads = args.n_rollout_threads
         self.hidden_size = args.hidden_size
+        self.critic_hidden_size = getattr(args, 'critic_hidden_size', None) or args.hidden_size
         self.recurrent_N = args.recurrent_N
         self.gamma = args.gamma
         self.gae_lambda = args.gae_lambda
@@ -37,6 +38,10 @@ class SharedReplayBuffer(object):
         self._use_popart = args.use_popart
         self._use_valuenorm = args.use_valuenorm
         self._use_proper_time_limits = args.use_proper_time_limits
+
+        # Cost-specific discount/GAE parameters for PPO-Lagrangian.
+        self.cost_gamma = getattr(args, 'cost_gamma', self.gamma)
+        self.cost_gae_lambda = getattr(args, 'cost_gae_lambda', self.gae_lambda)
 
         obs_shape = get_shape_from_obs_space(obs_space)
         share_obs_shape = get_shape_from_obs_space(cent_obs_space)
@@ -59,7 +64,12 @@ class SharedReplayBuffer(object):
             (self.episode_length + 1, self.n_rollout_threads, num_agents,
              self.recurrent_N, self.hidden_size),
             dtype=np.float32)
-        self.rnn_states_critic = np.zeros_like(self.rnn_states)
+        # Critic RNN states use critic_hidden_size which may differ from
+        # the actor hidden_size when the config overrides it.
+        self.rnn_states_critic = np.zeros(
+            (self.episode_length + 1, self.n_rollout_threads, num_agents,
+             self.recurrent_N, self.critic_hidden_size),
+            dtype=np.float32)
 
         self.value_preds = np.zeros(
             (self.episode_length + 1, self.n_rollout_threads, num_agents, 1),
@@ -79,13 +89,20 @@ class SharedReplayBuffer(object):
         self.actions = np.zeros((self.episode_length, self.n_rollout_threads,
                                  num_agents, act_shape),
                                 dtype=np.float32)
+        if act_space.__class__.__name__ == 'MultiDiscrete':
+            action_log_prob_shape = act_shape
+        else:
+            action_log_prob_shape = 1
         self.action_log_probs = np.zeros(
             (self.episode_length, self.n_rollout_threads, num_agents,
-             act_shape),
+             action_log_prob_shape),
             dtype=np.float32)
         self.rewards = np.zeros(
             (self.episode_length, self.n_rollout_threads, num_agents, 1),
             dtype=np.float32)
+        self.costs = np.zeros_like(self.rewards)
+        self.cost_value_preds = np.zeros_like(self.value_preds)
+        self.cost_returns = np.zeros_like(self.value_preds)
 
         self.masks = np.ones(
             (self.episode_length + 1, self.n_rollout_threads, num_agents, 1),
@@ -105,6 +122,8 @@ class SharedReplayBuffer(object):
                value_preds,
                rewards,
                masks,
+               costs=None,
+               cost_value_preds=None,
                bad_masks=None,
                active_masks=None,
                available_actions=None):
@@ -119,6 +138,8 @@ class SharedReplayBuffer(object):
         :param value_preds: (np.ndarray) value function prediction at each step.
         :param rewards: (np.ndarray) reward collected at each step.
         :param masks: (np.ndarray) denotes whether the environment has terminated or not.
+        :param costs: (np.ndarray) per-step safety costs.
+        :param cost_value_preds: (np.ndarray) cost value function prediction at each step.
         :param bad_masks: (np.ndarray) action space for agents.
         :param active_masks: (np.ndarray) denotes whether an agent is active or dead in the env.
         :param available_actions: (np.ndarray) actions available to each agent. If None, all actions are available.
@@ -131,6 +152,10 @@ class SharedReplayBuffer(object):
         self.action_log_probs[self.step] = action_log_probs.copy()
         self.value_preds[self.step] = value_preds.copy()
         self.rewards[self.step] = rewards.copy()
+        if costs is not None:
+            self.costs[self.step] = costs.copy()
+        if cost_value_preds is not None:
+            self.cost_value_preds[self.step] = cost_value_preds.copy()
         self.masks[self.step + 1] = masks.copy()
         if bad_masks is not None:
             self.bad_masks[self.step + 1] = bad_masks.copy()
@@ -151,6 +176,8 @@ class SharedReplayBuffer(object):
                      value_preds,
                      rewards,
                      masks,
+                     costs=None,
+                     cost_value_preds=None,
                      bad_masks=None,
                      active_masks=None,
                      available_actions=None):
@@ -165,6 +192,8 @@ class SharedReplayBuffer(object):
         :param value_preds: (np.ndarray) value function prediction at each step.
         :param rewards: (np.ndarray) reward collected at each step.
         :param masks: (np.ndarray) denotes whether the environment has terminated or not.
+        :param costs: (np.ndarray) per-step safety costs.
+        :param cost_value_preds: (np.ndarray) cost value function prediction at each step.
         :param bad_masks: (np.ndarray) denotes indicate whether whether true terminal state or due to episode limit
         :param active_masks: (np.ndarray) denotes whether an agent is active or dead in the env.
         :param available_actions: (np.ndarray) actions available to each agent. If None, all actions are available.
@@ -177,6 +206,10 @@ class SharedReplayBuffer(object):
         self.action_log_probs[self.step] = action_log_probs.copy()
         self.value_preds[self.step] = value_preds.copy()
         self.rewards[self.step] = rewards.copy()
+        if costs is not None:
+            self.costs[self.step] = costs.copy()
+        if cost_value_preds is not None:
+            self.cost_value_preds[self.step] = cost_value_preds.copy()
         self.masks[self.step + 1] = masks.copy()
         if bad_masks is not None:
             self.bad_masks[self.step + 1] = bad_masks.copy()
@@ -193,6 +226,8 @@ class SharedReplayBuffer(object):
         self.obs[0] = self.obs[-1].copy()
         self.rnn_states[0] = self.rnn_states[-1].copy()
         self.rnn_states_critic[0] = self.rnn_states_critic[-1].copy()
+        self.cost_value_preds[0] = self.cost_value_preds[-1].copy()
+        self.cost_returns[0] = self.cost_returns[-1].copy()
         self.masks[0] = self.masks[-1].copy()
         self.bad_masks[0] = self.bad_masks[-1].copy()
         self.active_masks[0] = self.active_masks[-1].copy()
@@ -203,6 +238,8 @@ class SharedReplayBuffer(object):
         """Copy last timestep data to first index. This method is used for Hanabi."""
         self.rnn_states[0] = self.rnn_states[-1].copy()
         self.rnn_states_critic[0] = self.rnn_states_critic[-1].copy()
+        self.cost_value_preds[0] = self.cost_value_preds[-1].copy()
+        self.cost_returns[0] = self.cost_returns[-1].copy()
         self.masks[0] = self.masks[-1].copy()
         self.bad_masks[0] = self.bad_masks[-1].copy()
 
@@ -274,15 +311,57 @@ class SharedReplayBuffer(object):
                         step + 1] * self.gamma * self.masks[
                             step + 1] + self.rewards[step]
 
+    def compute_cost_returns(self, next_cost_value, cost_value_normalizer=None):
+        """Compute cost returns using GAE with cost-specific discount parameters.
+
+        This mirrors compute_returns but operates on costs instead of rewards,
+        using cost_gamma and cost_gae_lambda for discounting.
+
+        :param next_cost_value: (np.ndarray) cost value predictions for the
+            step after the last episode step.
+        :param cost_value_normalizer: optional normalizer for cost values.
+        """
+        # Cost returns always use GAE without proper_time_limits
+        # (safety costs should not be masked by time-limit truncation).
+        self.cost_value_preds[-1] = next_cost_value
+        gae = 0
+        for step in reversed(range(self.costs.shape[0])):
+            if cost_value_normalizer is not None:
+                delta = (self.costs[step]
+                         + self.cost_gamma
+                         * cost_value_normalizer.denormalize(
+                             self.cost_value_preds[step + 1])
+                         * self.masks[step + 1]
+                         - cost_value_normalizer.denormalize(
+                             self.cost_value_preds[step]))
+                gae = (delta
+                       + self.cost_gamma * self.cost_gae_lambda
+                       * self.masks[step + 1] * gae)
+                self.cost_returns[step] = (
+                    gae + cost_value_normalizer.denormalize(
+                        self.cost_value_preds[step]))
+            else:
+                delta = (self.costs[step]
+                         + self.cost_gamma
+                         * self.cost_value_preds[step + 1]
+                         * self.masks[step + 1]
+                         - self.cost_value_preds[step])
+                gae = (delta
+                       + self.cost_gamma * self.cost_gae_lambda
+                       * self.masks[step + 1] * gae)
+                self.cost_returns[step] = gae + self.cost_value_preds[step]
+
     def feed_forward_generator(self,
                                advantages,
                                num_mini_batch=None,
-                               mini_batch_size=None):
+                               mini_batch_size=None,
+                               cost_advantages=None):
         """
         Yield training data for MLP policies.
         :param advantages: (np.ndarray) advantage estimates.
         :param num_mini_batch: (int) number of minibatches to split the batch into.
         :param mini_batch_size: (int) number of samples in each minibatch.
+        :param cost_advantages: (np.ndarray) cost advantage estimates (may be None).
         """
         episode_length, n_rollout_threads, num_agents = self.rewards.shape[0:3]
         batch_size = n_rollout_threads * episode_length * num_agents
@@ -321,6 +400,12 @@ class SharedReplayBuffer(object):
             -1, self.action_log_probs.shape[-1])
         advantages = advantages.reshape(-1, 1)
 
+        # Cost data
+        cost_value_preds = self.cost_value_preds[:-1].reshape(-1, 1)
+        cost_returns = self.cost_returns[:-1].reshape(-1, 1)
+        if cost_advantages is not None:
+            cost_advantages = cost_advantages.reshape(-1, 1)
+
         for indices in sampler:
             # obs size [T+1 N M Dim]-->[T N M Dim]-->[T*N*M,Dim]-->[index,Dim]
             share_obs_batch = share_obs[indices]
@@ -342,15 +427,22 @@ class SharedReplayBuffer(object):
             else:
                 adv_targ = advantages[indices]
 
+            # Cost batches
+            cost_value_preds_batch = cost_value_preds[indices]
+            cost_return_batch = cost_returns[indices]
+            cost_adv_targ = cost_advantages[indices] if cost_advantages is not None else None
+
             yield share_obs_batch, obs_batch, rnn_states_batch, rnn_states_critic_batch, actions_batch,\
                   value_preds_batch, return_batch, masks_batch, active_masks_batch, old_action_log_probs_batch,\
-                  adv_targ, available_actions_batch
+                  adv_targ, available_actions_batch, cost_value_preds_batch, cost_return_batch, cost_adv_targ
 
-    def naive_recurrent_generator(self, advantages, num_mini_batch):
+    def naive_recurrent_generator(self, advantages, num_mini_batch,
+                                  cost_advantages=None):
         """
         Yield training data for non-chunked RNN training.
         :param advantages: (np.ndarray) advantage estimates.
         :param num_mini_batch: (int) number of minibatches to split the batch into.
+        :param cost_advantages: (np.ndarray) cost advantage estimates (may be None).
         """
         episode_length, n_rollout_threads, num_agents = self.rewards.shape[0:3]
         batch_size = n_rollout_threads * num_agents
@@ -381,6 +473,12 @@ class SharedReplayBuffer(object):
             -1, batch_size, self.action_log_probs.shape[-1])
         advantages = advantages.reshape(-1, batch_size, 1)
 
+        # Cost data
+        cost_value_preds_all = self.cost_value_preds.reshape(-1, batch_size, 1)
+        cost_returns_all = self.cost_returns.reshape(-1, batch_size, 1)
+        if cost_advantages is not None:
+            cost_advantages = cost_advantages.reshape(-1, batch_size, 1)
+
         for start_ind in range(0, batch_size, num_envs_per_batch):
             share_obs_batch = []
             obs_batch = []
@@ -394,6 +492,9 @@ class SharedReplayBuffer(object):
             active_masks_batch = []
             old_action_log_probs_batch = []
             adv_targ = []
+            cost_value_preds_batch = []
+            cost_return_batch = []
+            cost_adv_targ_batch = []
 
             for offset in range(num_envs_per_batch):
                 ind = perm[start_ind + offset]
@@ -410,6 +511,10 @@ class SharedReplayBuffer(object):
                 active_masks_batch.append(active_masks[:-1, ind])
                 old_action_log_probs_batch.append(action_log_probs[:, ind])
                 adv_targ.append(advantages[:, ind])
+                cost_value_preds_batch.append(cost_value_preds_all[:-1, ind])
+                cost_return_batch.append(cost_returns_all[:-1, ind])
+                if cost_advantages is not None:
+                    cost_adv_targ_batch.append(cost_advantages[:, ind])
 
             # [N[T, dim]]
             T, N = self.episode_length, num_envs_per_batch
@@ -426,6 +531,10 @@ class SharedReplayBuffer(object):
             old_action_log_probs_batch = np.stack(old_action_log_probs_batch,
                                                   1)
             adv_targ = np.stack(adv_targ, 1)
+            cost_value_preds_batch = np.stack(cost_value_preds_batch, 1)
+            cost_return_batch = np.stack(cost_return_batch, 1)
+            if cost_advantages is not None:
+                cost_adv_targ_batch = np.stack(cost_adv_targ_batch, 1)
 
             # States is just a (N, dim) from_numpy [N[1,dim]]
             rnn_states_batch = np.stack(rnn_states_batch).reshape(
@@ -450,18 +559,25 @@ class SharedReplayBuffer(object):
             old_action_log_probs_batch = _flatten(T, N,
                                                   old_action_log_probs_batch)
             adv_targ = _flatten(T, N, adv_targ)
+            cost_value_preds_batch = _flatten(T, N, cost_value_preds_batch)
+            cost_return_batch = _flatten(T, N, cost_return_batch)
+            if cost_advantages is not None:
+                cost_adv_targ_batch = _flatten(T, N, cost_adv_targ_batch)
+            else:
+                cost_adv_targ_batch = None
 
             yield share_obs_batch, obs_batch, rnn_states_batch, rnn_states_critic_batch, actions_batch,\
                   value_preds_batch, return_batch, masks_batch, active_masks_batch, old_action_log_probs_batch,\
-                  adv_targ, available_actions_batch
+                  adv_targ, available_actions_batch, cost_value_preds_batch, cost_return_batch, cost_adv_targ_batch
 
     def recurrent_generator(self, advantages, num_mini_batch,
-                            data_chunk_length):
+                            data_chunk_length, cost_advantages=None):
         """
         Yield training data for chunked RNN training.
         :param advantages: (np.ndarray) advantage estimates.
         :param num_mini_batch: (int) number of minibatches to split the batch into.
         :param data_chunk_length: (int) length of sequence chunks with which to train RNN.
+        :param cost_advantages: (np.ndarray) cost advantage estimates (may be None).
         """
         episode_length, n_rollout_threads, num_agents = self.rewards.shape[0:3]
         batch_size = n_rollout_threads * episode_length * num_agents
@@ -500,6 +616,12 @@ class SharedReplayBuffer(object):
         if self.available_actions is not None:
             available_actions = _cast(self.available_actions[:-1])
 
+        # Cost data
+        cost_value_preds_cast = _cast(self.cost_value_preds[:-1])
+        cost_returns_cast = _cast(self.cost_returns[:-1])
+        if cost_advantages is not None:
+            cost_advantages = _cast(cost_advantages)
+
         for indices in sampler:
             share_obs_batch = []
             obs_batch = []
@@ -513,6 +635,9 @@ class SharedReplayBuffer(object):
             active_masks_batch = []
             old_action_log_probs_batch = []
             adv_targ = []
+            cost_value_preds_batch = []
+            cost_return_batch = []
+            cost_adv_targ_batch = []
 
             for index in indices:
 
@@ -533,6 +658,13 @@ class SharedReplayBuffer(object):
                 old_action_log_probs_batch.append(
                     action_log_probs[ind:ind + data_chunk_length])
                 adv_targ.append(advantages[ind:ind + data_chunk_length])
+                cost_value_preds_batch.append(
+                    cost_value_preds_cast[ind:ind + data_chunk_length])
+                cost_return_batch.append(
+                    cost_returns_cast[ind:ind + data_chunk_length])
+                if cost_advantages is not None:
+                    cost_adv_targ_batch.append(
+                        cost_advantages[ind:ind + data_chunk_length])
                 # size [T+1 N M Dim]-->[T N M Dim]-->[N M T Dim]-->[N*M*T,Dim]-->[1,Dim]
                 rnn_states_batch.append(rnn_states[ind])
                 rnn_states_critic_batch.append(rnn_states_critic[ind])
@@ -554,6 +686,10 @@ class SharedReplayBuffer(object):
             old_action_log_probs_batch = np.stack(old_action_log_probs_batch,
                                                   axis=1)
             adv_targ = np.stack(adv_targ, axis=1)
+            cost_value_preds_batch = np.stack(cost_value_preds_batch, axis=1)
+            cost_return_batch = np.stack(cost_return_batch, axis=1)
+            if cost_advantages is not None:
+                cost_adv_targ_batch = np.stack(cost_adv_targ_batch, axis=1)
 
             # States is just a (N, -1) from_numpy
             rnn_states_batch = np.stack(rnn_states_batch).reshape(
@@ -578,7 +714,13 @@ class SharedReplayBuffer(object):
             old_action_log_probs_batch = _flatten(L, N,
                                                   old_action_log_probs_batch)
             adv_targ = _flatten(L, N, adv_targ)
+            cost_value_preds_batch = _flatten(L, N, cost_value_preds_batch)
+            cost_return_batch = _flatten(L, N, cost_return_batch)
+            if cost_advantages is not None:
+                cost_adv_targ_batch = _flatten(L, N, cost_adv_targ_batch)
+            else:
+                cost_adv_targ_batch = None
 
             yield share_obs_batch, obs_batch, rnn_states_batch, rnn_states_critic_batch, actions_batch,\
                   value_preds_batch, return_batch, masks_batch, active_masks_batch, old_action_log_probs_batch,\
-                  adv_targ, available_actions_batch
+                  adv_targ, available_actions_batch, cost_value_preds_batch, cost_return_batch, cost_adv_targ_batch
