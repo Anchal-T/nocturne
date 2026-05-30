@@ -12,8 +12,8 @@ from collections import defaultdict
 
 import numpy as np
 
-BINS = [(2, 5), (6, 10), (11, 15), (16, 100)]
-BIN_LABELS = ["2-5", "6-10", "11-15", "16+"]
+BINS = [(1, 4), (5, 9), (10, 14), (15, float('inf'))]
+BIN_LABELS = ["1-4", "5-9", "10-14", "15+"]
 
 
 def bin_episodes(episodes):

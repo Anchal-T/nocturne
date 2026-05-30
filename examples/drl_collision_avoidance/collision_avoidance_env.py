@@ -188,27 +188,53 @@ class CollisionAvoidanceEnv(gym.Env):
         )
         return visible.get("objects", np.zeros((0, 13), dtype=np.float32))
 
-    def _match_visible_to_vehicles(self, ego_veh, objects: np.ndarray) -> set:
-        """Match visible_state object features back to vehicle IDs."""
-        ego_pos = ego_veh.position
-        ego_heading = ego_veh.heading
-        visible_ids = set()
-        for row in objects:
-            if row[0] <= 0:
+    def _match_visible_to_vehicles(self, ego_veh, objects: np.ndarray) -> dict:
+        """Match visible_state features to object IDs by type.
+
+        Returns a dict {'vehicles': set, 'peds': set, 'cyclists': set} of visible IDs.
+        Uses vectorized distance to avoid O(visible × N) Python loops.
+        """
+        result = {'vehicles': set(), 'peds': set(), 'cyclists': set()}
+        valid = objects[objects[:, 0] > 0] if len(objects) else objects
+        if len(valid) == 0:
+            return result
+
+        # Reconstruct world positions of all valid visible objects at once
+        ego_x, ego_y = ego_veh.position.x, ego_veh.position.y
+        ego_h = ego_veh.heading
+        dists = valid[:, 1]
+        azimuths = valid[:, 2]
+        # Type one-hot starts at index 8: [unknown, vehicle, ped, cyclist, ...]
+        type_codes = np.argmax(valid[:, 8:13], axis=1)
+        wx = ego_x + dists * np.cos(ego_h + azimuths)
+        wy = ego_y + dists * np.sin(ego_h + azimuths)
+
+        scenario = self.base_env.scenario
+        type_to_objs = {
+            1: ('vehicles', scenario.getVehicles()),
+            2: ('peds', scenario.getPedestrians()),
+            3: ('cyclists', scenario.getCyclists()),
+        }
+        for code, (key, objs) in type_to_objs.items():
+            mask = type_codes == code
+            if not mask.any() or not objs:
                 continue
-            dist, azimuth = float(row[1]), float(row[2])
-            world_angle = ego_heading + azimuth
-            wx = ego_pos.x + dist * math.cos(world_angle)
-            wy = ego_pos.y + dist * math.sin(world_angle)
-            for veh in self.base_env.scenario.getVehicles():
-                if veh.getID() == self._ego_id:
-                    continue
-                dx = veh.position.x - wx
-                dy = veh.position.y - wy
-                if dx * dx + dy * dy < 9.0:
-                    visible_ids.add(veh.getID())
-                    break
-        return visible_ids
+            obj_pos = np.array([(o.position.x, o.position.y) for o in objs])
+            obj_ids = [o.getID() for o in objs]
+            tx = wx[mask]
+            ty = wy[mask]
+            # Vectorized squared distance: shape (len(visible), len(objs))
+            dx = obj_pos[:, 0][None, :] - tx[:, None]
+            dy = obj_pos[:, 1][None, :] - ty[:, None]
+            d2 = dx * dx + dy * dy
+            for vis_idx, dists2 in enumerate(d2):
+                best = int(np.argmin(dists2))
+                if dists2[best] < 9.0:
+                    oid = obj_ids[best]
+                    if key == 'vehicles' and oid == self._ego_id:
+                        continue
+                    result[key].add(oid)
+        return result
 
     def _compute_occlusion_features(self, objects: np.ndarray) -> np.ndarray:
         """Compute 4 occlusion summary features from pre-queried visible objects."""
@@ -267,7 +293,7 @@ class CollisionAvoidanceEnv(gym.Env):
         for obj in self.base_env.scenario.getVehicles():
             if obj.getID() == self._ego_id:
                 continue
-            if visible_set is not None and obj.getID() not in visible_set:
+            if visible_set is not None and obj.getID() not in visible_set['vehicles']:
                 continue
             cell = self._locate_grid_cell(
                 obj.position, ego_pos, cos_h, sin_h, cell_long, cell_lat,
@@ -287,15 +313,20 @@ class CollisionAvoidanceEnv(gym.Env):
                 grid[2, row, col] = rel_vy / SPEED_NORM
 
         for obj in self.base_env.scenario.getPedestrians():
+            if visible_set is not None and obj.getID() not in visible_set['peds']:
+                continue
             self._project_to_grid(
                 obj.position, ego_pos, cos_h, sin_h, cell_long, cell_lat, grid, self.vru_weight,
             )
 
         for obj in self.base_env.scenario.getCyclists():
+            if visible_set is not None and obj.getID() not in visible_set['cyclists']:
+                continue
             self._project_to_grid(
                 obj.position, ego_pos, cos_h, sin_h, cell_long, cell_lat, grid, self.vru_weight,
             )
 
+        # Road edges are static map knowledge (not sensor-derived); always visible.
         for road_line in self.base_env.scenario.getRoadLines():
             if road_line.road_type == nocturne.RoadType.ROAD_EDGE:
                 for pt in road_line.geometry_points():
@@ -380,16 +411,20 @@ class CollisionAvoidanceEnv(gym.Env):
         for obj in self.base_env.scenario.getVehicles():
             if obj.getID() == self._ego_id:
                 continue
-            if visible_set is not None and obj.getID() not in visible_set:
+            if visible_set is not None and obj.getID() not in visible_set['vehicles']:
                 continue
             ttz = self._compute_ttz(ego_pos, ego_speed, ego_veh.heading, obj)
             min_ttz_veh = min(min_ttz_veh, ttz)
 
         for obj in self.base_env.scenario.getPedestrians():
+            if visible_set is not None and obj.getID() not in visible_set['peds']:
+                continue
             ttz = self._compute_ttz(ego_pos, ego_speed, ego_veh.heading, obj)
             min_ttz_ped = min(min_ttz_ped, ttz)
 
         for obj in self.base_env.scenario.getCyclists():
+            if visible_set is not None and obj.getID() not in visible_set['cyclists']:
+                continue
             ttz = self._compute_ttz(ego_pos, ego_speed, ego_veh.heading, obj)
             min_ttz_ped = min(min_ttz_ped, ttz)
 

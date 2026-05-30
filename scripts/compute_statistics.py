@@ -1,4 +1,7 @@
-"""Compute statistics across seeds: mean ± std, 95% CI, Welch's t-test.
+"""Compute statistics across seeds: mean ± std, 95% CI, Mann-Whitney U-test.
+
+Follows Agarwal et al., NeurIPS 2021 (arXiv:2108.13264): non-parametric tests for
+small N, stratified bootstrap CIs.
 
 Usage:
     python scripts/compute_statistics.py results_seed1.json results_seed2.json ...
@@ -15,12 +18,15 @@ from scipy import stats
 
 
 def bootstrap_ci(data, n_bootstrap=10000, ci=0.95):
-    data = np.array(data)
-    means = [np.mean(np.random.choice(data, size=len(data), replace=True))
-             for _ in range(n_bootstrap)]
+    """Vectorized bootstrap confidence interval."""
+    data = np.asarray(data)
+    n = len(data)
+    # Generate all bootstrap samples at once: (n_bootstrap, n) index matrix
+    idx = np.random.randint(0, n, size=(n_bootstrap, n))
+    means = data[idx].mean(axis=1)
     lower = np.percentile(means, (1 - ci) / 2 * 100)
     upper = np.percentile(means, (1 + ci) / 2 * 100)
-    return lower, upper
+    return float(lower), float(upper)
 
 
 def main():
@@ -28,7 +34,6 @@ def main():
         print("Usage: python compute_statistics.py result1.json result2.json ...")
         sys.exit(1)
 
-    # Group files by method
     by_method = defaultdict(list)
     for path in sys.argv[1:]:
         with open(path) as f:
@@ -59,19 +64,18 @@ def main():
             method_values[method][metric] = values
         print(row)
 
-    # Pairwise t-tests
     methods = list(by_method.keys())
     if len(methods) > 1:
         baseline = methods[0]
-        print(f"\nWelch's t-test vs '{baseline}':")
+        print(f"\nMann-Whitney U-test vs '{baseline}':")
         for method in methods[1:]:
             for metric in metrics:
                 a = method_values.get(baseline, {}).get(metric)
                 b = method_values.get(method, {}).get(metric)
                 if a and b and len(a) >= 2 and len(b) >= 2:
-                    t, p = stats.ttest_ind(a, b, equal_var=False)
+                    u, p = stats.mannwhitneyu(a, b, alternative='two-sided')
                     sig = "**" if p < 0.01 else "*" if p < 0.05 else ""
-                    print(f"  {method} [{metric}]: t={t:.3f}, p={p:.4f} {sig}")
+                    print(f"  {method} [{metric}]: U={u:.1f}, p={p:.4f} {sig}")
 
 
 if __name__ == '__main__':

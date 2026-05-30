@@ -1,47 +1,42 @@
 #!/bin/bash
 # Multi-seed training for statistical evaluation.
-# Usage: bash scripts/multi_seed_train.sh [--method ddqn|ddqn_occ] [--dry-run]
-#
-# Trains 5 seeds, then evaluate each with the unified eval script.
+# Usage: bash scripts/multi_seed_train.sh [METHOD] [--dry-run]
+#   METHOD: ddqn (default) or ddqn_occ
+# Examples:
+#   bash scripts/multi_seed_train.sh                  # trains 5 seeds of ddqn
+#   bash scripts/multi_seed_train.sh ddqn_occ         # trains 5 seeds of ddqn_occ
+#   bash scripts/multi_seed_train.sh ddqn_occ --dry-run
 
 set -e
 
 SEEDS=(42 123 456 789 1024)
-METHOD="${1:-ddqn}"
+METHOD="ddqn"
 DRY_RUN=false
-if [[ "$2" == "--dry-run" ]] || [[ "$1" == "--dry-run" ]]; then
-    DRY_RUN=true
-    METHOD="${METHOD/--dry-run/}"
-    METHOD="${METHOD:-ddqn}"
-fi
 
-# Method-specific config overrides
+for arg in "$@"; do
+    case "$arg" in
+        --dry-run) DRY_RUN=true ;;
+        ddqn|ddqn_occ) METHOD="$arg" ;;
+        *) echo "Unknown arg: $arg (use ddqn, ddqn_occ, or --dry-run)"; exit 1 ;;
+    esac
+done
+
 case "$METHOD" in
-    ddqn)
-        EXTRA_ARGS="occupancy_grid.use_occlusion=false"
-        ;;
-    ddqn_occ)
-        EXTRA_ARGS="occupancy_grid.use_occlusion=true"
-        ;;
-    *)
-        echo "Unknown method: $METHOD (use ddqn or ddqn_occ)"
-        exit 1
-        ;;
+    ddqn) USE_OCC=false ;;
+    ddqn_occ) USE_OCC=true ;;
 esac
 
 echo "=== Multi-seed training: method=${METHOD} ==="
 for seed in "${SEEDS[@]}"; do
     CKPT_DIR="checkpoints/${METHOD}/seed_${seed}"
-    CMD="python -m examples.drl_collision_avoidance.train \
-        seed=${seed} \
-        drl.checkpoint_dir=${CKPT_DIR} \
-        ${EXTRA_ARGS}"
-
     if [ "$DRY_RUN" = true ]; then
-        echo "  [DRY RUN] $CMD"
+        echo "  [DRY RUN] python -m examples.drl_collision_avoidance.train seed=${seed} drl.checkpoint_dir=${CKPT_DIR} occupancy_grid.use_occlusion=${USE_OCC}"
     else
         echo "--- Seed ${seed} ---"
-        $CMD
+        python -m examples.drl_collision_avoidance.train \
+            seed=${seed} \
+            drl.checkpoint_dir=${CKPT_DIR} \
+            occupancy_grid.use_occlusion=${USE_OCC}
     fi
 done
 

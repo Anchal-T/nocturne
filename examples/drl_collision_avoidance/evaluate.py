@@ -94,12 +94,14 @@ def evaluate(checkpoint_path: str, scenario_path: Optional[str] = None,
             displacements = np.linalg.norm(pos - exp, axis=1)
             results['ade'].append(float(np.mean(displacements)))
             results['fde'].append(float(displacements[-1]))
-        if len(accelerations) > 1:
+        if len(accelerations) > 1 and dt > 0:
             accel = np.array(accelerations)
-            results['jerk'].append(float(np.mean(np.abs(np.diff(accel)) / dt)))
-        if len(steerings) > 1:
+            jerk_signal = np.diff(accel) / dt
+            results['jerk'].append(float(np.sqrt(np.mean(jerk_signal ** 2))))
+        if len(steerings) > 1 and dt > 0:
             steer_arr = np.array(steerings)
-            results['smoothness'].append(float(np.std(np.diff(steer_arr) / dt)))
+            steer_rate = np.diff(steer_arr) / dt
+            results['smoothness'].append(float(np.std(steer_rate)))
 
         results['rewards'].append(total_reward)
         results['lengths'].append(t + 1)

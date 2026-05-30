@@ -337,7 +337,7 @@ class BaseEnv(Env):
         """Return (file, Simulation) — from pool working set if enabled."""
         if self._pool_size > 0:
             self._pool_reset_count += 1
-            if self._pool_reset_count % self._resample_interval == 0:
+            if self._resample_interval > 0 and self._pool_reset_count % self._resample_interval == 0:
                 # Replace one random pool entry to maintain diversity
                 idx = np.random.randint(self._pool_size)
                 self._pool_files[idx] = self.files[np.random.randint(len(self.files))]

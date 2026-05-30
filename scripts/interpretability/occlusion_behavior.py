@@ -10,7 +10,6 @@ Usage:
         --num_episodes 200 --output plots/occlusion_speed.png
 """
 import argparse
-import math
 import os
 import sys
 
@@ -115,7 +114,8 @@ def main():
     parser.add_argument('--checkpoint', type=str, required=True)
     parser.add_argument('--scenario_path', type=str, default=None)
     parser.add_argument('--num_episodes', type=int, default=200)
-    parser.add_argument('--use_occlusion', action='store_true', default=True)
+    parser.add_argument('--use_occlusion', action=argparse.BooleanOptionalAction, default=True,
+                        help='Use occlusion filtering (default: True). Pass --no-use_occlusion to disable.')
     parser.add_argument('--output', type=str, default='plots/occlusion_speed.png')
     args = parser.parse_args()
 
