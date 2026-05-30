@@ -63,10 +63,15 @@ class CollisionAvoidanceEnv(gym.Env):
             (float(t), float(s)) for t in throttle_levels for s in steer_levels
         ]
 
+        self.use_occlusion = grid_cfg.get("use_occlusion", False)
+        self.occlusion_view_angle = grid_cfg.get("occlusion_view_angle", math.pi)
+
         self.base_env = BaseEnv(cfg)
         self.cfg = cfg
 
         obs_dim = self.grid_channels * self.grid_rows * self.grid_cols + 4 + 2 + 3
+        if self.use_occlusion:
+            obs_dim += 4  # occlusion features
         self.observation_space = Box(
             low=-np.inf, high=np.inf, shape=(obs_dim,), dtype=np.float32
         )
@@ -155,16 +160,100 @@ class CollisionAvoidanceEnv(gym.Env):
             self._ttz_pedestrian = NO_CONFLICT_TTZ
             return np.zeros(self.observation_space.shape, dtype=np.float32)
 
-        grid = self._build_occupancy_grid(ego_veh)
+        visible_set = None
+        visible_objects = None
+        if self.use_occlusion:
+            visible_objects = self._query_visible_objects(ego_veh)
+            visible_set = self._match_visible_to_vehicles(ego_veh, visible_objects)
+
+        grid = self._build_occupancy_grid(ego_veh, visible_set)
         ego_state = self._get_ego_state(ego_veh)
         target_info = self._get_target_info(ego_veh)
-        ttz_info = self._get_ttz_info(ego_veh)
+        ttz_info = self._get_ttz_info(ego_veh, visible_set)
 
-        return np.concatenate(
-            [grid.flatten(), ego_state, target_info, ttz_info]
-        ).astype(np.float32)
+        parts = [grid.flatten(), ego_state, target_info, ttz_info]
+        if self.use_occlusion:
+            parts.append(self._compute_occlusion_features(visible_objects))
 
-    def _build_occupancy_grid(self, ego_veh) -> np.ndarray:
+        return np.concatenate(parts).astype(np.float32)
+
+    # --- Visibility / Occlusion ---
+
+    def _query_visible_objects(self, ego_veh) -> np.ndarray:
+        """Single call to C++ ray-casting. Returns the objects feature array."""
+        view_dist = max(self.forward_dist, self.lateral_dist) + 5.0
+        visible = self.base_env.scenario.visible_state(
+            ego_veh, view_dist=view_dist,
+            view_angle=self.occlusion_view_angle, head_angle=0.0, padding=False
+        )
+        return visible.get("objects", np.zeros((0, 13), dtype=np.float32))
+
+    def _match_visible_to_vehicles(self, ego_veh, objects: np.ndarray) -> set:
+        """Match visible_state object features back to vehicle IDs."""
+        ego_pos = ego_veh.position
+        ego_heading = ego_veh.heading
+        visible_ids = set()
+        for row in objects:
+            if row[0] <= 0:
+                continue
+            dist, azimuth = float(row[1]), float(row[2])
+            world_angle = ego_heading + azimuth
+            wx = ego_pos.x + dist * math.cos(world_angle)
+            wy = ego_pos.y + dist * math.sin(world_angle)
+            for veh in self.base_env.scenario.getVehicles():
+                if veh.getID() == self._ego_id:
+                    continue
+                dx = veh.position.x - wx
+                dy = veh.position.y - wy
+                if dx * dx + dy * dy < 9.0:
+                    visible_ids.add(veh.getID())
+                    break
+        return visible_ids
+
+    def _compute_occlusion_features(self, objects: np.ndarray) -> np.ndarray:
+        """Compute 4 occlusion summary features from pre-queried visible objects."""
+        half_view = self.occlusion_view_angle * 0.5
+        intervals = []
+        nearest_blocker = 999.0
+        blocker_count = 0
+        valid_count = 0
+        for row in objects:
+            if row[0] <= 0:
+                continue
+            valid_count += 1
+            dist = max(float(row[1]), 1e-3)
+            azimuth = float(row[2])
+            radius = 0.5 * math.hypot(max(float(row[3]), 0.0), max(float(row[4]), 0.0))
+            angular_half = min(math.atan2(radius, dist), half_view)
+            start = max(-half_view, azimuth - angular_half)
+            end = min(half_view, azimuth + angular_half)
+            if end > start:
+                intervals.append((start, end))
+                nearest_blocker = min(nearest_blocker, dist)
+                blocker_count += 1
+
+        if not intervals:
+            return np.zeros(4, dtype=np.float32)
+
+        intervals.sort()
+        occluded_length = 0.0
+        s, e = intervals[0]
+        for ns, ne in intervals[1:]:
+            if ns <= e:
+                e = max(e, ne)
+            else:
+                occluded_length += e - s
+                s, e = ns, ne
+        occluded_length += e - s
+
+        view_dist = max(self.forward_dist, self.lateral_dist) + 5.0
+        occ_frac = occluded_length / max(self.occlusion_view_angle, 1e-6)
+        nearest_norm = nearest_blocker / max(view_dist, 1e-6)
+        density = blocker_count / max(valid_count, 1)
+        pressure = occ_frac * (1.0 - nearest_norm)
+        return np.array([occ_frac, nearest_norm, density, pressure], dtype=np.float32)
+
+    def _build_occupancy_grid(self, ego_veh, visible_set=None) -> np.ndarray:
         grid = np.zeros(
             (self.grid_channels, self.grid_rows, self.grid_cols), dtype=np.float32
         )
@@ -177,6 +266,8 @@ class CollisionAvoidanceEnv(gym.Env):
 
         for obj in self.base_env.scenario.getVehicles():
             if obj.getID() == self._ego_id:
+                continue
+            if visible_set is not None and obj.getID() not in visible_set:
                 continue
             cell = self._locate_grid_cell(
                 obj.position, ego_pos, cos_h, sin_h, cell_long, cell_lat,
@@ -279,7 +370,7 @@ class CollisionAvoidanceEnv(gym.Env):
         rel_heading = (rel_heading + math.pi) % (2 * math.pi) - math.pi
         return np.array([dist / DIST_NORM, rel_heading / math.pi], dtype=np.float32)
 
-    def _get_ttz_info(self, ego_veh) -> np.ndarray:
+    def _get_ttz_info(self, ego_veh, visible_set=None) -> np.ndarray:
         ego_pos = ego_veh.position
         ego_speed = max(ego_veh.speed, 0.1)
 
@@ -288,6 +379,8 @@ class CollisionAvoidanceEnv(gym.Env):
 
         for obj in self.base_env.scenario.getVehicles():
             if obj.getID() == self._ego_id:
+                continue
+            if visible_set is not None and obj.getID() not in visible_set:
                 continue
             ttz = self._compute_ttz(ego_pos, ego_speed, ego_veh.heading, obj)
             min_ttz_veh = min(min_ttz_veh, ttz)

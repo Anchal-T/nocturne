@@ -66,6 +66,16 @@ class BaseEnv(Env):
         self.step_num = 0
         self.rank = rank
         self.seed(cfg['seed'])
+
+        # Scenario pool: limit working set so OS page cache keeps files hot
+        self._pool_size = cfg.get('scenario_pool_size', 0)
+        self._resample_interval = cfg.get('resample_pool_interval', 5000)
+        self._pool_files = []
+        self._pool_reset_count = 0
+        if self._pool_size > 0:
+            self._pool_files = [self.files[np.random.randint(len(self.files))]
+                                for _ in range(self._pool_size)]
+
         obs_dict, _ = self.reset()
         self.observation_space = Box(low=-np.infty,
                                      high=np.infty,
@@ -323,6 +333,20 @@ class BaseEnv(Env):
 
         return obs_dict, rew_dict, done_dict, truncated_dict, info_dict
 
+    def _get_simulation(self):
+        """Return (file, Simulation) — from pool working set if enabled."""
+        if self._pool_size > 0:
+            self._pool_reset_count += 1
+            if self._pool_reset_count % self._resample_interval == 0:
+                # Replace one random pool entry to maintain diversity
+                idx = np.random.randint(self._pool_size)
+                self._pool_files[idx] = self.files[np.random.randint(len(self.files))]
+            f = self._pool_files[np.random.randint(self._pool_size)]
+        else:
+            f = self.files[np.random.randint(len(self.files))]
+        path = os.path.join(self.cfg['scenario_path'], f)
+        return f, Simulation(path, config=get_scenario_dict(self.cfg))
+
     def reset(self):
         """See superclass."""
         self.t = 0
@@ -332,10 +356,7 @@ class BaseEnv(Env):
         # we don't want to initialize scenes with 0 actors after satisfying
         # all the conditions on a scene that we have
         while not enough_vehicles:
-            self.file = self.files[np.random.randint(len(self.files))]
-            self.simulation = Simulation(os.path.join(
-                self.cfg['scenario_path'], self.file),
-                                         config=get_scenario_dict(self.cfg))
+            self.file, self.simulation = self._get_simulation()
             self.scenario = self.simulation.getScenario()
             '''##################################################################
                 Construct context dictionary of observations that can be used to

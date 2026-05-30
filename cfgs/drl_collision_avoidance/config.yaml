@@ -10,6 +10,10 @@ scenario_split: train
 scenario_path: null
 dt: 0.1
 
+# Scenario pool: 0 = disabled (load fresh file every reset)
+scenario_pool_size: 0
+resample_pool_interval: 5000
+
 discretize_actions: False
 accel_lower_bound: -3.0
 accel_upper_bound: 2.0
@@ -126,6 +130,8 @@ occupancy_grid:
     vru_weight: 2.0
     vehicle_weight: 1.0
     road_edge_weight: 3.0
+    use_occlusion: false
+    occlusion_view_angle: 3.14159
 
 reward:
     goal_bonus: 100.0

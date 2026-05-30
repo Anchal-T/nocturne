@@ -1,0 +1,29 @@
+# Optimized config for AWS GPU training (A100/H100).
+# Usage: python -m examples.drl_collision_avoidance.train --config-name config_aws
+#
+# This is a standalone config. Copy of base config with these overrides:
+#   - torch.compile enabled (15-30% training speedup)
+#   - Larger batch size (better GPU utilization)
+#   - Scenario pool (reduces I/O from 200GB dataset)
+#   - Occlusion enabled (for the paper experiments)
+#
+# Alternatively, override from CLI:
+#   python -m examples.drl_collision_avoidance.train \
+#     drl.use_torch_compile=true drl.batch_size=512 \
+#     scenario_pool_size=50 occupancy_grid.use_occlusion=true
+
+# Override DRL training params for GPU throughput
+drl:
+  use_torch_compile: true
+  batch_size: 512
+  num_workers: 48
+  num_envs_per_worker: 2
+
+# Scenario pool: keep 50 files hot in OS page cache, rotate one every 5000 resets
+scenario_pool_size: 50
+resample_pool_interval: 5000
+
+# Enable occlusion for paper experiments
+occupancy_grid:
+  use_occlusion: true
+  occlusion_view_angle: 3.14159

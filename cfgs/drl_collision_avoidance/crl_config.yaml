@@ -73,6 +73,8 @@ occupancy_grid:
   vru_weight: 2.0
   vehicle_weight: 1.0
   road_edge_weight: 3.0
+  use_occlusion: false
+  occlusion_view_angle: 3.14159
 
 # CRL-specific settings (passed to CRLAgentConfig in train_crl.py)
 crl:
