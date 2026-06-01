@@ -458,6 +458,7 @@ class DDQNAgent:
                 "optimizer": self.optimizer.state_dict(),
                 "train_steps": self.train_steps,
                 "epsilon": self.epsilon,
+                "obs_dim": self.obs_dim,
                 "hidden_layers": online_base.hidden_layers,
                 "grid_size": online_base.grid_size,
                 "grid_channels": self.grid_channels,

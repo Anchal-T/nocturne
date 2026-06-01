@@ -1,7 +1,7 @@
-"""Compute statistics across seeds: mean ± std, 95% CI, Mann-Whitney U-test.
+"""Compute statistics across seeds: mean +/- std, 95% CI, Mann-Whitney U-test.
 
-Follows Agarwal et al., NeurIPS 2021 (arXiv:2108.13264): non-parametric tests for
-small N, stratified bootstrap CIs.
+Uses non-parametric pairwise tests for small N and a simple seed-level
+bootstrap CI over per-run aggregate metrics.
 
 Usage:
     python scripts/compute_statistics.py results_seed1.json results_seed2.json ...
@@ -60,7 +60,7 @@ def main():
             mean = np.mean(values)
             std = np.std(values)
             lo, hi = bootstrap_ci(values) if len(values) >= 3 else (mean, mean)
-            row += f"  {mean:.3f}±{std:.3f} [{lo:.3f},{hi:.3f}]"
+            row += f"  {mean:.3f}+/-{std:.3f} [{lo:.3f},{hi:.3f}]"
             method_values[method][metric] = values
         print(row)
 

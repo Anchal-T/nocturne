@@ -22,8 +22,14 @@ for arg in "$@"; do
 done
 
 case "$METHOD" in
-    ddqn) USE_OCC=false ;;
-    ddqn_occ) USE_OCC=true ;;
+    ddqn)
+        USE_OCC=false
+        EVAL_OCC_FLAG="--no-use_occlusion"
+        ;;
+    ddqn_occ)
+        USE_OCC=true
+        EVAL_OCC_FLAG="--use_occlusion"
+        ;;
 esac
 
 echo "=== Multi-seed training: method=${METHOD} ==="
@@ -43,5 +49,5 @@ done
 echo ""
 echo "=== Training complete. Evaluate all seeds: ==="
 for seed in "${SEEDS[@]}"; do
-    echo "  python -m examples.drl_collision_avoidance.evaluate --checkpoint checkpoints/${METHOD}/seed_${seed}/ddqn_final.pth --num_episodes 500"
+    echo "  python -m examples.drl_collision_avoidance.evaluate --checkpoint checkpoints/${METHOD}/seed_${seed}/ddqn_final.pth --num_episodes 500 ${EVAL_OCC_FLAG} --method ${METHOD} --output_json results/${METHOD}_seed_${seed}.json"
 done

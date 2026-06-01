@@ -1,7 +1,7 @@
 """Behavioral Cloning baseline using the same observation format as DDQN.
 
-Collects (obs, expert_action) pairs by running scenarios with expert control,
-then trains a classifier with cross-entropy loss.
+Collects (obs, discretized expert_action) pairs while advancing scenarios with
+the continuous expert action, then trains a classifier with cross-entropy loss.
 
 Usage:
     python -m examples.drl_collision_avoidance.train_bc \
@@ -9,13 +9,11 @@ Usage:
         --num_files 100 --num_episodes 5000 --epochs 50
 """
 import argparse
-import math
 import os
 import sys
 
 import numpy as np
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
@@ -39,7 +37,7 @@ def discretize_expert_action(accel, steer, action_table):
 
 
 def collect_data(cfg, num_episodes):
-    """Run scenarios with expert actions, collect (obs, action) pairs."""
+    """Run scenarios with continuous expert actions, collect discrete labels."""
     env = CollisionAvoidanceEnv(cfg)
     action_table = env.action_table
     max_steps = cfg['drl']['max_episode_steps']
@@ -64,13 +62,16 @@ def collect_data(cfg, num_episodes):
             steer = expert_action.steering
             if accel is None or steer is None:
                 break
+            accel = float(accel)
+            steer = float(steer)
+            if not np.isfinite(accel) or not np.isfinite(steer):
+                break
 
             discrete_action = discretize_expert_action(accel, steer, action_table)
             observations.append(obs.copy())
             actions.append(discrete_action)
 
-            # Step with expert action
-            obs, _, terminated, truncated, _ = env.step(discrete_action)
+            obs, terminated, truncated = step_continuous_action(env, accel, steer)
             if terminated or truncated:
                 break
             ego_veh = env._get_ego_vehicle()
@@ -83,14 +84,29 @@ def collect_data(cfg, num_episodes):
     return np.array(observations, dtype=np.float32), np.array(actions, dtype=np.int64)
 
 
+def step_continuous_action(env, accel, steer):
+    """Advance the wrapped Nocturne env with a continuous expert action."""
+    action_dict = {env._ego_id: [accel, steer, 0.0]}
+    _, _, done_dict, truncated_dict, _ = env.base_env.step(action_dict)
+    env._step_count += 1
+    obs = env._build_observation()
+    ego_done = done_dict.get(env._ego_id, False)
+    all_done = done_dict.get("__all__", False)
+    terminated = ego_done or all_done
+    truncated = truncated_dict.get(env._ego_id, False) or env._step_count >= env._max_steps
+    return obs, terminated, truncated
+
+
 def train_bc(observations, actions, obs_dim, n_actions, grid_size, grid_channels,
-             grid_rows, grid_cols, mlp_depth, epochs, batch_size, lr, save_path):
+             grid_rows, grid_cols, hidden_layers, mlp_depth, epochs, batch_size,
+             lr, save_path):
     """Train BC classifier."""
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
     # Same architecture as DDQN Q-network
     model = QNetwork(
         obs_dim=obs_dim, n_actions=n_actions, grid_size=grid_size,
+        hidden_layers=hidden_layers,
         grid_channels=grid_channels, grid_rows=grid_rows, grid_cols=grid_cols,
         dueling=False, noisy=False, mlp_depth=mlp_depth,
     ).to(device)
@@ -130,9 +146,26 @@ def train_bc(observations, actions, obs_dim, n_actions, grid_size, grid_channels
             print(f'  Epoch {epoch + 1:3d}/{epochs} | loss={avg_loss:.4f} | acc={acc:.3f}')
 
     os.makedirs(os.path.dirname(save_path) or '.', exist_ok=True)
-    torch.save({'model': model.state_dict(), 'obs_dim': obs_dim, 'n_actions': n_actions,
-                'grid_size': grid_size, 'grid_channels': grid_channels,
-                'grid_rows': grid_rows, 'grid_cols': grid_cols, 'mlp_depth': mlp_depth}, save_path)
+    state_dict = model.state_dict()
+    torch.save({
+        'online_net': state_dict,
+        'target_net': state_dict,
+        'optimizer': optimizer.state_dict(),
+        'train_steps': epochs,
+        'epsilon': 0.0,
+        'obs_dim': obs_dim,
+        'n_actions': n_actions,
+        'hidden_layers': model.hidden_layers,
+        'grid_size': grid_size,
+        'grid_channels': grid_channels,
+        'grid_rows': grid_rows,
+        'grid_cols': grid_cols,
+        'dueling': False,
+        'noisy': False,
+        'mlp_depth': mlp_depth,
+        'use_muon': False,
+        'bc_model': True,
+    }, save_path)
     print(f'\nSaved BC model to {save_path}')
 
 
@@ -155,6 +188,8 @@ def main():
     print('Collecting expert data...')
     observations, actions = collect_data(cfg, args.num_episodes)
     print(f'Collected {len(observations)} samples')
+    if len(observations) == 0:
+        raise RuntimeError('No BC samples collected; check scenario validity and expert actions.')
 
     grid_cfg = cfg['occupancy_grid']
     grid_channels = 3
@@ -164,8 +199,9 @@ def main():
     obs_dim = observations.shape[1]
     n_actions = len(CollisionAvoidanceEnv(cfg).action_table)
 
+    hidden_layers = list(cfg['drl']['hidden_layers'])
     train_bc(observations, actions, obs_dim, n_actions, grid_size, grid_channels,
-             grid_rows, grid_cols, int(cfg['drl']['mlp_depth']),
+             grid_rows, grid_cols, hidden_layers, int(cfg['drl']['mlp_depth']),
              args.epochs, args.batch_size, args.lr, args.save_path)
 
 

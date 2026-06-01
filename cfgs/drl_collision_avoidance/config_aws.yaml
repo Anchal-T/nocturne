@@ -1,7 +1,12 @@
-# Optimized config for AWS GPU training (A100/H100).
+# @package _global_
+defaults:
+  - config
+  - _self_
+
+# Optimized overrides for AWS GPU training (A100/H100).
 # Usage: python -m examples.drl_collision_avoidance.train --config-name config_aws
 #
-# This is a standalone config. Copy of base config with these overrides:
+# This composes the base config with these overrides:
 #   - torch.compile enabled (15-30% training speedup)
 #   - Larger batch size (better GPU utilization)
 #   - Scenario pool (reduces I/O from 200GB dataset)

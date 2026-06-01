@@ -27,6 +27,15 @@ def bin_episodes(episodes):
     return binned
 
 
+def finite_ttz_values(episodes, key):
+    values = []
+    for ep in episodes:
+        value = ep.get(key)
+        if value is not None and value < 100:
+            values.append(value)
+    return values
+
+
 def main():
     if len(sys.argv) < 2:
         print("Usage: python density_analysis.py results.json [results2.json ...]")
@@ -54,7 +63,7 @@ def main():
             n = len(eps)
             goal_rate = np.mean([e.get('goal', False) for e in eps])
             coll_rate = np.mean([e.get('collided', False) for e in eps])
-            ttz_vals = [e['ttz_vehicle'] for e in eps if e.get('ttz_vehicle', 999) < 100]
+            ttz_vals = finite_ttz_values(eps, 'ttz_vehicle')
             avg_ttz = np.mean(ttz_vals) if ttz_vals else float('nan')
             print(f"{label:<10} {n:>5} {goal_rate:>7.1%} {coll_rate:>7.1%} {avg_ttz:>8.2f}")
 

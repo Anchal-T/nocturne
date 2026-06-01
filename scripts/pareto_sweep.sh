@@ -30,5 +30,5 @@ done
 echo ""
 echo "=== Sweep complete. Evaluate with: ==="
 for penalty in "${PENALTIES[@]}"; do
-    echo "  python -m examples.drl_collision_avoidance.evaluate --checkpoint checkpoints/pareto/penalty_${penalty}/ddqn_final.pth --num_episodes 500"
+    echo "  python -m examples.drl_collision_avoidance.evaluate --checkpoint checkpoints/pareto/penalty_${penalty}/ddqn_final.pth --num_episodes 500 --no-use_occlusion --method pareto_${penalty} --output_json results/pareto_penalty_${penalty}.json"
 done
