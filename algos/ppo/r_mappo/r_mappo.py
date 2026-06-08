@@ -196,7 +196,7 @@ class R_MAPPO():
         policy_loss = policy_action_loss
 
         # --- Lagrangian penalty on the policy loss ---
-        cost_value_loss = torch.tensor(0.0)
+        cost_value_loss = torch.tensor(0.0, device=self.device)
         cost_critic_grad_norm = 0.0
         if self.use_lagrangian and cost_adv_targ is not None:
             cost_adv_targ = check(cost_adv_targ).to(**self.tpdv)

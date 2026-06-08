@@ -65,7 +65,7 @@ class _Episode:
         self._finalised = True
 
     def __len__(self) -> int:
-        return len(self.states) if self._finalised else len(self.states)
+        return len(self.states)
 
 
 class HERReplayBuffer:
@@ -210,8 +210,11 @@ class HERReplayBuffer:
             ep_len = len(ep)
 
             if ep_len < 2:
-                # Degenerate episode — leave row as zeros and continue.
-                continue
+                ep_idx = np.random.randint(0, num_eps)
+                ep = self._episodes[ep_idx]
+                ep_len = len(ep)
+                if ep_len < 2:
+                    continue
 
             # Anchor timestep t (must have at least one future step).
             t = np.random.randint(0, ep_len - 1)

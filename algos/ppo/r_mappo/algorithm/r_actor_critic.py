@@ -3,6 +3,8 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 # Code modified from https://github.com/marlbenchmark/on-policy
+import copy
+
 import torch
 import torch.nn as nn
 from algos.ppo.ppo_utils.util import init, check
@@ -162,7 +164,6 @@ class R_Critic(nn.Module):
         # Use a shallow-copied args with the critic-specific hidden size so
         # MLPBase reads the right dimension without mutating the shared
         # config object held by the rest of the trainer.
-        import copy
         base_args = copy.copy(args)
         base_args.hidden_size = critic_hidden
         self.base = MLPBase(base_args, cent_obs_shape)
@@ -218,7 +219,6 @@ class R_CostCritic(R_Critic):
     """
 
     def __init__(self, args, cent_obs_space, device=torch.device("cpu")):
-        import copy
         cost_args = copy.copy(args)
         cost_args.use_recurrent_policy = False
         cost_args.use_naive_recurrent_policy = False

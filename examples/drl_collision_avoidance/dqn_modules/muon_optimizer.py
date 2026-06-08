@@ -48,7 +48,7 @@ class SingleDeviceMuon(torch.optim.Optimizer):
                 g = p.grad
                 momentum_buf = state["momentum_buffer"]
                 momentum_buf.lerp_(g, 1 - group["momentum"])
-                # Nesterov momentum: interpolate current gradient toward the buffer
+                # EMA smoothing: momentum smoothing for Muon's orthogonal update behavior
                 update = g.lerp_(momentum_buf, group["momentum"])
 
                 if update.ndim == 4:

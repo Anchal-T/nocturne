@@ -17,7 +17,7 @@ PROJECT_PATH = Path.resolve(Path(__file__).parent.parent)
 DATA_FOLDER = str(PROJECT_PATH / 'dataset')
 TRAIN_DATA_PATH = os.path.join(DATA_FOLDER, 'train')
 VALID_DATA_PATH = os.path.join(DATA_FOLDER, 'valid')
-TEST_DATA_PATH = os.path.join(DATA_FOLDER, 'testing')
+TEST_DATA_PATH = os.path.join(DATA_FOLDER, 'test')
 PROCESSED_TRAIN_NO_TL = os.path.join(
     DATA_FOLDER, f'formatted_json_v{VERSION_NUMBER}_no_tl_train')
 PROCESSED_VALID_NO_TL = os.path.join(

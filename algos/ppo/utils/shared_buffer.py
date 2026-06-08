@@ -327,6 +327,8 @@ class SharedReplayBuffer(object):
         gae = 0
         for step in reversed(range(self.costs.shape[0])):
             if cost_value_normalizer is not None:
+                # cost_value_normalizer must have been updated with cost_return_batch
+                # before calling this method to ensure correct denormalization.
                 delta = (self.costs[step]
                          + self.cost_gamma
                          * cost_value_normalizer.denormalize(

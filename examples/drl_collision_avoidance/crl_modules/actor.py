@@ -55,7 +55,16 @@ class ContinuousActor(nn.Module):
         _apply_lecun_init(self)
 
     def forward(self, state: torch.Tensor, goal: torch.Tensor):
-        """Return (mean, log_std) without squashing."""
+        """Return (mean, log_std) without squashing.
+
+        Args:
+            state: Tensor of shape (batch_size, state_dim).
+            goal:  Tensor of shape (batch_size, goal_dim).
+
+        Returns:
+            mean:    Tensor of shape (batch_size, action_dim).
+            log_std: Tensor of shape (batch_size, action_dim).
+        """
         x = torch.cat([state, goal], dim=-1)
         x = self.input_proj(x)
         x = self.blocks(x)
@@ -79,7 +88,7 @@ class ContinuousActor(nn.Module):
         action = torch.tanh(x_t)
         log_prob = (
             torch.distributions.Normal(mean, std).log_prob(x_t)
-            - torch.log(1.0 - action.pow(2) + 1e-6)
+            - torch.log(1.0 - action.pow(2) + 1e-5)
         ).sum(dim=-1)
         return action, log_prob
 
@@ -87,6 +96,15 @@ class ContinuousActor(nn.Module):
     def deterministic_action(
         self, state: torch.Tensor, goal: torch.Tensor
     ) -> torch.Tensor:
-        """Return tanh(mean) without sampling."""
+        """Return tanh(mean) without sampling.
+
+        Args:
+            state: Tensor of shape (batch_size, state_dim).
+            goal:  Tensor of shape (batch_size, goal_dim).
+
+        Returns:
+            Tensor of shape (batch_size, action_dim) with values in [-1, 1].
+            The caller is responsible for scaling to the environment's action range.
+        """
         mean, _ = self(state, goal)
         return torch.tanh(mean)

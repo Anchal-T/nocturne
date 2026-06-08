@@ -293,7 +293,7 @@ class CollisionAvoidanceEnv(gym.Env):
         for obj in self.base_env.scenario.getVehicles():
             if obj.getID() == self._ego_id:
                 continue
-            if visible_set is not None and obj.getID() not in visible_set['vehicles']:
+            if visible_set is not None and obj.getID() not in visible_set.get('vehicles', set()):
                 continue
             cell = self._locate_grid_cell(
                 obj.position, ego_pos, cos_h, sin_h, cell_long, cell_lat,
@@ -313,23 +313,35 @@ class CollisionAvoidanceEnv(gym.Env):
                 grid[2, row, col] = rel_vy / SPEED_NORM
 
         for obj in self.base_env.scenario.getPedestrians():
-            if visible_set is not None and obj.getID() not in visible_set['peds']:
+            if visible_set is not None and obj.getID() not in visible_set.get('peds', set()):
                 continue
             self._project_to_grid(
                 obj.position, ego_pos, cos_h, sin_h, cell_long, cell_lat, grid, self.vru_weight,
             )
 
         for obj in self.base_env.scenario.getCyclists():
-            if visible_set is not None and obj.getID() not in visible_set['cyclists']:
+            if visible_set is not None and obj.getID() not in visible_set.get('cyclists', set()):
                 continue
             self._project_to_grid(
                 obj.position, ego_pos, cos_h, sin_h, cell_long, cell_lat, grid, self.vru_weight,
             )
 
         # Road edges are static map knowledge (not sensor-derived); always visible.
+        grid_radius = max(self.forward_dist, self.backward_dist, self.lateral_dist)
+        ego_x, ego_y = ego_pos.x, ego_pos.y
         for road_line in self.base_env.scenario.getRoadLines():
             if road_line.road_type == nocturne.RoadType.ROAD_EDGE:
-                for pt in road_line.geometry_points():
+                points = road_line.geometry_points()
+                if not points:
+                    continue
+                min_x = min(p.x for p in points)
+                max_x = max(p.x for p in points)
+                min_y = min(p.y for p in points)
+                max_y = max(p.y for p in points)
+                if (min_x > ego_x + grid_radius or max_x < ego_x - grid_radius or
+                        min_y > ego_y + grid_radius or max_y < ego_y - grid_radius):
+                    continue
+                for pt in points:
                     self._project_to_grid(
                         pt, ego_pos, cos_h, sin_h, cell_long, cell_lat, grid, self.road_edge_weight,
                     )
@@ -411,19 +423,19 @@ class CollisionAvoidanceEnv(gym.Env):
         for obj in self.base_env.scenario.getVehicles():
             if obj.getID() == self._ego_id:
                 continue
-            if visible_set is not None and obj.getID() not in visible_set['vehicles']:
+            if visible_set is not None and obj.getID() not in visible_set.get('vehicles', set()):
                 continue
             ttz = self._compute_ttz(ego_pos, ego_speed, ego_veh.heading, obj)
             min_ttz_veh = min(min_ttz_veh, ttz)
 
         for obj in self.base_env.scenario.getPedestrians():
-            if visible_set is not None and obj.getID() not in visible_set['peds']:
+            if visible_set is not None and obj.getID() not in visible_set.get('peds', set()):
                 continue
             ttz = self._compute_ttz(ego_pos, ego_speed, ego_veh.heading, obj)
             min_ttz_ped = min(min_ttz_ped, ttz)
 
         for obj in self.base_env.scenario.getCyclists():
-            if visible_set is not None and obj.getID() not in visible_set['cyclists']:
+            if visible_set is not None and obj.getID() not in visible_set.get('cyclists', set()):
                 continue
             ttz = self._compute_ttz(ego_pos, ego_speed, ego_veh.heading, obj)
             min_ttz_ped = min(min_ttz_ped, ttz)

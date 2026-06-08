@@ -46,11 +46,14 @@ dataset/
 # configs
 configs.json
 GEMINI.md
+
+# AI/automation tools
 .github/skills/
 .github/prompts/
-outputs/
-.agents/rules/nocturne-rules.md
-.agents
 .github/instructions/test.instructions.md
+.agents/
+
+# outputs
+outputs/
 
 venv/

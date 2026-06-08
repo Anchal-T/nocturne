@@ -117,6 +117,9 @@ class CRLCollisionAvoidanceEnv(CollisionAvoidanceEnv):
 
     def reset(self, *, seed=None, options=None) -> tuple:
         """Reset the underlying scenario and return a CRL observation."""
+        # Seed the Gymnasium RNG without triggering CollisionAvoidanceEnv's
+        # full reset, which we replicate below with CRL-specific logic.
+        gym.Env.reset(self, seed=seed)
         obs_dict: Optional[Dict] = None
         for _ in range(MAX_RESET_ATTEMPTS):
             obs_dict, _ = self.base_env.reset()
@@ -169,7 +172,6 @@ class CRLCollisionAvoidanceEnv(CollisionAvoidanceEnv):
         all_done = bool(done_dict.get("__all__", False))
         terminated = ego_done or all_done
         truncated = bool(truncated_dict.get(ego_id, False)) or self._step_count >= self._max_steps
-        done = terminated or truncated
 
         info = dict(info_dict.get(ego_id, {}))
 

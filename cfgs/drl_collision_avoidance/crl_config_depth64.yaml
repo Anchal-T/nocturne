@@ -79,7 +79,7 @@ crl:
   critic_lr: 3.0e-4
   actor_lr: 3.0e-4
   alpha_lr: 3.0e-4
-  batch_size: 1024          # deeper nets can leverage larger batches (paper finding)
+  batch_size: 1024          # deeper nets can leverage larger batches (paper findings)
   gamma: 0.99
   target_entropy_factor: 0.5
   logsumexp_penalty_coeff: 0.1

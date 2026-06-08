@@ -179,11 +179,12 @@ class Runner(object):
                 str(self.model_dir) + '/critic.pt')
             self.policy.critic.load_state_dict(policy_critic_state_dict)
             if getattr(self.policy, 'use_lagrangian', False):
-                policy_cost_critic_state_dict = torch.load(
-                    str(self.model_dir) + '/cost_critic.pt')
-                self.policy.cost_critic.load_state_dict(
-                    policy_cost_critic_state_dict)
-                lagrangian_path = (str(self.model_dir) + '/lagrangian.pt')
+                cost_critic_path = str(self.model_dir) + '/cost_critic.pt'
+                if os.path.exists(cost_critic_path):
+                    policy_cost_critic_state_dict = torch.load(cost_critic_path)
+                    self.policy.cost_critic.load_state_dict(
+                        policy_cost_critic_state_dict)
+                lagrangian_path = str(self.model_dir) + '/lagrangian.pt'
                 if os.path.exists(lagrangian_path):
                     self._pending_lagrangian_state = torch.load(
                         lagrangian_path)

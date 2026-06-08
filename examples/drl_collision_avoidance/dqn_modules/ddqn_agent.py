@@ -491,8 +491,12 @@ class DDQNAgent:
         self.sync_inference_net()
         try:
             self.optimizer.load_state_dict(checkpoint["optimizer"])
-        except Exception:
-            pass
+        except Exception as exc:
+            import logging
+            logging.warning(
+                f"Failed to load optimizer state from checkpoint: {exc}. "
+                "Continuing with freshly initialized optimizer."
+            )
         self.train_steps = checkpoint["train_steps"]
         self.epsilon = checkpoint["epsilon"]
 

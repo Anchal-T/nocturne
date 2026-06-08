@@ -205,10 +205,10 @@ class QNetwork(nn.Module):
         mlp_depth: int = 2,
     ):
         super().__init__()
-        enc_dim, hd_dim = _parse_hidden_layers(hidden_layers, encoder_dim, head_dim)
+        enc_dim, head_dim = _parse_hidden_layers(hidden_layers, encoder_dim, head_dim)
 
         # Store for checkpoint compatibility
-        self.hidden_layers = [enc_dim, enc_dim, enc_dim, hd_dim]
+        self.hidden_layers = [enc_dim, enc_dim, enc_dim, head_dim]
         self.grid_size = grid_size
         self.grid_channels = grid_channels
         self.grid_rows = grid_rows
@@ -217,6 +217,11 @@ class QNetwork(nn.Module):
         self.noisy = noisy
         self.mlp_depth = mlp_depth
 
+        if obs_dim < grid_size:
+            raise ValueError(
+                f"obs_dim ({obs_dim}) must be >= grid_size ({grid_size}) "
+                f"to accommodate extra (non-grid) features."
+            )
         extra_dim = obs_dim - grid_size
         linear_cls = NoisyLinear if noisy else nn.Linear
 
@@ -248,14 +253,14 @@ class QNetwork(nn.Module):
         if self.dueling:
             self.advantage_head = ResidualMLP(
                 in_features=head_input_dim,
-                hidden_features=hd_dim,
+                hidden_features=head_dim,
                 out_features=n_actions,
                 mlp_depth=self.mlp_depth,
                 linear_cls=linear_cls,
             )
             self.value_head = ResidualMLP(
                 in_features=head_input_dim,
-                hidden_features=hd_dim,
+                hidden_features=head_dim,
                 out_features=1,
                 mlp_depth=self.mlp_depth,
                 linear_cls=linear_cls,
@@ -263,7 +268,7 @@ class QNetwork(nn.Module):
         else:
             self.head = ResidualMLP(
                 in_features=head_input_dim,
-                hidden_features=hd_dim,
+                hidden_features=head_dim,
                 out_features=n_actions,
                 mlp_depth=self.mlp_depth,
                 linear_cls=linear_cls,
