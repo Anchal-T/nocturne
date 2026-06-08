@@ -150,7 +150,8 @@ class BaseEnv(Env):
 
     def step(
         self, action_dict: Dict[int, Union[Action, np.ndarray, Sequence[float],
-                                           int]]
+                                           int]],
+        skip_obs: bool = False,
     ) -> None:
         """See superclass."""
         obs_dict = {}
@@ -167,16 +168,17 @@ class BaseEnv(Env):
             veh_id = veh_obj.getID()
             if veh_id in self.done_ids:
                 continue
-            self.context_dict[veh_id].append(self.get_observation(veh_obj))
-            if self.n_frames_stacked > 1:
-                veh_deque = self.context_dict[veh_id]
-                context_list = list(
-                    islice(veh_deque,
-                           len(veh_deque) - self.n_frames_stacked,
-                           len(veh_deque)))
-                obs_dict[veh_id] = np.concatenate(context_list)
-            else:
-                obs_dict[veh_id] = self.context_dict[veh_id][-1]
+            if not skip_obs:
+                self.context_dict[veh_id].append(self.get_observation(veh_obj))
+                if self.n_frames_stacked > 1:
+                    veh_deque = self.context_dict[veh_id]
+                    context_list = list(
+                        islice(veh_deque,
+                               len(veh_deque) - self.n_frames_stacked,
+                               len(veh_deque)))
+                    obs_dict[veh_id] = np.concatenate(context_list)
+                else:
+                    obs_dict[veh_id] = self.context_dict[veh_id][-1]
             rew_dict[veh_id] = 0
             done_dict[veh_id] = False
             info_dict[veh_id]['goal_achieved'] = False

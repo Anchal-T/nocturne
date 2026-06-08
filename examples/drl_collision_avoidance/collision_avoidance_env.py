@@ -83,6 +83,8 @@ class CollisionAvoidanceEnv(gym.Env):
         self._max_steps = cfg["drl"]["max_episode_steps"]
         self._ttz_vehicle: float = NO_CONFLICT_TTZ
         self._ttz_pedestrian: float = NO_CONFLICT_TTZ
+        self._road_edge_pts = np.empty((0, 2), dtype=np.float32)
+        self._visible_set = None
 
     def reset(self, *, seed=None, options=None) -> tuple:
         super().reset(seed=seed)
@@ -96,6 +98,7 @@ class CollisionAvoidanceEnv(gym.Env):
                 self._ego_id = ego_id
                 self._step_count = 0
                 self._prev_goal_dist = self._get_goal_dist()
+                self._cache_road_edges()
                 return self._build_observation(), {}
 
         ego_id = self._find_any_ego_id(obs_dict)
@@ -106,6 +109,7 @@ class CollisionAvoidanceEnv(gym.Env):
         self._ego_id = ego_id
         self._step_count = 0
         self._prev_goal_dist = self._get_goal_dist()
+        self._cache_road_edges()
         return self._build_observation(), {}
 
     def _find_any_ego_id(self, obs_dict):
@@ -123,7 +127,9 @@ class CollisionAvoidanceEnv(gym.Env):
     def step(self, action: int) -> Tuple[np.ndarray, float, bool, bool, Dict]:
         throttle, steer = self.action_table[action]
         action_dict = {self._ego_id: [throttle, steer, 0.0]}
-        _, rew_dict, done_dict, truncated_dict, info_dict = self.base_env.step(action_dict)
+        _, rew_dict, done_dict, truncated_dict, info_dict = self.base_env.step(
+            action_dict, skip_obs=True
+        )
         self._step_count += 1
 
         obs = self._build_observation()
@@ -151,6 +157,53 @@ class CollisionAvoidanceEnv(gym.Env):
     def close(self):
         pass
 
+    # --- Road-edge caching ---
+
+    def _cache_road_edges(self):
+        """Cache world-frame road-edge geometry points once per scenario."""
+        pts = []
+        for road_line in self.base_env.scenario.getRoadLines():
+            if road_line.road_type == nocturne.RoadType.ROAD_EDGE:
+                for pt in road_line.geometry_points():
+                    pts.append((pt.x, pt.y))
+        if pts:
+            self._road_edge_pts = np.array(pts, dtype=np.float32)
+        else:
+            self._road_edge_pts = np.empty((0, 2), dtype=np.float32)
+
+    # --- Batch data extraction from C++ objects ---
+
+    def _extract_objects(self, objs, visible_set_key=None, exclude_id=None):
+        """Extract C++ object positions/speeds/headings into numpy arrays."""
+        if not objs:
+            return None
+
+        visible_ids = None
+        if visible_set_key is not None and self._visible_set is not None:
+            visible_ids = self._visible_set.get(visible_set_key, set())
+
+        px, py, speeds, headings = [], [], [], []
+        for obj in objs:
+            oid = obj.getID()
+            if exclude_id is not None and oid == exclude_id:
+                continue
+            if visible_ids is not None and oid not in visible_ids:
+                continue
+            px.append(obj.position.x)
+            py.append(obj.position.y)
+            speeds.append(getattr(obj, "speed", 0.0))
+            headings.append(getattr(obj, "heading", 0.0))
+
+        if not px:
+            return None
+
+        return {
+            "px": np.array(px, dtype=np.float32),
+            "py": np.array(py, dtype=np.float32),
+            "speeds": np.array(speeds, dtype=np.float32),
+            "headings": np.array(headings, dtype=np.float32),
+        }
+
     # --- Observation Building ---
 
     def _build_observation(self) -> np.ndarray:
@@ -166,10 +219,12 @@ class CollisionAvoidanceEnv(gym.Env):
             visible_objects = self._query_visible_objects(ego_veh)
             visible_set = self._match_visible_to_vehicles(ego_veh, visible_objects)
 
-        grid = self._build_occupancy_grid(ego_veh, visible_set)
+        self._visible_set = visible_set
+
+        grid = self._build_occupancy_grid(ego_veh)
         ego_state = self._get_ego_state(ego_veh)
         target_info = self._get_target_info(ego_veh)
-        ttz_info = self._get_ttz_info(ego_veh, visible_set)
+        ttz_info = self._get_ttz_info(ego_veh)
 
         parts = [grid.flatten(), ego_state, target_info, ttz_info]
         if self.use_occlusion:
@@ -279,115 +334,262 @@ class CollisionAvoidanceEnv(gym.Env):
         pressure = occ_frac * (1.0 - nearest_norm)
         return np.array([occ_frac, nearest_norm, density, pressure], dtype=np.float32)
 
-    def _build_occupancy_grid(self, ego_veh, visible_set=None) -> np.ndarray:
+    # --- Vectorized occupancy grid ---
+
+    def _build_occupancy_grid(self, ego_veh) -> np.ndarray:
         grid = np.zeros(
             (self.grid_channels, self.grid_rows, self.grid_cols), dtype=np.float32
         )
-        vehicle_cell_dist = np.full((self.grid_rows, self.grid_cols), np.inf, dtype=np.float32)
         ego_pos = ego_veh.position
-        cos_h, sin_h = math.cos(ego_veh.heading), math.sin(ego_veh.heading)
+        cos_h = math.cos(ego_veh.heading)
+        sin_h = math.sin(ego_veh.heading)
         cell_long = (self.forward_dist + self.backward_dist) / self.grid_rows
         cell_lat = (2.0 * self.lateral_dist) / self.grid_cols
         ego_vx, ego_vy = self._get_velocity_components(ego_veh)
 
-        for obj in self.base_env.scenario.getVehicles():
-            if obj.getID() == self._ego_id:
-                continue
-            if visible_set is not None and obj.getID() not in visible_set.get('vehicles', set()):
-                continue
-            cell = self._locate_grid_cell(
-                obj.position, ego_pos, cos_h, sin_h, cell_long, cell_lat,
-            )
-            if cell is None:
-                continue
-            row, col, local_x, local_y = cell
-            grid[0, row, col] = max(grid[0, row, col], self.vehicle_weight)
-
-            rel_vx, rel_vy = self._get_relative_velocity_in_ego_frame(
-                ego_vx, ego_vy, obj, cos_h, sin_h,
-            )
-            cell_dist = local_x * local_x + local_y * local_y
-            if cell_dist <= vehicle_cell_dist[row, col]:
-                vehicle_cell_dist[row, col] = cell_dist
-                grid[1, row, col] = rel_vx / SPEED_NORM
-                grid[2, row, col] = rel_vy / SPEED_NORM
-
-        for obj in self.base_env.scenario.getPedestrians():
-            if visible_set is not None and obj.getID() not in visible_set.get('peds', set()):
-                continue
-            self._project_to_grid(
-                obj.position, ego_pos, cos_h, sin_h, cell_long, cell_lat, grid, self.vru_weight,
+        # Vehicles (occupancy + velocity channels)
+        veh_data = self._extract_objects(
+            self.base_env.scenario.getVehicles(),
+            visible_set_key="vehicles", exclude_id=self._ego_id,
+        )
+        if veh_data is not None:
+            self._stamp_vehicle_grid(
+                veh_data, ego_pos, ego_vx, ego_vy,
+                cos_h, sin_h, cell_long, cell_lat, grid,
             )
 
-        for obj in self.base_env.scenario.getCyclists():
-            if visible_set is not None and obj.getID() not in visible_set.get('cyclists', set()):
-                continue
-            self._project_to_grid(
-                obj.position, ego_pos, cos_h, sin_h, cell_long, cell_lat, grid, self.vru_weight,
+        # Pedestrians (occupancy only)
+        ped_data = self._extract_objects(
+            self.base_env.scenario.getPedestrians(),
+            visible_set_key="peds",
+        )
+        if ped_data is not None:
+            self._stamp_simple_grid(
+                ped_data, ego_pos, cos_h, sin_h, cell_long, cell_lat,
+                grid, self.vru_weight,
             )
 
-        # Road edges are static map knowledge (not sensor-derived); always visible.
-        grid_radius = max(self.forward_dist, self.backward_dist, self.lateral_dist)
-        ego_x, ego_y = ego_pos.x, ego_pos.y
-        for road_line in self.base_env.scenario.getRoadLines():
-            if road_line.road_type == nocturne.RoadType.ROAD_EDGE:
-                points = road_line.geometry_points()
-                if not points:
-                    continue
-                min_x = min(p.x for p in points)
-                max_x = max(p.x for p in points)
-                min_y = min(p.y for p in points)
-                max_y = max(p.y for p in points)
-                if (min_x > ego_x + grid_radius or max_x < ego_x - grid_radius or
-                        min_y > ego_y + grid_radius or max_y < ego_y - grid_radius):
-                    continue
-                for pt in points:
-                    self._project_to_grid(
-                        pt, ego_pos, cos_h, sin_h, cell_long, cell_lat, grid, self.road_edge_weight,
-                    )
+        # Cyclists (occupancy only)
+        cyc_data = self._extract_objects(
+            self.base_env.scenario.getCyclists(),
+            visible_set_key="cyclists",
+        )
+        if cyc_data is not None:
+            self._stamp_simple_grid(
+                cyc_data, ego_pos, cos_h, sin_h, cell_long, cell_lat,
+                grid, self.vru_weight,
+            )
+
+        # Road edges (cached world-frame points)
+        self._stamp_road_edges(ego_pos, cos_h, sin_h, cell_long, cell_lat, grid)
 
         return grid
 
-    def _project_to_grid(self, point, ego_pos, cos_h, sin_h, cell_long, cell_lat, grid, weight):
-        """Project a point (any object with .x/.y) into the occupancy channel."""
-        cell = self._locate_grid_cell(point, ego_pos, cos_h, sin_h, cell_long, cell_lat)
-        if cell is None:
-            return
-
-        row, col, _, _ = cell
-        grid[0, row, col] = max(grid[0, row, col], weight)
-
-    def _locate_grid_cell(self, point, ego_pos, cos_h, sin_h, cell_long, cell_lat):
-        """Map a world-frame point into an ego-centric grid cell."""
-        dx = point.x - ego_pos.x
-        dy = point.y - ego_pos.y
+    def _stamp_vehicle_grid(self, data, ego_pos, ego_vx, ego_vy,
+                            cos_h, sin_h, cell_long, cell_lat, grid):
+        """Vectorized vehicle grid with closest-vehicle velocity channels."""
+        dx = data["px"] - ego_pos.x
+        dy = data["py"] - ego_pos.y
         local_x = dx * cos_h + dy * sin_h
         local_y = -dx * sin_h + dy * cos_h
 
-        if local_x < -self.backward_dist or local_x > self.forward_dist:
-            return
-        if abs(local_y) > self.lateral_dist:
+        mask = (
+            (local_x >= -self.backward_dist) & (local_x <= self.forward_dist)
+            & (np.abs(local_y) <= self.lateral_dist)
+        )
+        if not mask.any():
             return
 
-        row = int((self.forward_dist - local_x) / cell_long)
-        col = int((local_y + self.lateral_dist) / cell_lat)
-        row = max(0, min(row, self.grid_rows - 1))
-        col = max(0, min(col, self.grid_cols - 1))
-        return row, col, local_x, local_y
+        lx = local_x[mask]
+        ly = local_y[mask]
+        rows = np.clip(
+            ((self.forward_dist - lx) / cell_long).astype(np.int32),
+            0, self.grid_rows - 1,
+        )
+        cols = np.clip(
+            ((ly + self.lateral_dist) / cell_lat).astype(np.int32),
+            0, self.grid_cols - 1,
+        )
+        cell_dist = lx * lx + ly * ly
+
+        # Occupancy channel
+        grid[0, rows, cols] = np.maximum(grid[0, rows, cols], self.vehicle_weight)
+
+        # Relative velocity in ego frame
+        speeds = data["speeds"][mask]
+        headings = data["headings"][mask]
+        obj_vx = speeds * np.cos(headings)
+        obj_vy = speeds * np.sin(headings)
+        rel_vx = (obj_vx - ego_vx) * cos_h + (obj_vy - ego_vy) * sin_h
+        rel_vy = -(obj_vx - ego_vx) * sin_h + (obj_vy - ego_vy) * cos_h
+
+        # Closest vehicle per cell gets its velocity written
+        flat_idx = rows * self.grid_cols + cols
+        n_cells = self.grid_rows * self.grid_cols
+        min_dist = np.full(n_cells, np.inf, dtype=np.float32)
+        np.minimum.at(min_dist, flat_idx, cell_dist)
+        is_closest = cell_dist == min_dist[flat_idx]
+
+        grid[1, rows[is_closest], cols[is_closest]] = rel_vx[is_closest] / SPEED_NORM
+        grid[2, rows[is_closest], cols[is_closest]] = rel_vy[is_closest] / SPEED_NORM
+
+    def _stamp_simple_grid(self, data, ego_pos, cos_h, sin_h,
+                           cell_long, cell_lat, grid, weight):
+        """Vectorized occupancy-only grid stamping (pedestrians/cyclists)."""
+        dx = data["px"] - ego_pos.x
+        dy = data["py"] - ego_pos.y
+        local_x = dx * cos_h + dy * sin_h
+        local_y = -dx * sin_h + dy * cos_h
+
+        mask = (
+            (local_x >= -self.backward_dist) & (local_x <= self.forward_dist)
+            & (np.abs(local_y) <= self.lateral_dist)
+        )
+        if not mask.any():
+            return
+
+        lx = local_x[mask]
+        ly = local_y[mask]
+        rows = np.clip(
+            ((self.forward_dist - lx) / cell_long).astype(np.int32),
+            0, self.grid_rows - 1,
+        )
+        cols = np.clip(
+            ((ly + self.lateral_dist) / cell_lat).astype(np.int32),
+            0, self.grid_cols - 1,
+        )
+        np.maximum.at(grid[0], (rows, cols), weight)
+
+    def _stamp_road_edges(self, ego_pos, cos_h, sin_h, cell_long, cell_lat, grid):
+        """Vectorized road-edge stamping using cached world-frame points."""
+        if self._road_edge_pts.shape[0] == 0:
+            return
+
+        dx = self._road_edge_pts[:, 0] - ego_pos.x
+        dy = self._road_edge_pts[:, 1] - ego_pos.y
+        local_x = dx * cos_h + dy * sin_h
+        local_y = -dx * sin_h + dy * cos_h
+
+        mask = (
+            (local_x >= -self.backward_dist) & (local_x <= self.forward_dist)
+            & (np.abs(local_y) <= self.lateral_dist)
+        )
+        if not mask.any():
+            return
+
+        lx = local_x[mask]
+        ly = local_y[mask]
+        rows = np.clip(
+            ((self.forward_dist - lx) / cell_long).astype(np.int32),
+            0, self.grid_rows - 1,
+        )
+        cols = np.clip(
+            ((ly + self.lateral_dist) / cell_lat).astype(np.int32),
+            0, self.grid_cols - 1,
+        )
+        np.maximum.at(grid[0], (rows, cols), self.road_edge_weight)
+
+    # --- Vectorized TTZ ---
+
+    def _get_ttz_info(self, ego_veh) -> np.ndarray:
+        ego_pos = ego_veh.position
+        ego_speed = max(ego_veh.speed, 0.1)
+
+        min_ttz_veh = NO_CONFLICT_TTZ
+        min_ttz_ped = NO_CONFLICT_TTZ
+
+        # Vehicles
+        veh_data = self._extract_objects(
+            self.base_env.scenario.getVehicles(),
+            visible_set_key="vehicles", exclude_id=self._ego_id,
+        )
+        if veh_data is not None:
+            ttz = self._compute_ttz_batch(
+                veh_data["px"], veh_data["py"],
+                veh_data["speeds"], veh_data["headings"],
+                ego_pos, ego_speed, ego_veh.heading,
+            )
+            if len(ttz) > 0:
+                min_ttz_veh = float(np.min(ttz))
+
+        # Pedestrians
+        ped_data = self._extract_objects(
+            self.base_env.scenario.getPedestrians(),
+            visible_set_key="peds",
+        )
+        if ped_data is not None:
+            ttz = self._compute_ttz_batch(
+                ped_data["px"], ped_data["py"],
+                ped_data["speeds"], ped_data["headings"],
+                ego_pos, ego_speed, ego_veh.heading,
+            )
+            if len(ttz) > 0:
+                min_ttz_ped = min(min_ttz_ped, float(np.min(ttz)))
+
+        # Cyclists
+        cyc_data = self._extract_objects(
+            self.base_env.scenario.getCyclists(),
+            visible_set_key="cyclists",
+        )
+        if cyc_data is not None:
+            ttz = self._compute_ttz_batch(
+                cyc_data["px"], cyc_data["py"],
+                cyc_data["speeds"], cyc_data["headings"],
+                ego_pos, ego_speed, ego_veh.heading,
+            )
+            if len(ttz) > 0:
+                min_ttz_ped = min(min_ttz_ped, float(np.min(ttz)))
+
+        self._ttz_vehicle = min_ttz_veh
+        self._ttz_pedestrian = min_ttz_ped
+
+        return np.array(
+            [
+                min(min_ttz_veh, TTZ_OBS_CLIP),
+                min(min_ttz_ped, TTZ_OBS_CLIP),
+                np.clip(min_ttz_veh - min_ttz_ped, -TTZ_OBS_CLIP, TTZ_OBS_CLIP),
+            ],
+            dtype=np.float32,
+        )
+
+    def _compute_ttz_batch(self, px, py, obj_speeds, obj_headings,
+                           ego_pos, ego_speed, ego_heading):
+        """Vectorized time-to-zero for multiple objects at once."""
+        dx = px - ego_pos.x
+        dy = py - ego_pos.y
+        dist = np.sqrt(dx * dx + dy * dy)
+
+        cos_ego = math.cos(ego_heading)
+        sin_ego = math.sin(ego_heading)
+        inv_dist = np.where(dist > TTZ_CONTACT_DIST, 1.0 / np.maximum(dist, 1e-6), 0.0)
+
+        closing_speed = ego_speed * (cos_ego * dx * inv_dist + sin_ego * dy * inv_dist)
+
+        obj_moving = obj_speeds > 0.01
+        if obj_moving.any():
+            cos_obj = np.cos(obj_headings[obj_moving])
+            sin_obj = np.sin(obj_headings[obj_moving])
+            dx_m = dx[obj_moving]
+            dy_m = dy[obj_moving]
+            inv_m = inv_dist[obj_moving]
+            closing_speed[obj_moving] -= obj_speeds[obj_moving] * (
+                cos_obj * dx_m * inv_m + sin_obj * dy_m * inv_m
+            )
+
+        ttz = np.full(len(px), NO_CONFLICT_TTZ, dtype=np.float32)
+        converging = closing_speed > 0.01
+        ttz[converging] = dist[converging] / closing_speed[converging]
+        ttz[dist < TTZ_CONTACT_DIST] = 0.0
+
+        return ttz
+
+    # --- Scalar helpers (kept for reward / heading computations) ---
 
     @staticmethod
     def _get_velocity_components(obj) -> Tuple[float, float]:
         speed = getattr(obj, "speed", 0.0)
         heading = getattr(obj, "heading", 0.0)
         return speed * math.cos(heading), speed * math.sin(heading)
-
-    def _get_relative_velocity_in_ego_frame(self, ego_vx, ego_vy, obj, cos_h, sin_h):
-        obj_vx, obj_vy = self._get_velocity_components(obj)
-        rel_world_x = obj_vx - ego_vx
-        rel_world_y = obj_vy - ego_vy
-        rel_x = rel_world_x * cos_h + rel_world_y * sin_h
-        rel_y = -rel_world_x * sin_h + rel_world_y * cos_h
-        return rel_x, rel_y
 
     def _get_ego_state(self, ego_veh) -> np.ndarray:
         heading_err = self._get_heading_error(ego_veh)
@@ -412,64 +614,6 @@ class CollisionAvoidanceEnv(gym.Env):
         rel_heading = angle_to_goal - ego_veh.heading
         rel_heading = (rel_heading + math.pi) % (2 * math.pi) - math.pi
         return np.array([dist / DIST_NORM, rel_heading / math.pi], dtype=np.float32)
-
-    def _get_ttz_info(self, ego_veh, visible_set=None) -> np.ndarray:
-        ego_pos = ego_veh.position
-        ego_speed = max(ego_veh.speed, 0.1)
-
-        min_ttz_veh = NO_CONFLICT_TTZ
-        min_ttz_ped = NO_CONFLICT_TTZ
-
-        for obj in self.base_env.scenario.getVehicles():
-            if obj.getID() == self._ego_id:
-                continue
-            if visible_set is not None and obj.getID() not in visible_set.get('vehicles', set()):
-                continue
-            ttz = self._compute_ttz(ego_pos, ego_speed, ego_veh.heading, obj)
-            min_ttz_veh = min(min_ttz_veh, ttz)
-
-        for obj in self.base_env.scenario.getPedestrians():
-            if visible_set is not None and obj.getID() not in visible_set.get('peds', set()):
-                continue
-            ttz = self._compute_ttz(ego_pos, ego_speed, ego_veh.heading, obj)
-            min_ttz_ped = min(min_ttz_ped, ttz)
-
-        for obj in self.base_env.scenario.getCyclists():
-            if visible_set is not None and obj.getID() not in visible_set.get('cyclists', set()):
-                continue
-            ttz = self._compute_ttz(ego_pos, ego_speed, ego_veh.heading, obj)
-            min_ttz_ped = min(min_ttz_ped, ttz)
-
-        self._ttz_vehicle = min_ttz_veh
-        self._ttz_pedestrian = min_ttz_ped
-
-        return np.array(
-            [
-                min(min_ttz_veh, TTZ_OBS_CLIP),
-                min(min_ttz_ped, TTZ_OBS_CLIP),
-                np.clip(min_ttz_veh - min_ttz_ped, -TTZ_OBS_CLIP, TTZ_OBS_CLIP),
-            ],
-            dtype=np.float32,
-        )
-
-    def _compute_ttz(self, ego_pos, ego_speed, ego_heading, obj) -> float:
-        dx = obj.position.x - ego_pos.x
-        dy = obj.position.y - ego_pos.y
-        dist = math.sqrt(dx * dx + dy * dy)
-        if dist < TTZ_CONTACT_DIST:
-            return 0.0
-        closing_speed = ego_speed * (
-            math.cos(ego_heading) * dx / dist + math.sin(ego_heading) * dy / dist
-        )
-        obj_speed = getattr(obj, "speed", 0.0)
-        if obj_speed > 0.01:
-            obj_heading = getattr(obj, "heading", 0.0)
-            closing_speed -= obj_speed * (
-                math.cos(obj_heading) * dx / dist + math.sin(obj_heading) * dy / dist
-            )
-        if closing_speed <= 0.01:
-            return NO_CONFLICT_TTZ
-        return dist / closing_speed
 
     def _get_heading_error(self, ego_veh) -> float:
         goal = ego_veh.target_position

@@ -192,29 +192,23 @@ class HERReplayBuffer:
             ``'goal'`` (B, goal_dim), all float32; or ``None`` if the buffer
             contains no completed episodes.
         """
-        if len(self._episodes) == 0:
+        valid_episodes = [ep for ep in self._episodes if len(ep) >= 2]
+        if not valid_episodes:
             return None
 
         batch_size = int(batch_size)
-        num_eps = len(self._episodes)
+        num_eps = len(valid_episodes)
 
         obs_out = np.zeros((batch_size, self.state_dim), dtype=np.float32)
         act_out = np.zeros((batch_size, self.action_dim), dtype=np.float32)
         goal_out = np.zeros((batch_size, self.goal_dim), dtype=np.float32)
 
-        # Pre-sample episode indices in one vectorised call.
+        # Pre-sample valid episode indices in one vectorised call.
         ep_indices = np.random.randint(0, num_eps, size=batch_size)
 
         for i, ep_idx in enumerate(ep_indices):
-            ep = self._episodes[ep_idx]
+            ep = valid_episodes[ep_idx]
             ep_len = len(ep)
-
-            if ep_len < 2:
-                ep_idx = np.random.randint(0, num_eps)
-                ep = self._episodes[ep_idx]
-                ep_len = len(ep)
-                if ep_len < 2:
-                    continue
 
             # Anchor timestep t (must have at least one future step).
             t = np.random.randint(0, ep_len - 1)

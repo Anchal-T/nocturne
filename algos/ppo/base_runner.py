@@ -3,11 +3,13 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 # Code modified from https://github.com/marlbenchmark/on-policy
-import wandb
 import os
+
 import numpy as np
 import torch
+import wandb
 from tensorboardX import SummaryWriter
+
 from algos.ppo.utils.shared_buffer import SharedReplayBuffer
 
 
@@ -24,13 +26,13 @@ class Runner(object):
 
     def __init__(self, config):
 
-        self.all_args = config['cfg.algo']
-        self.envs = config['envs']
-        self.eval_envs = config['eval_envs']
-        self.device = config['device']
-        self.num_agents = config['num_agents']
+        self.all_args = config["cfg.algo"]
+        self.envs = config["envs"]
+        self.eval_envs = config["eval_envs"]
+        self.device = config["device"]
+        self.num_agents = config["num_agents"]
         if config.__contains__("render_envs"):
-            self.render_envs = config['render_envs']
+            self.render_envs = config["render_envs"]
 
         # parameters
         # self.env_name = self.all_args.env_name
@@ -64,48 +66,54 @@ class Runner(object):
             self.run_dir = str(wandb.run.dir)
         else:
             self.run_dir = config["logdir"]
-            self.log_dir = str(self.run_dir / 'logs')
+            self.log_dir = str(self.run_dir / "logs")
             if not os.path.exists(self.log_dir):
                 os.makedirs(self.log_dir)
             self.writter = SummaryWriter(self.log_dir)
-            self.save_dir = str(self.run_dir / 'models')
+            self.save_dir = str(self.run_dir / "models")
             if not os.path.exists(self.save_dir):
                 os.makedirs(self.save_dir)
 
-        from algos.ppo.r_mappo.r_mappo import R_MAPPO as TrainAlgo
         from algos.ppo.r_mappo.algorithm.rMAPPOPolicy import R_MAPPOPolicy as Policy
-        share_observation_space = self.envs.share_observation_space[
-            0] if self.use_centralized_V else self.envs.observation_space[0]
+        from algos.ppo.r_mappo.r_mappo import R_MAPPO as TrainAlgo
+
+        share_observation_space = (
+            self.envs.share_observation_space[0]
+            if self.use_centralized_V
+            else self.envs.observation_space[0]
+        )
 
         # policy network
-        self.policy = Policy(self.all_args,
-                             self.envs.observation_space[0],
-                             share_observation_space,
-                             self.envs.action_space[0],
-                             device=self.device)
+        self.policy = Policy(
+            self.all_args,
+            self.envs.observation_space[0],
+            share_observation_space,
+            self.envs.action_space[0],
+            device=self.device,
+        )
 
         if self.model_dir is not None:
             self._pending_lagrangian_state = None
             self.restore()
 
         # algorithm
-        self.trainer = TrainAlgo(self.all_args,
-                                 self.policy,
-                                 device=self.device)
+        self.trainer = TrainAlgo(self.all_args, self.policy, device=self.device)
 
         # Apply any Lagrangian state captured during restore (the trainer
         # owns the multiplier and cost value normalizer, but doesn't exist
         # until after `restore()` runs).
-        if getattr(self, '_pending_lagrangian_state', None):
-            self.trainer.load_lagrangian_state_dict(
-                self._pending_lagrangian_state)
+        if getattr(self, "_pending_lagrangian_state", None):
+            self.trainer.load_lagrangian_state_dict(self._pending_lagrangian_state)
             self._pending_lagrangian_state = None
 
         # buffer
-        self.buffer = SharedReplayBuffer(self.all_args, self.num_agents,
-                                         self.envs.observation_space[0],
-                                         share_observation_space,
-                                         self.envs.action_space[0])
+        self.buffer = SharedReplayBuffer(
+            self.all_args,
+            self.num_agents,
+            self.envs.observation_space[0],
+            share_observation_space,
+            self.envs.action_space[0],
+        )
 
     def run(self):
         """Collect training data, perform training updates, and evaluate policy."""
@@ -133,24 +141,27 @@ class Runner(object):
         next_values = self.trainer.policy.get_values(
             np.concatenate(self.buffer.share_obs[-1]),
             np.concatenate(self.buffer.rnn_states_critic[-1]),
-            np.concatenate(self.buffer.masks[-1]))
-        next_values = np.array(
-            np.split(_t2n(next_values), self.n_rollout_threads))
+            np.concatenate(self.buffer.masks[-1]),
+        )
+        next_values = np.array(np.split(_t2n(next_values), self.n_rollout_threads))
         self.buffer.compute_returns(next_values, self.trainer.value_normalizer)
 
         # Compute cost returns for PPO-Lagrangian.
-        if getattr(self.trainer, 'use_lagrangian', False):
+        if getattr(self.trainer, "use_lagrangian", False):
             next_cost_values = self.trainer.policy.get_cost_values(
                 np.concatenate(self.buffer.share_obs[-1]),
                 np.concatenate(self.buffer.rnn_states_critic[-1]),
-                np.concatenate(self.buffer.masks[-1]))
+                np.concatenate(self.buffer.masks[-1]),
+            )
             next_cost_values = np.array(
-                np.split(_t2n(next_cost_values), self.n_rollout_threads))
+                np.split(_t2n(next_cost_values), self.n_rollout_threads)
+            )
             self.buffer.compute_cost_returns(
-                next_cost_values, self.trainer.cost_value_normalizer)
+                next_cost_values, self.trainer.cost_value_normalizer
+            )
 
     def train(self):
-        """Train policies with data in buffer. """
+        """Train policies with data in buffer."""
         self.trainer.prep_training()
         train_infos = self.trainer.train(self.buffer)
         self.buffer.after_update()
@@ -161,33 +172,39 @@ class Runner(object):
         policy_actor = self.trainer.policy.actor
         torch.save(policy_actor.state_dict(), str(self.save_dir) + "/actor.pt")
         policy_critic = self.trainer.policy.critic
-        torch.save(policy_critic.state_dict(),
-                   str(self.save_dir) + "/critic.pt")
-        if getattr(self.trainer.policy, 'use_lagrangian', False):
+        torch.save(policy_critic.state_dict(), str(self.save_dir) + "/critic.pt")
+        if getattr(self.trainer.policy, "use_lagrangian", False):
             policy_cost_critic = self.trainer.policy.cost_critic
-            torch.save(policy_cost_critic.state_dict(),
-                       str(self.save_dir) + "/cost_critic.pt")
-            torch.save(self.trainer.lagrangian_state_dict(),
-                       str(self.save_dir) + "/lagrangian.pt")
+            torch.save(
+                policy_cost_critic.state_dict(), str(self.save_dir) + "/cost_critic.pt"
+            )
+            torch.save(
+                self.trainer.lagrangian_state_dict(),
+                str(self.save_dir) + "/lagrangian.pt",
+            )
 
     def restore(self):
         """Restore policy's networks from a saved model."""
-        policy_actor_state_dict = torch.load(str(self.model_dir) + '/actor.pt')
+        policy_actor_state_dict = torch.load(str(self.model_dir) + "/actor.pt")
         self.policy.actor.load_state_dict(policy_actor_state_dict)
         if not self.all_args.use_render:
-            policy_critic_state_dict = torch.load(
-                str(self.model_dir) + '/critic.pt')
+            policy_critic_state_dict = torch.load(str(self.model_dir) + "/critic.pt")
             self.policy.critic.load_state_dict(policy_critic_state_dict)
-            if getattr(self.policy, 'use_lagrangian', False):
-                cost_critic_path = str(self.model_dir) + '/cost_critic.pt'
-                if os.path.exists(cost_critic_path):
-                    policy_cost_critic_state_dict = torch.load(cost_critic_path)
-                    self.policy.cost_critic.load_state_dict(
-                        policy_cost_critic_state_dict)
-                lagrangian_path = str(self.model_dir) + '/lagrangian.pt'
-                if os.path.exists(lagrangian_path):
-                    self._pending_lagrangian_state = torch.load(
-                        lagrangian_path)
+            if getattr(self.policy, "use_lagrangian", False):
+                cost_critic_path = str(self.model_dir) + "/cost_critic.pt"
+                if not os.path.exists(cost_critic_path):
+                    raise FileNotFoundError(
+                        f"use_lagrangian=True but cost_critic.pt was not found in {self.model_dir}"
+                    )
+                policy_cost_critic_state_dict = torch.load(cost_critic_path)
+                self.policy.cost_critic.load_state_dict(policy_cost_critic_state_dict)
+
+                lagrangian_path = str(self.model_dir) + "/lagrangian.pt"
+                if not os.path.exists(lagrangian_path):
+                    raise FileNotFoundError(
+                        f"use_lagrangian=True but lagrangian.pt was not found in {self.model_dir}"
+                    )
+                self._pending_lagrangian_state = torch.load(lagrangian_path)
 
     def log_train(self, train_infos, total_num_steps):
         """
@@ -212,5 +229,4 @@ class Runner(object):
                 if self.use_wandb:
                     wandb.log({k: np.mean(v)}, step=total_num_steps)
                 else:
-                    self.writter.add_scalars(k, {k: np.mean(v)},
-                                             total_num_steps)
+                    self.writter.add_scalars(k, {k: np.mean(v)}, total_num_steps)

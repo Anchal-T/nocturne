@@ -87,7 +87,7 @@ def collect_data(cfg, num_episodes):
 def step_continuous_action(env, accel, steer):
     """Advance the wrapped Nocturne env with a continuous expert action."""
     action_dict = {env._ego_id: [accel, steer, 0.0]}
-    _, _, done_dict, truncated_dict, _ = env.base_env.step(action_dict)
+    _, _, done_dict, truncated_dict, _ = env.base_env.step(action_dict, skip_obs=True)
     env._step_count += 1
     obs = env._build_observation()
     ego_done = done_dict.get(env._ego_id, False)

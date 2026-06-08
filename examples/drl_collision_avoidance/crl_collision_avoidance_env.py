@@ -16,6 +16,7 @@ Differences from CollisionAvoidanceEnv:
 import math
 from typing import Any, Dict, Optional, Tuple
 
+import gymnasium as gym
 import numpy as np
 from gymnasium.spaces import Box
 
@@ -164,14 +165,19 @@ class CRLCollisionAvoidanceEnv(CollisionAvoidanceEnv):
 
         ego_id: int = self._ego_id  # type: ignore[assignment]  # always set by reset()
         action_dict = {ego_id: [throttle, steer, 0.0]}
-        _, _rew_dict, done_dict, truncated_dict, info_dict = self.base_env.step(action_dict)
+        _, _rew_dict, done_dict, truncated_dict, info_dict = self.base_env.step(
+            action_dict, skip_obs=True
+        )
         self._step_count += 1
 
         obs = self._build_crl_obs()
         ego_done = bool(done_dict.get(ego_id, False))
         all_done = bool(done_dict.get("__all__", False))
         terminated = ego_done or all_done
-        truncated = bool(truncated_dict.get(ego_id, False)) or self._step_count >= self._max_steps
+        truncated = (
+            bool(truncated_dict.get(ego_id, False))
+            or self._step_count >= self._max_steps
+        )
 
         info = dict(info_dict.get(ego_id, {}))
 

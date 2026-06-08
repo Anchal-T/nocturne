@@ -1,3 +1,4 @@
+import logging
 import random
 import threading
 from dataclasses import dataclass, field
@@ -8,9 +9,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from .noisy_layer import NoisyLinear
 from .optimizers import build_optimizer, get_optimizer_lr
 from .profiling import CudaTrainProfiler
-from .noisy_layer import NoisyLinear
 from .q_network import QNetwork
 from .replay_buffer import ReplayBuffer
 
@@ -134,7 +135,11 @@ class DDQNAgent:
             and self.device.type == "cuda"
             and hasattr(torch, "compile")
         )
-        if config.use_torch_compile and self.device.type == "cuda" and not hasattr(torch, "compile"):
+        if (
+            config.use_torch_compile
+            and self.device.type == "cuda"
+            and not hasattr(torch, "compile")
+        ):
             print("[DDQNAgent] torch.compile unavailable; continuing without compile.")
 
         self._profiler = CudaTrainProfiler(
@@ -147,13 +152,18 @@ class DDQNAgent:
         )
         self._profile_cuda = config.profile_cuda
 
-        self.online_net, self.target_net, self.inference_net = self._build_networks(config)
+        self.online_net, self.target_net, self.inference_net = self._build_networks(
+            config
+        )
         self.inference_lock = threading.Lock()
         self.sync_target()
         self.sync_inference_net()
 
         self.optimizer = build_optimizer(
-            self.online_net, config.lr, self.device.type, self.use_muon,
+            self.online_net,
+            config.lr,
+            self.device.type,
+            self.use_muon,
         )
 
         self.replay_buffer = ReplayBuffer(
@@ -168,12 +178,15 @@ class DDQNAgent:
             epsilon=config.per_epsilon,
             num_envs=config.num_envs,
         )
-        self._gamma_n: float = self.gamma ** config.n_step
+        self._gamma_n: float = self.gamma**config.n_step
         self.train_steps = 0
         self._grad_accum_counter = 0
         self._pin_buffers = self._init_pin_buffers(config.batch_size, obs_dim)
+        self._inference_pin_buf = self._init_inference_pin_buf(config.num_envs, obs_dim)
 
-    def _instantiate_networks(self, make_fn: Callable[[], QNetwork]) -> Tuple[nn.Module, nn.Module, nn.Module]:
+    def _instantiate_networks(
+        self, make_fn: Callable[[], QNetwork]
+    ) -> Tuple[nn.Module, nn.Module, nn.Module]:
         """Create three networks via make_fn, apply compile and eval modes."""
         online, target, inference = make_fn(), make_fn(), make_fn()
         online, target, inference = self._maybe_compile(online, target, inference)
@@ -209,8 +222,18 @@ class DDQNAgent:
             "weights": torch.zeros(batch_size, pin_memory=True),
         }
 
+    def _init_inference_pin_buf(
+        self, max_batch: int, obs_dim: int
+    ) -> Optional[torch.Tensor]:
+        if self.device.type != "cuda":
+            return None
+        return torch.zeros(max_batch, obs_dim, pin_memory=True)
+
     def _maybe_compile(
-        self, online: nn.Module, target: nn.Module, inference: nn.Module,
+        self,
+        online: nn.Module,
+        target: nn.Module,
+        inference: nn.Module,
     ) -> Tuple[nn.Module, nn.Module, nn.Module]:
         if not self._compile_enabled:
             return online, target, inference
@@ -221,7 +244,9 @@ class DDQNAgent:
                 inference,  # keep eager — async actor path can conflict with dynamo
             )
         except Exception as exc:
-            print(f"[DDQNAgent] torch.compile failed ({exc}); continuing in eager mode.")
+            print(
+                f"[DDQNAgent] torch.compile failed ({exc}); continuing in eager mode."
+            )
             self._compile_enabled = False
             return online, target, inference
 
@@ -260,7 +285,11 @@ class DDQNAgent:
         if not self.noisy and random.random() < self.epsilon:
             return random.randrange(self.n_actions)
         with torch.no_grad():
-            state_t = torch.from_numpy(np.asarray(state, dtype=np.float32)).unsqueeze(0).to(self.device)
+            state_t = (
+                torch.from_numpy(np.asarray(state, dtype=np.float32))
+                .unsqueeze(0)
+                .to(self.device)
+            )
             return self._greedy_inference(state_t).argmax(dim=1).item()
 
     def select_action_batch(self, states: np.ndarray) -> np.ndarray:
@@ -270,20 +299,37 @@ class DDQNAgent:
         if self.noisy:
             # NoisyNet handles exploration — always greedy
             with torch.no_grad():
-                states_t = torch.from_numpy(np.asarray(states, dtype=np.float32)).to(self.device)
-                actions[:] = self._greedy_inference(states_t).argmax(dim=1).cpu().numpy()
+                states_t = self._to_device_pinned(states)
+                actions[:] = (
+                    self._greedy_inference(states_t).argmax(dim=1).cpu().numpy()
+                )
             return actions
 
         random_mask = np.random.rand(batch_size) < self.epsilon
         if random_mask.any():
-            actions[random_mask] = np.random.randint(0, self.n_actions, size=random_mask.sum())
+            actions[random_mask] = np.random.randint(
+                0, self.n_actions, size=random_mask.sum()
+            )
 
         greedy_mask = ~random_mask
         if greedy_mask.any():
             with torch.no_grad():
-                states_t = torch.from_numpy(np.asarray(states[greedy_mask], dtype=np.float32)).to(self.device)
-                actions[greedy_mask] = self._greedy_inference(states_t).argmax(dim=1).cpu().numpy()
+                states_t = self._to_device_pinned(states[greedy_mask])
+                actions[greedy_mask] = (
+                    self._greedy_inference(states_t).argmax(dim=1).cpu().numpy()
+                )
         return actions
+
+    def _to_device_pinned(self, np_array: np.ndarray) -> torch.Tensor:
+        """Copy numpy array to GPU via pinned memory for faster H2D transfer."""
+        n = np_array.shape[0]
+        if (
+            self._inference_pin_buf is not None
+            and n <= self._inference_pin_buf.shape[0]
+        ):
+            self._inference_pin_buf[:n].copy_(torch.from_numpy(np_array))
+            return self._inference_pin_buf[:n].to(self.device, non_blocking=False)
+        return torch.from_numpy(np.asarray(np_array, dtype=np.float32)).to(self.device)
 
     # --- Replay Buffer ---
 
@@ -296,8 +342,12 @@ class DDQNAgent:
             bool(done),
         )
 
-    def store_transition_batch(self, states, actions, rewards, next_states, dones, env_ids=None):
-        self.replay_buffer.store_batch(states, actions, rewards, next_states, dones, env_ids=env_ids)
+    def store_transition_batch(
+        self, states, actions, rewards, next_states, dones, env_ids=None
+    ):
+        self.replay_buffer.store_batch(
+            states, actions, rewards, next_states, dones, env_ids=env_ids
+        )
 
     # --- Training ---
 
@@ -325,7 +375,9 @@ class DDQNAgent:
         return (
             torch.from_numpy(batch["obs"]).to(self.device),
             torch.from_numpy(batch["next_obs"]).to(self.device),
-            torch.from_numpy(batch["acts"].astype(np.int64, copy=False)).to(self.device),
+            torch.from_numpy(batch["acts"].astype(np.int64, copy=False)).to(
+                self.device
+            ),
             torch.from_numpy(batch["rews"]).to(self.device),
             torch.from_numpy(batch["done"]).to(self.device),
             torch.from_numpy(batch["weights"]).to(self.device),
@@ -336,10 +388,16 @@ class DDQNAgent:
             current_q = self.online_net(obs_t).gather(1, acts_t.unsqueeze(1)).squeeze(1)
             with torch.no_grad():
                 best_acts = self.online_net(next_obs_t).argmax(dim=1)
-                next_q = self.target_net(next_obs_t).gather(1, best_acts.unsqueeze(1)).squeeze(1)
+                next_q = (
+                    self.target_net(next_obs_t)
+                    .gather(1, best_acts.unsqueeze(1))
+                    .squeeze(1)
+                )
                 target_q = rews_t + self._gamma_n * next_q * (1.0 - dones_t)
             td_errors = current_q - target_q
-            loss = (weights_t * F.huber_loss(current_q, target_q, reduction='none')).mean()
+            loss = (
+                weights_t * F.huber_loss(current_q, target_q, reduction="none")
+            ).mean()
         return loss, td_errors
 
     def _apply_gradient_step(self, loss: torch.Tensor) -> None:
@@ -355,7 +413,9 @@ class DDQNAgent:
 
         if self._use_scaler:
             self._scaler.unscale_(self.optimizer)
-        nn.utils.clip_grad_norm_(self.online_net.parameters(), max_norm=self.max_grad_norm)
+        nn.utils.clip_grad_norm_(
+            self.online_net.parameters(), max_norm=self.max_grad_norm
+        )
         if self._use_scaler:
             self._scaler.step(self.optimizer)
             self._scaler.update()
@@ -377,8 +437,12 @@ class DDQNAgent:
             self._unwrap_module(self.target_net).reset_noise()
 
         batch = self.replay_buffer.sample_batch()
-        obs_t, next_obs_t, acts_t, rews_t, dones_t, weights_t = self._batch_to_tensors(batch)
-        loss, td_errors = self._compute_loss(obs_t, acts_t, next_obs_t, rews_t, dones_t, weights_t)
+        obs_t, next_obs_t, acts_t, rews_t, dones_t, weights_t = self._batch_to_tensors(
+            batch
+        )
+        loss, td_errors = self._compute_loss(
+            obs_t, acts_t, next_obs_t, rews_t, dones_t, weights_t
+        )
         self._apply_gradient_step(loss)
 
         new_priorities = td_errors.detach().abs().cpu().numpy()
@@ -408,7 +472,9 @@ class DDQNAgent:
     def sync_inference_net(self):
         with self.inference_lock:
             online_state = self._unwrap_module(self.online_net).state_dict()
-            self._load_state_dict_flexible(self.inference_net, online_state, "inference_sync")
+            self._load_state_dict_flexible(
+                self.inference_net, online_state, "inference_sync"
+            )
 
     def export_inference_state(self, refresh: bool = False) -> Dict[str, Any]:
         if refresh:
@@ -428,7 +494,9 @@ class DDQNAgent:
             raise KeyError("Inference state payload is missing 'inference_net'.")
 
         with self.inference_lock:
-            self._load_state_dict_flexible(self.inference_net, inference_state, "inference_net")
+            self._load_state_dict_flexible(
+                self.inference_net, inference_state, "inference_net"
+            )
 
         if "train_steps" in state:
             self.train_steps = int(state["train_steps"])
@@ -440,7 +508,9 @@ class DDQNAgent:
         # on first call, or the last value restored from a checkpoint.
         if env_steps > 0:
             fraction = min(1.0, env_steps / max(1, self.epsilon_decay_steps))
-            self.epsilon = self.epsilon_start + fraction * (self.epsilon_end - self.epsilon_start)
+            self.epsilon = self.epsilon_start + fraction * (
+                self.epsilon_end - self.epsilon_start
+            )
         return self.epsilon
 
     def finalize_profiling(self) -> None:
@@ -481,18 +551,24 @@ class DDQNAgent:
                 self.use_muon = ckpt_use_muon
                 lr = get_optimizer_lr(self.optimizer)
                 self.optimizer = build_optimizer(
-                    self.online_net, lr, self.device.type, self.use_muon,
+                    self.online_net,
+                    lr,
+                    self.device.type,
+                    self.use_muon,
                 )
                 self._reset_amp_state()
 
         self._load_checkpoint_architecture(checkpoint)
-        self._load_state_dict_flexible(self.online_net, checkpoint["online_net"], "online_net")
-        self._load_state_dict_flexible(self.target_net, checkpoint["target_net"], "target_net")
+        self._load_state_dict_flexible(
+            self.online_net, checkpoint["online_net"], "online_net"
+        )
+        self._load_state_dict_flexible(
+            self.target_net, checkpoint["target_net"], "target_net"
+        )
         self.sync_inference_net()
         try:
             self.optimizer.load_state_dict(checkpoint["optimizer"])
         except Exception as exc:
-            import logging
             logging.warning(
                 f"Failed to load optimizer state from checkpoint: {exc}. "
                 "Continuing with freshly initialized optimizer."
@@ -502,7 +578,14 @@ class DDQNAgent:
 
     def _load_checkpoint_architecture(self, checkpoint: Dict[str, Any]) -> None:
         online_base = self._unwrap_module(self.online_net)
-        required_keys = ("hidden_layers", "grid_size", "grid_rows", "grid_cols", "dueling", "noisy")
+        required_keys = (
+            "hidden_layers",
+            "grid_size",
+            "grid_rows",
+            "grid_cols",
+            "dueling",
+            "noisy",
+        )
         missing_keys = [key for key in required_keys if key not in checkpoint]
         if missing_keys:
             raise KeyError(
@@ -567,17 +650,37 @@ class DDQNAgent:
         self.config.mlp_depth = ckpt_mlp_depth
 
     def _rebuild_networks(
-        self, grid_size, grid_channels, hidden_layers, grid_rows, grid_cols, dueling, noisy, mlp_depth,
+        self,
+        grid_size,
+        grid_channels,
+        hidden_layers,
+        grid_rows,
+        grid_cols,
+        dueling,
+        noisy,
+        mlp_depth,
     ):
         def _make():
             return QNetwork(
-                self.obs_dim, self.n_actions, grid_size, hidden_layers,
-                grid_channels, grid_rows, grid_cols, dueling, noisy=noisy, mlp_depth=mlp_depth,
+                self.obs_dim,
+                self.n_actions,
+                grid_size,
+                hidden_layers,
+                grid_channels,
+                grid_rows,
+                grid_cols,
+                dueling,
+                noisy=noisy,
+                mlp_depth=mlp_depth,
             ).to(self.device)
 
-        self.online_net, self.target_net, self.inference_net = self._instantiate_networks(_make)
+        self.online_net, self.target_net, self.inference_net = (
+            self._instantiate_networks(_make)
+        )
         lr = get_optimizer_lr(self.optimizer)
-        self.optimizer = build_optimizer(self.online_net, lr, self.device.type, self.use_muon)
+        self.optimizer = build_optimizer(
+            self.online_net, lr, self.device.type, self.use_muon
+        )
 
     # --- State Dict Utilities ---
 
@@ -591,19 +694,23 @@ class DDQNAgent:
         return module
 
     @staticmethod
-    def _strip_known_prefixes(state_dict: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+    def _strip_known_prefixes(
+        state_dict: Dict[str, torch.Tensor],
+    ) -> Dict[str, torch.Tensor]:
         out = dict(state_dict)
         changed = True
         while changed and out:
             changed = False
             for prefix in ("module.", "_orig_mod."):
                 if all(key.startswith(prefix) for key in out):
-                    out = {key[len(prefix):]: value for key, value in out.items()}
+                    out = {key[len(prefix) :]: value for key, value in out.items()}
                     changed = True
         return out
 
     @staticmethod
-    def _infer_mlp_depth_from_state_dict(state_dict: Optional[Dict[str, torch.Tensor]]) -> int:
+    def _infer_mlp_depth_from_state_dict(
+        state_dict: Optional[Dict[str, torch.Tensor]],
+    ) -> int:
         if not state_dict:
             return 2
 
@@ -630,13 +737,19 @@ class DDQNAgent:
         return 2
 
     @staticmethod
-    def _state_dict_to_cpu(state_dict: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+    def _state_dict_to_cpu(
+        state_dict: Dict[str, torch.Tensor],
+    ) -> Dict[str, torch.Tensor]:
         return {key: value.detach().cpu().clone() for key, value in state_dict.items()}
 
-    def _load_state_dict_flexible(self, module: nn.Module, state_dict: Dict[str, torch.Tensor], name: str) -> None:
+    def _load_state_dict_flexible(
+        self, module: nn.Module, state_dict: Dict[str, torch.Tensor], name: str
+    ) -> None:
         base_module = self._unwrap_module(module)
         normalized_state = self._strip_known_prefixes(state_dict)
         try:
             base_module.load_state_dict(normalized_state, strict=True)
         except RuntimeError as exc:
-            raise RuntimeError(f"Failed to load {name} state dict across known key formats: {exc}")
+            raise RuntimeError(
+                f"Failed to load {name} state dict across known key formats: {exc}"
+            )
