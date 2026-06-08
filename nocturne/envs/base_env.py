@@ -77,8 +77,8 @@ class BaseEnv(Env):
                                 for _ in range(self._pool_size)]
 
         obs_dict, _ = self.reset()
-        self.observation_space = Box(low=-np.infty,
-                                     high=np.infty,
+        self.observation_space = Box(low=-np.inf,
+                                     high=np.inf,
                                      shape=(obs_dict[list(
                                          obs_dict.keys())[0]].shape[0], ))
         if self.cfg['discretize_actions']:
