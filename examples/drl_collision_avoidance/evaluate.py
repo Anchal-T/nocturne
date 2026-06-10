@@ -103,6 +103,9 @@ def evaluate(checkpoint_path: str, scenario_path: Optional[str] = None,
 
     dt = cfg.get('dt', 0.1)
     start_time = cfg.get('scenario', {}).get('start_time', 0)
+    # BaseEnv.reset() runs 10 expert-control context steps before handing
+    # control to the agent, advancing the simulation clock by 10 timesteps.
+    context_steps = 10
 
     results = {
         'rewards': [], 'lengths': [],
@@ -139,7 +142,8 @@ def evaluate(checkpoint_path: str, scenario_path: Optional[str] = None,
             if ego_veh is not None:
                 speeds.append(float(ego_veh.speed))
                 try:
-                    exp_pos = env.base_env.scenario.expert_position(ego_veh, start_time + t)
+                    exp_pos = env.base_env.scenario.expert_position(
+                        ego_veh, start_time + context_steps + t)
                     trajectory_pairs.append((
                         (ego_veh.position.x, ego_veh.position.y),
                         (exp_pos.x, exp_pos.y),
