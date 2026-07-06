@@ -1,0 +1,40 @@
+{
+  "pipeline": "PaperOrchestra content-refinement-agent (adapted: pre-results draft, no workspace/, no LaTeX toolchain in sandbox)",
+  "paper": "paper/main.tex",
+  "notes": [
+    "Gate A (AI failure modes): no fabricated numbers present -- all empirical values are explicit \\results{} placeholders; no confirmed failures.",
+    "Gate B (claim-evidence): skipped -- experimental_log.md does not exist yet; the draft contains zero unsourced numeric result claims by construction.",
+    "Iron rules honored: no new numbers introduced, no fabricated experiments, no defensive limitation-listing added."
+  ],
+  "iterations": [
+    {
+      "iter": 1,
+      "review": "paper/refinement/iter1/review.json",
+      "prev_overall": null,
+      "curr_overall": 61.3,
+      "decision": "ACCEPT (initial review + revision applied)",
+      "addressed_weaknesses": [
+        "Unsupported crash-statistics claim: replaced with a definitional argument plus citations to the occlusion-planning literature already in the bibliography (orzechowski2018tackling, bouton2018scalable); no new unverified citations introduced.",
+        "POMDP notation unused: Section 3 now formally defines the observation function O as ray-cast visibility filtering composed with feature encoding, and connects Omega to the 613-dim vector of Section 4.1.",
+        "Occlusion features framed as '(optional)': reframed as core to the full model; the no-occlusion ablation is now precisely defined (removes the four summaries, keeps visibility filtering).",
+        "Unreferenced figures: fig:pareto, fig:density, and fig:curves are now all referenced from running prose.",
+        "Table inconsistency: ablation row '+ occlusion features' corrected to '- occlusion features', consistent with the main table's 'Ours (no occlusion)'.",
+        "VRU acronym: introduced at first use in Section 3.",
+        "Repetitive phrasing: 'genuine partial observability' now appears zero times (was 3); abstract tightened and thesis foregrounded.",
+        "Muon novelty inflation: novelty claim removed; Muon repositioned as an ablated optimizer choice.",
+        "Missing roadmap: added at end of Section 1."
+      ],
+      "integrated_answers": [
+        "Q1 (full model definition): resolved -- full model includes occlusion features everywhere.",
+        "Q2 (O vs ray-cast filter): resolved formally in Section 3.",
+        "Q3 (BC observation parity): resolved -- baselines paragraph states BC sees occlusion-risk features too."
+      ],
+      "skipped_reviewer_requests": [],
+      "da_critical": false
+    }
+  ],
+  "halt": {
+    "reason": "single-iteration run: remaining rubric deductions (scientific_depth, evidence_presentation) are gated on experimental results that do not exist yet; further presentation-only iterations would plateau",
+    "recommendation": "re-run full refinement loop (3 iterations, compiled PDF scoring) after results land and \\results{} placeholders are filled"
+  }
+}

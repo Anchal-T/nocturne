@@ -1,0 +1,18 @@
+{
+  "stage": "post-revision re-score (adapted, pre-results)",
+  "axis_scores": {
+    "scientific_depth": {
+      "score": 66,
+      "justification": "Unsupported crash-statistics claim removed and replaced with a cited, definitional motivation; POMDP formalism now connects O to the ray-cast visibility filter, closing the formulation gap. Remaining deductions are results-gated (claims cannot be verified until numbers exist), not presentation flaws."
+    },
+    "technical_execution": { "score": 72, "justification": "Occlusion features are now core with a precisely defined ablation contrast (summaries removed, filtering kept), which sharpens the experimental design. Muon repositioned honestly as an ablated choice." },
+    "logical_flow": { "score": 70, "justification": "Roadmap added; all figures now referenced from prose; table definitions consistent. Cap lifted." },
+    "writing_clarity": { "score": 71, "justification": "Verbatim repetition eliminated; abstract tightened; VRU introduced before use. Cap lifted." },
+    "evidence_presentation": { "score": 63, "justification": "No unreferenced figures remain (cap lifted). Score remains results-gated: tables and figures are placeholders by design." },
+    "academic_style": { "score": 72, "justification": "Tone unchanged and professional; the reframing of the occlusion ablation reads as confident rather than defensive." }
+  },
+  "overall_score": 68.5,
+  "decision_band": "Minor Revision",
+  "delta_vs_iter0": "+7.2 (61.3 -> 68.5), ACCEPT",
+  "note": "overall = 0.20*66 + 0.20*72 + 0.15*70 + 0.15*71 + 0.20*63 + 0.10*72 = 68.5. Further gains are gated on filling \\results{} placeholders with real data."
+}

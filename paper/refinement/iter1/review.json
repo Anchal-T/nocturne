@@ -1,0 +1,51 @@
+{
+  "axis_scores": {
+    "scientific_depth": {
+      "score": 58,
+      "justification": "The formulation is sound and grounded in real log-replay, but the introduction asserts 'Human crash statistics consistently implicate such occluded and sensor-limited situations' with no citation, an unsupported empirical leap. The POMDP tuple (S, A, P, r, gamma, Omega, O) is introduced in Section 3 but Omega and O are never used again; the observation design of Section 4.1 is never formally connected to the observation function. Capped at 60 (unsupported claims cap) until results arrive."
+    },
+    "technical_execution": {
+      "score": 68,
+      "justification": "Method details are unusually concrete (grid extents, weights, TTZ sentinel values, reward coefficients, replay-ratio scheduler). However the paper's central contribution -- occlusion-risk features -- is presented in Section 4.1 as an '(optional)' feature flag, which undercuts the framing of the entire paper. The Muon novelty claim ('to our knowledge its use in value-based RL for driving is novel') is a weak novelty assertion for a component that is orthogonal to the paper's thesis."
+    },
+    "logical_flow": {
+      "score": 57,
+      "justification": "Sections mostly flow well, but Figure 5 (learning curves, fig:curves) is never referenced from any prose; Figures 3 (fig:pareto) and 4 (fig:density) are only referenced from placeholder blocks, not from the running text. The introduction lacks a roadmap. The ablation table lists '+ occlusion features' while the main table lists 'Ours (no occlusion)', implying contradictory definitions of the full model. Capped at 60 (sections don't reference the figures they need)."
+    },
+    "writing_clarity": {
+      "score": 62,
+      "justification": "Prose is generally precise, but 'genuine partial observability' is repeated verbatim three times (abstract, intro, conclusion), and the same rhetorical move ('precisely the states in which collisions occur' / 'exactly the regime of near-collision states') appears twice. The acronym VRU is used in Section 5 metrics and Table 1 without ever being introduced. The abstract at ~250 words enumerates every system component and buries the thesis."
+    },
+    "evidence_presentation": {
+      "score": 55,
+      "justification": "Placeholders are clearly delimited and every table/figure has a defined analysis plan, which is good discipline for a pre-results draft. But fig:curves is entirely unreferenced from the text, triggering the hard cap of 55. Table 1 and the ablation table disagree about whether occlusion features are part of the full model."
+    },
+    "academic_style": {
+      "score": 70,
+      "justification": "Tone is professional and consistent; no defensive language detected. The Limitations section is substantive rather than perfunctory. Terminology (TTZ, occupancy grid, barrier) is used consistently after introduction."
+    }
+  },
+  "strengths": [
+    "Sharp, well-motivated problem framing around occlusion and sensor limits, aligned with the observation and reward design.",
+    "Unusually concrete method section with exact coefficients, grid geometry, and system parameters drawn from the implementation.",
+    "The safety-efficiency Pareto analysis and stratified (density x occlusion) evaluation protocol are well designed and pre-registered before results.",
+    "Statistical protocol (multi-seed, bootstrap CIs, Welch/Mann-Whitney with Holm-Bonferroni) exceeds the field's norm."
+  ],
+  "weaknesses": [
+    "Unsupported empirical claim about crash statistics in the introduction (no citation).",
+    "POMDP notation (Omega, O) introduced but never used; formulation and observation section are not formally connected.",
+    "Occlusion features -- the paper's headline contribution -- are described as '(optional)', contradicting the title and abstract framing.",
+    "fig:curves never referenced in prose; fig:pareto and fig:density not referenced from running text.",
+    "Ablation table row '+ occlusion features' contradicts main table row 'Ours (no occlusion)' about the definition of the full model.",
+    "VRU acronym used without introduction; 'genuine partial observability' repeated verbatim three times; abstract overlong."
+  ],
+  "questions": [
+    "Is the full model defined with or without occlusion features? The two results tables disagree.",
+    "How is the observation function O of the POMDP formally related to the ray-cast visibility filter of Section 4.1?",
+    "Does the BC baseline see occlusion features too, so that the comparison isolates the learning signal?"
+  ],
+  "decision": "Major Revision",
+  "decision_band": "Major Revision",
+  "overall_score": 61.3,
+  "note": "Adapted pre-results review: axes involving empirical evidence are scored on the declared analysis plan, not on numbers, which do not yet exist. Weighted overall = 0.20*58 + 0.20*68 + 0.15*57 + 0.15*62 + 0.20*55 + 0.10*70 = 61.3."
+}

@@ -54,30 +54,26 @@ in Partially Observable Real-World Driving Scenarios}}
 
 % =========================================================================
 \begin{abstract}
-Collisions in real traffic are disproportionately caused by what a driver
-\emph{cannot} see: vehicles hidden behind other vehicles, pedestrians
-emerging from occluded crossings, and conflicts that develop outside a
-limited sensor field of view. Yet most reinforcement learning (RL) results
-for driving assume fully observed, synthetic traffic. We study
-\emph{risk-aware collision avoidance under genuine partial observability},
-training deep RL agents directly on real-world driving scenarios from the
-Waymo Open Motion Dataset replayed in the Nocturne simulator, where a
-ray-cast visibility model restricts perception to what a physical sensor
-could see -- hidden vehicles remain hidden. Our agent consumes an
-ego-centric multi-channel occupancy grid, analytic time-to-zero (TTZ)
-conflict features, and explicit \emph{occlusion-risk summaries} (occluded
-view fraction, blocker proximity, and occlusion pressure) that let the
-policy reason about unseen hazards; a TTZ-barrier shaped reward provides a
-dense safety signal that penalizes risky closing behavior before a collision
-becomes unavoidable. The policy is a double dueling DQN with noisy
-exploration, $n$-step returns, prioritized replay, and the Muon optimizer,
-trained at scale with an asynchronous actor--learner architecture that
-scales from a single workstation to a Ray cluster. We characterize the
-safety--efficiency trade-off induced by the collision penalty, showing that
-goal-reaching rate and collision rate can be traded along a Pareto frontier
-controlled by a single reward coefficient, and we stratify performance by
-traffic density and occlusion severity. Across \results{K} seeds on held-out
-Waymo scenarios, our approach achieves a goal-reaching rate of
+Some of the hardest collisions to avoid are those a driver cannot yet see
+coming: vehicles hidden behind blockers, pedestrians emerging from occluded
+crossings, conflicts developing outside a limited field of view. Most
+reinforcement learning (RL) results for driving assume the opposite --
+fully observed, synthetic traffic. We study risk-aware collision avoidance
+under partial observability, training deep RL agents on real-world driving
+scenarios from the Waymo Open Motion Dataset replayed in the Nocturne
+simulator, whose ray-cast visibility model restricts perception to what a
+physical sensor could see: hidden vehicles remain hidden. Our agent
+observes an ego-centric occupancy grid and analytic time-to-zero (TTZ)
+conflict features, both filtered to visible objects, together with
+\emph{occlusion-risk summaries} that expose how much of the view cone is
+blocked and by what; a TTZ-barrier shaped reward penalizes risky closing
+behavior before a collision becomes unavoidable. A double dueling DQN is
+trained at scale with an asynchronous actor--learner architecture that runs
+unchanged from a single workstation to a Ray cluster. Beyond aggregate
+rates, we characterize the safety--efficiency trade-off induced by the
+collision penalty as an explicit Pareto frontier, and stratify performance
+by traffic density and occlusion severity. Across \results{K} seeds on
+held-out Waymo scenarios, our approach achieves a goal-reaching rate of
 \results{XX.X $\pm$ X.X\%} with a collision rate of
 \results{X.X $\pm$ X.X\%}, compared to \results{XX.X\% / X.X\%} for a
 behavior-cloning baseline, with differences significant at
@@ -91,15 +87,17 @@ behavior-cloning baseline, with differences significant at
 Autonomous vehicles must make safety-critical decisions with incomplete
 information. A parked truck hides a crossing pedestrian; a vehicle in the
 adjacent lane masks a merging car; a limited field of view leaves a
-fast-approaching agent undetected until seconds before conflict. Human crash
-statistics consistently implicate such \emph{occluded} and
-\emph{sensor-limited} situations, yet the majority of reinforcement learning
-(RL) results for driving are obtained under full observability in synthetic
-traffic, where every agent's state is available to the policy and the hardest
-part of the problem is assumed away.
+fast-approaching agent undetected until seconds before conflict. In such
+\emph{occluded} and \emph{sensor-limited} situations the danger is by
+definition not yet visible when the avoiding maneuver must begin -- which is
+precisely why occlusion is treated as a first-class hazard in the planning
+literature~\citep{orzechowski2018tackling, bouton2018scalable}. Yet the
+majority of reinforcement learning (RL) results for driving are obtained
+under full observability in synthetic traffic, where every agent's state is
+available to the policy and the hardest part of the problem is assumed away.
 
-This paper studies collision avoidance as a problem of \emph{decision-making
-under genuine partial observability}. We train and evaluate deep RL agents
+This paper studies collision avoidance as a problem of decision-making
+under partial observability. We train and evaluate deep RL agents
 on real-world driving scenarios from the Waymo Open Motion
 Dataset~\citep{ettinger2021waymo} replayed in the Nocturne
 simulator~\citep{vinitsky2022nocturne}, whose C++ ray-casting engine
@@ -163,6 +161,15 @@ against behavior cloning and ablated variants of our agent.
 \results{Summarize headline numbers here: goal rate and collision rate with
 mean $\pm$ std, the shape of the penalty Pareto frontier, the
 collision-vs-density trend, and the most important ablation finding.}
+
+The remainder of the paper is organized as follows. Section~\ref{sec:related}
+positions our work relative to safe RL, occlusion-aware planning, and
+scalable RL systems. Section~\ref{sec:problem} formalizes the task as a
+POMDP, and Section~\ref{sec:method} details the observation, reward, agent,
+and training system. Section~\ref{sec:setup} defines the metrics,
+statistical protocol, and baselines; Section~\ref{sec:results} presents the
+main comparison, the trade-off and stratified analyses, ablations, and
+interpretability probes.
 
 % =========================================================================
 \section{Related Work}
@@ -228,8 +235,9 @@ exploration~\citep{fortunato2017noisy}, and multi-step
 returns~\citep{hessel2018rainbow}. We additionally adopt the Muon
 optimizer~\citep{jordan2024muon}, which orthogonalizes momentum updates for
 hidden weight matrices via Newton--Schulz iteration and has shown strong
-results in large-scale supervised training; to our knowledge its use in
-value-based RL for driving is novel.
+results in large-scale supervised training; we treat it as a drop-in
+optimizer choice and ablate it against AdamW rather than claiming it as a
+contribution.
 
 \paragraph{Scalable RL systems.}
 High-throughput RL architectures decouple acting from learning:
@@ -247,13 +255,23 @@ on top for multi-node scaling.
 We consider an episodic, partially observed Markov decision process
 $(\mathcal{S}, \mathcal{A}, P, r, \gamma, \Omega, O)$. Each episode
 instantiates one scenario from the Waymo Open Motion Dataset replayed in
-Nocturne at $\Delta t = 0.1$\,s. A single ego vehicle is controlled by the
-policy; all other road users (vehicles, pedestrians, cyclists) replay their
-logged trajectories. The ego receives the goal position
-$g \in \R^2$ recorded at the end of the human trajectory and must reach it
-within a tolerance while avoiding collisions with other objects and road
-edges. Episodes terminate on goal achievement, collision, or a horizon of
-$T_{\max} = 80$ steps (8 seconds).
+Nocturne at $\Delta t = 0.1$\,s. The state $s \in \mathcal{S}$ comprises the
+full simulator state -- poses and velocities of all road users plus static
+map geometry. A single ego vehicle is controlled by the policy; all other
+road users -- vehicles, pedestrians, and cyclists, the latter two referred
+to jointly as vulnerable road users (VRUs) -- replay their logged
+trajectories, so the transition kernel $P$ is deterministic given the ego
+action. The observation function $O$ is \emph{not} the identity: it first
+applies Nocturne's ray-cast visibility model, which removes every object
+outside the ego's view cone or occluded behind a nearer object, and then
+encodes the surviving objects into the feature vector
+$o \in \Omega \subset \R^{613}$ described in Section~\ref{sec:observation}.
+Partial observability in our setting is therefore physical (sensor-like
+occlusion), not an artifact of feature compression. The ego receives the
+goal position $g \in \R^2$ recorded at the end of the human trajectory and
+must reach it within a tolerance while avoiding collisions with other
+objects and road edges. Episodes terminate on goal achievement, collision,
+or a horizon of $T_{\max} = 80$ steps (8 seconds).
 
 The action space is a discrete product of throttle and steering levels,
 $\mathcal{A} = \{-1.0, 0.0, 2.0\} \times \{-0.7, -0.2, 0.0, 0.2, 0.7\}$,
@@ -309,18 +327,24 @@ the minimum TTZ over vehicles, the minimum over pedestrians and cyclists
 (both clipped to $20$\,s), and their difference -- a compact, analytic
 summary of the most imminent conflict of each class.
 
-\paragraph{Occlusion features (optional).}
-When enabled, a single call to Nocturne's C++ ray-casting engine returns the
-set of visible objects within the view cone. From the angular intervals
-subtended by visible blockers we compute four summary statistics: the
-occluded fraction of the view cone, the normalized distance to the nearest
-blocker, blocker density, and an ``occlusion pressure'' term (occluded
-fraction weighted by blocker proximity). The same visibility set also
-filters the occupancy grid and TTZ features so that the agent only perceives
-objects a real sensor could see.
+\paragraph{Occlusion-risk features.}
+A single call per step to Nocturne's C++ ray-casting engine returns the set
+of visible objects within the view cone. This visibility set serves two
+roles. First, it filters the occupancy grid and TTZ features above, so the
+agent only perceives objects a real sensor could see. Second, from the
+angular intervals subtended by visible blockers we compute four summary
+statistics that quantify what the agent \emph{cannot} see: the occluded
+fraction of the view cone, the normalized distance to the nearest blocker,
+blocker density, and an ``occlusion pressure'' term (occluded fraction
+weighted by blocker proximity). These features are part of the full model;
+the \emph{no-occlusion} ablation in Section~\ref{sec:results} removes the
+four summary statistics while keeping the visibility filtering, isolating
+the value of explicitly representing occlusion risk from the (fixed) effect
+of sensor-limited perception.
 
-The full observation has dimension $3 \times 20 \times 10 + 4 + 2 + 3 = 609$
-(613 with occlusion features).
+The full observation has dimension
+$3 \times 20 \times 10 + 4 + 2 + 3 + 4 = 613$ (609 for the no-occlusion
+ablation).
 
 \begin{figure}[t]
   \centering
@@ -495,9 +519,10 @@ targets.
 \paragraph{Baselines.}
 We compare against: (a) \emph{behavior cloning} (BC): a supervised policy
 trained on logged expert state--action pairs with the same observation
-encoding and action discretization as our agent, giving a strong
-imitation baseline that shares every architectural choice except the
-learning signal; (b) a \emph{vanilla DQN} without dueling, noisy layers,
+encoding -- including the occlusion-risk features -- and the same action
+discretization as our agent, giving a strong imitation baseline that
+shares every architectural choice except the learning signal;
+(b) a \emph{vanilla DQN} without dueling, noisy layers,
 PER, or $n$-step returns; (c) our agent with \emph{AdamW only} in place of
 Muon; and (d) our agent \emph{without TTZ features and TTZ shaping}.
 \results{Adjust the baseline list to match the runs actually executed
@@ -562,7 +587,7 @@ progress; too large, and it learns overly conservative behavior that fails
 to reach goals. We sweep
 $R_c \in \results{\{25, 50, 100, 200, 400\}}$ with all other
 coefficients fixed and plot the resulting (goal rate, collision rate)
-operating points.
+operating points in Figure~\ref{fig:pareto}.
 
 \begin{figure}[t]
   \centering
@@ -587,6 +612,13 @@ safety-critical deployment.}
 
 \subsection{Collision Rate vs.\ Traffic Density and Occlusion}
 \label{sec:density}
+
+Figure~\ref{fig:density} stratifies collision rate by the two axes defined
+in Section~\ref{sec:setup}: the number of road users in the scenario and
+the mean occluded view fraction over the episode. Figure~\ref{fig:curves}
+complements the held-out analysis with learning curves on the training
+distribution, showing how goal rate and collision rate co-evolve during
+training for each method.
 
 \begin{figure}[t]
   \centering
@@ -636,7 +668,7 @@ $-$ noisy layers              & \results{--} & \results{--} & \results{--} \\
 $-$ prioritized replay        & \results{--} & \results{--} & \results{--} \\
 $-$ $n$-step ($n{=}1$)        & \results{--} & \results{--} & \results{--} \\
 $-$ velocity channels         & \results{--} & \results{--} & \results{--} \\
-$+$ occlusion features        & \results{--} & \results{--} & \results{--} \\
+$-$ occlusion features        & \results{--} & \results{--} & \results{--} \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -752,7 +784,8 @@ perception-driven stacks is out of scope.
 \label{sec:conclusion}
 
 We presented a risk-aware deep RL system for collision avoidance under
-genuine partial observability, trained on real-world driving logs: an
+physically grounded partial observability, trained on real-world driving
+logs: an
 observation design that makes occlusion risk explicit through ray-cast
 visibility filtering and dedicated occlusion-risk summaries, a TTZ-barrier
 shaped reward that provides a dense safety gradient before conflicts become
