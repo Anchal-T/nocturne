@@ -31,7 +31,6 @@
 
 % --- Placeholder macro for results to be filled in later -----------------
 \newcommand{\results}[1]{\textcolor{red}{[\textbf{RESULT}: #1]}}
-\newcommand{\todofig}[1]{\textcolor{red}{[\textbf{FIGURE}: #1]}}
 
 % --- Notation helpers -----------------------------------------------------
 \newcommand{\E}{\mathbb{E}}
@@ -349,18 +348,16 @@ The full observation has dimension
 $3 \times 20 \times 10 + 4 + 2 + 3 + 4 = 613$ (609 for the no-occlusion
 ablation).
 
-\begin{figure}[t]
+\begin{figure*}[t]
   \centering
-  \fbox{\parbox{0.9\linewidth}{\centering\vspace{3.5cm}
-  \todofig{System diagram: (left) ego-centric occupancy grid with the three
-  channels and TTZ/occlusion feature extraction; (center) dueling noisy
-  Q-network; (right) asynchronous actor--learner architecture with shared
-  memory, batched inference, transition queue, and weight sync.}
-  \vspace{3.5cm}}}
-  \caption{Overview of the observation encoding, agent architecture, and
-  asynchronous training system.}
+  \includegraphics[width=0.98\textwidth]{figures/system_overview.png}
+  \caption{Overview of the implemented observation and learning pipeline.
+  Ray-cast visible actors and map context form occupancy, TTZ, and
+  occlusion-risk features; the 613-D observation is processed by a dueling
+  noisy DDQN, and experience from 48 synchronous environments is replayed
+  with prioritized sampling and multi-step targets.}
   \label{fig:architecture}
-\end{figure}
+\end{figure*}
 
 \subsection{Reward}
 \label{sec:reward}
@@ -620,6 +617,17 @@ trained checkpoint has been evaluated, these numbers support a descriptive
 operating-point analysis but not a claim of superiority over BC, another RL
 method, or an ablation.
 
+\begin{figure*}[t]
+  \centering
+  \includegraphics[width=0.96\textwidth]{figures/evaluation_summary.png}
+  \caption{Held-out results for the evaluated DDQN checkpoint. Left: goal
+  and collision event rates across 1{,}500 episodes; seven episodes contain
+  both event labels. Center and right: episode-level ADE and mean absolute
+  jerk distributions over the 1{,}089 valid multi-step traces. Dashed lines
+  mark means; missing one-step traces are not imputed.}
+  \label{fig:evaluation-summary}
+\end{figure*}
+
 \subsection{The Safety--Efficiency Trade-off}
 \label{sec:tradeoff}
 
@@ -629,22 +637,9 @@ progress; too large, and it learns overly conservative behavior that fails
 to reach goals. We sweep
 $R_c \in \results{\{25, 50, 100, 200, 400\}}$ with all other
 coefficients fixed and plot the resulting (goal rate, collision rate)
-operating points in Figure~\ref{fig:pareto}.
-
-\begin{figure}[t]
-  \centering
-  \fbox{\parbox{0.9\linewidth}{\centering\vspace{2.8cm}
-  \todofig{Pareto frontier: goal rate (x-axis) vs.\ collision rate (y-axis),
-  one point per $R_c$ value with seed error bars; annotate each point with
-  its $R_c$. Include BC as a reference point. Optionally a second panel with
-  the TTZ-barrier scale $c_z$ swept the same way.}
-  \vspace{2.8cm}}}
-  \caption{Safety--efficiency trade-off traced by the collision penalty
-  $R_c$. Each point is one operating regime; the frontier makes the
-  compromise between goal-reaching and collision acceptance explicit and
-  tunable.}
-  \label{fig:pareto}
-\end{figure}
+operating points once those runs are complete. No Pareto curve is drawn from
+the single available operating point, because doing so would fabricate a
+trade-off trend that has not been measured.
 
 \results{Analysis paragraph: shape of the frontier (is it steep near the
 low-collision end, i.e.\ cheap safety gains?), the knee point, whether the
@@ -655,28 +650,13 @@ safety-critical deployment.}
 \subsection{Collision Rate vs.\ Traffic Density and Occlusion}
 \label{sec:density}
 
-Figure~\ref{fig:density} stratifies collision rate by the two axes defined
-in Section~\ref{sec:setup}: the number of road users in the scenario and
-the mean occluded view fraction over the episode. Figure~\ref{fig:curves}
-complements the held-out analysis with the available 1{,}000-episode moving
-average reward and exploration schedule from the completed DDQN run. Goal
-and collision rates were not emitted by the training logger and are therefore
-reported only for deterministic evaluation rather than reconstructed from
-reward.
-
-\begin{figure}[t]
-  \centering
-  \fbox{\parbox{0.9\linewidth}{\centering\vspace{2.8cm}
-  \todofig{Two panels. (a) Collision rate vs.\ number of agents in the
-  scenario (binned), one curve per method with seed error bars. (b)
-  Collision rate vs.\ occlusion-severity bin (low/medium/high mean occluded
-  view fraction), comparing Ours (full) against Ours (no occlusion) and
-  BC.}
-  \vspace{2.8cm}}}
-  \caption{Stratified safety analysis: degradation with traffic density
-  (a) and with occlusion severity (b).}
-  \label{fig:density}
-\end{figure}
+The available evaluation artifact does not contain per-episode agent counts
+or occlusion-severity values, so collision-vs-density and collision-vs-occlusion
+curves cannot be recovered faithfully. Figure~\ref{fig:curves} instead plots
+the available 1{,}000-episode moving-average reward and exploration schedule
+from the completed DDQN run. Goal and collision rates were not emitted by the
+training logger and are reported only for deterministic evaluation rather
+than reconstructed from reward.
 
 \results{Analysis: how quickly each method degrades as agent count grows
 (slope comparison); whether the gap between full and no-occlusion variants
@@ -686,14 +666,11 @@ partial observability; and any density $\times$ occlusion interaction.}
 
 \begin{figure}[t]
   \centering
-  \fbox{\parbox{0.9\linewidth}{\centering\vspace{2.8cm}
-\todofig{Plot the supplied DDQN training log: 1{,}000-episode average reward
-vs.\ environment steps on the left axis and epsilon vs.\ environment steps
-on the right axis. Mark replay-buffer saturation at episode 36{,}000 and the
-late-training interval (episodes 331{,}000--347{,}000). Do not plot training
-goal/collision curves because those fields were not logged.}
-  \vspace{2.8cm}}}
-  \caption{Learning curves on the training distribution.}
+  \includegraphics[width=\linewidth]{figures/training_curves.png}
+  \caption{Logged DDQN training dynamics. Each blue point is a reported
+  1{,}000-episode mean return and the dashed red curve is the epsilon-greedy
+  exploration schedule. Disconnected segments indicate intervals absent
+  from the supplied transcript and are intentionally not interpolated.}
   \label{fig:curves}
 \end{figure}
 
@@ -723,22 +700,10 @@ $-$ occlusion features        & \results{--} & \results{--} & \results{--} \\
 
 \subsection{Scaling and Throughput}
 
-\begin{figure}[t]
-  \centering
-  \fbox{\parbox{0.9\linewidth}{\centering\vspace{2.8cm}
-  \todofig{Throughput scaling: (a) env steps/s vs.\ number of workers on a
-  single node for sync vs.\ async modes; (b) steps/s vs.\ number of Ray
-  nodes. Optionally learner train-step lag over time to show the replay-ratio
-  scheduler holding.}
-  \vspace{2.8cm}}}
-  \caption{Training-system scaling.}
-  \label{fig:scaling}
-\end{figure}
-
-\results{Paragraph on system results: async vs.\ sync speedup on one node,
-near-linear (or not) scaling with Ray nodes, GPU utilization from batched
-inference, and the effect of the bounded-queue overload policy under
-learner stalls.}
+The supplied synchronous run improves from 228 to 283 environment frames
+per second and reports zero queue lag and dropped transitions. Because no
+matched asynchronous or multi-node runs were supplied, we do not draw a
+scaling curve or claim a parallel speedup.
 
 \subsection{Interpretability: What Does the Policy Attend To?}
 \label{sec:interpretability}
@@ -769,17 +734,10 @@ in its observation, and measure the induced speed reduction.
 occlusion-aware caution should slow smoothly as occlusion pressure rises;
 the no-occlusion ablation should show no response.}
 
-\begin{figure}[t]
-  \centering
-  \fbox{\parbox{0.9\linewidth}{\centering\vspace{2.8cm}
-  \todofig{Interpretability panel: (a) saliency mass per feature group in
-  free vs.\ near-conflict states; (b) brake-vs-accelerate advantage gap
-  vs.\ min-TTZ bin; (c) speed response to synthetically increased occlusion
-  pressure, full model vs.\ no-occlusion ablation.}
-  \vspace{2.8cm}}}
-  \caption{Probing the learned policy's risk reasoning.}
-  \label{fig:interpret}
-\end{figure}
+These probes require checkpoint-gradient and counterfactual rollout data
+that are not present in the supplied artifacts. We therefore retain them as
+a preregistered analysis protocol but do not display a synthetic
+interpretability figure.
 
 \subsection{Qualitative Behavior}
 
