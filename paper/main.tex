@@ -536,16 +536,42 @@ Muon; and (d) our agent \emph{without TTZ features and TTZ shaping}.
 (e.g., include PPO / RMAPPO if those runs complete).}
 
 \paragraph{Training details.}
-Unless stated otherwise we train with 96 parallel environments (48 workers
-$\times$ 2 environments), replay buffer of $10^6$, batch size 256, and the
-hyperparameters of Section~\ref{sec:agent}; the full configuration is in
-Appendix~\ref{app:hyper}. Training runs on \results{hardware description:
-GPU model, CPU core count, node count for Ray runs} for
-\results{N} environment steps (\results{wall-clock time}).
+The completed DDQN run used synchronous vectorization with four workers and
+12 environments per worker (48 parallel environments), a training frequency
+of 128, a replay buffer of $10^6$, batch size 256, and the hyperparameters of
+Section~\ref{sec:agent}; the full configuration is in
+Appendix~\ref{app:hyper}. The supplied log reaches episode 347{,}000,
+11{,}757{,}888 environment steps, and 22{,}955 learner updates at approximately
+283 environment frames per second. The EC2 instance type, wall-clock duration,
+and hardware inventory were not included in the supplied log.
 
 % =========================================================================
 \section{Results}
 \label{sec:results}
+
+\subsection{Training Dynamics}
+\label{sec:training-results}
+
+The console trace records a clear improvement in the exploration-policy
+return over the completed run. During episodes 1{,}000--10{,}000, the ten
+reported 1{,}000-episode window averages have mean $-49.69 \pm 8.91$. By
+episodes 338{,}000--347{,}000, after exploration reached its
+$\epsilon=0.05$ floor, the corresponding ten window averages have mean
+$77.03 \pm 9.62$, an increase of 126.73 reward units. The highest logged
+window is 102.21 at episode 332{,}000, while the final logged window is 74.09
+at episode 347{,}000. Across all 17 supplied late-training windows
+(episodes 331{,}000--347{,}000), the mean is $76.23 \pm 22.89$; the larger
+spread is driven mainly by the 4.22 window at episode 331{,}000.
+
+The run also demonstrates stable collection throughput: frames per second
+increase from 228 at episode 1{,}000 to 283 in the late-training trace, the
+replay buffer reaches its $10^6$ capacity by episode 36{,}000, and the final
+record contains 11{,}757{,}888 environment steps and 22{,}955 learner updates.
+The printed \texttt{q}, \texttt{lag}, and \texttt{dropped} fields are queueing
+telemetry rather than Q-value estimates; all remain zero in synchronous mode.
+These training returns were collected under epsilon-greedy exploration and
+are therefore not substitutes for deterministic held-out evaluation. The
+separate 1{,}500-episode evaluation below provides that test.
 
 \subsection{Main Comparison}
 
@@ -632,9 +658,11 @@ safety-critical deployment.}
 Figure~\ref{fig:density} stratifies collision rate by the two axes defined
 in Section~\ref{sec:setup}: the number of road users in the scenario and
 the mean occluded view fraction over the episode. Figure~\ref{fig:curves}
-complements the held-out analysis with learning curves on the training
-distribution, showing how goal rate and collision rate co-evolve during
-training for each method.
+complements the held-out analysis with the available 1{,}000-episode moving
+average reward and exploration schedule from the completed DDQN run. Goal
+and collision rates were not emitted by the training logger and are therefore
+reported only for deterministic evaluation rather than reconstructed from
+reward.
 
 \begin{figure}[t]
   \centering
@@ -659,9 +687,11 @@ partial observability; and any density $\times$ occlusion interaction.}
 \begin{figure}[t]
   \centering
   \fbox{\parbox{0.9\linewidth}{\centering\vspace{2.8cm}
-  \todofig{Training curves: goal rate and collision rate vs.\ environment
-  steps for all methods, with seed variance bands. Suggested source:
-  \texttt{scripts/paper\_plots}.}
+\todofig{Plot the supplied DDQN training log: 1{,}000-episode average reward
+vs.\ environment steps on the left axis and epsilon vs.\ environment steps
+on the right axis. Mark replay-buffer saturation at episode 36{,}000 and the
+late-training interval (episodes 331{,}000--347{,}000). Do not plot training
+goal/collision curves because those fields were not logged.}
   \vspace{2.8cm}}}
   \caption{Learning curves on the training distribution.}
   \label{fig:curves}
