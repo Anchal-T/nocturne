@@ -1,859 +1,156 @@
-% =========================================================================
-% Learning Collision Avoidance from Real-World Driving Logs with
-% Asynchronous Deep Reinforcement Learning
-%
-% ICLR/ICML-style single-column draft. To submit, swap the preamble for the
-% official conference style file (e.g. \usepackage{iclr2026_conference} or
-% \usepackage{icml2026}) -- the section structure is compatible with both.
-%
-% Results are NOT yet included. Every place that needs experimental numbers
-% is marked with \results{...} (rendered in red) so they are easy to find.
-% =========================================================================
-\documentclass{article}
+\documentclass[conference]{IEEEtran}
 
-\usepackage[utf8]{inputenc}
-\usepackage[T1]{fontenc}
-\usepackage{microtype}
-\usepackage{times}
-\usepackage[margin=1in]{geometry}
-\usepackage{amsmath,amssymb,amsfonts}
-\usepackage{mathtools}
+\usepackage{amsmath,amssymb}
 \usepackage{booktabs}
-\usepackage{multirow}
 \usepackage{graphicx}
-\usepackage{caption}
-\usepackage{subcaption}
-\usepackage{algorithm}
-\usepackage{algorithmic}
-\usepackage{xcolor}
-\usepackage[colorlinks=true,linkcolor=blue,citecolor=blue,urlcolor=blue]{hyperref}
-\usepackage[numbers,sort&compress]{natbib}
+\usepackage{url}
+\usepackage[hidelinks]{hyperref}
+\usepackage{cite}
 
-% --- Placeholder macro for results to be filled in later -----------------
-\newcommand{\results}[1]{\textcolor{red}{[\textbf{RESULT}: #1]}}
-\newcommand{\todofig}[1]{\textcolor{red}{[\textbf{FIGURE}: #1]}}
+\title{Occlusion-Aware Double Dueling Deep Q-Learning for Collision Avoidance in Replayed Urban Driving Scenarios}
 
-% --- Notation helpers -----------------------------------------------------
-\newcommand{\E}{\mathbb{E}}
-\newcommand{\R}{\mathbb{R}}
-\DeclareMathOperator*{\argmax}{arg\,max}
-
-\title{\textbf{Risk-Aware Deep Reinforcement Learning for Collision Avoidance\\
-in Partially Observable Real-World Driving Scenarios}}
-
-\author{%
-  Anonymous Authors\\
-  Anonymous Institution\\
-  \texttt{anonymous@example.com}
-}
-
-\date{}
+\author{\IEEEauthorblockN{Anonymous Authors}
+\IEEEauthorblockA{Anonymous Institution}}
 
 \begin{document}
 \maketitle
 
-% =========================================================================
 \begin{abstract}
-Some of the hardest collisions to avoid are those a driver cannot yet see
-coming: vehicles hidden behind blockers, pedestrians emerging from occluded
-crossings, conflicts developing outside a limited field of view. Most
-reinforcement learning (RL) results for driving assume the opposite --
-fully observed, synthetic traffic. We study risk-aware collision avoidance
-under partial observability, training deep RL agents on real-world driving
-scenarios from the Waymo Open Motion Dataset replayed in the Nocturne
-simulator, whose ray-cast visibility model restricts perception to what a
-physical sensor could see: hidden vehicles remain hidden. Our agent
-observes an ego-centric occupancy grid and analytic time-to-zero (TTZ)
-conflict features, both filtered to visible objects, together with
-\emph{occlusion-risk summaries} that expose how much of the view cone is
-blocked and by what; a TTZ-barrier shaped reward penalizes risky closing
-behavior before a collision becomes unavoidable. A double dueling DQN is
-trained at scale with an asynchronous actor--learner architecture that runs
-unchanged from a single workstation to a Ray cluster. Beyond aggregate
-rates, we characterize the safety--efficiency trade-off induced by the
-collision penalty as an explicit Pareto frontier, and stratify performance
-by traffic density and occlusion severity. Across \results{K} seeds on
-held-out Waymo scenarios, our approach achieves a goal-reaching rate of
-\results{XX.X $\pm$ X.X\%} with a collision rate of
-\results{X.X $\pm$ X.X\%}, compared to \results{XX.X\% / X.X\%} for a
-behavior-cloning baseline, with differences significant at
-\results{$p < 0.05$} under a two-sided Welch's $t$-test.
+Collision avoidance in urban driving is difficult when other road users are hidden by occluders or lie outside a limited sensor field of view. This paper reports an occlusion-aware deep reinforcement learning system implemented in the Nocturne simulator. The policy uses a class-weighted ego-centric occupancy grid, stacked observations, ego and goal features, and explicit occlusion summaries. Control is learned with a double dueling deep Q-network using noisy layers, three-step returns, prioritized replay, and the Muon optimizer. The available checkpoint was evaluated deterministically for 1,500 episodes. It reached the goal in 95.33\% of episodes and collided in 5.13\%, with mean return $109.99\pm48.84$. On the 1,089 episodes for which trajectory statistics were recorded, average displacement error was $2.24\pm2.13$ m, final displacement error was $6.40\pm6.20$ m, and jerk was $10.27\pm4.08$ m/s$^3$. These results establish that the trained policy can frequently complete the sampled scenarios, but they do not establish an advantage over a baseline: only one seed and one evaluated checkpoint are available, 411 episodes terminate after one step, and seven episodes are marked as both goal-reaching and colliding. We therefore present the study as a reproducible empirical report and identify the additional controls required for a defensible safety claim.
 \end{abstract}
 
-% =========================================================================
+\begin{IEEEkeywords}
+autonomous driving, collision avoidance, deep reinforcement learning, partial observability, occlusion, Nocturne, double DQN
+\end{IEEEkeywords}
+
 \section{Introduction}
-\label{sec:introduction}
+Autonomous driving policies must act before every relevant hazard is fully visible. Parked vehicles, roadside structures, traffic, and a restricted sensor cone can hide road users until only a narrow margin remains for braking or steering. This makes collision avoidance a partially observable decision problem rather than a purely reactive control problem. Classical approaches address this uncertainty with reachable sets, hypothetical hidden agents, or explicit belief-state planning \cite{orzechowski2018tackling,bouton2018scalable}. Deep reinforcement learning (DRL) offers an alternative in which behavior is learned from interaction, but its empirical safety must be measured carefully \cite{garcia2015comprehensive,kiran2021deep}.
 
-Autonomous vehicles must make safety-critical decisions with incomplete
-information. A parked truck hides a crossing pedestrian; a vehicle in the
-adjacent lane masks a merging car; a limited field of view leaves a
-fast-approaching agent undetected until seconds before conflict. In such
-\emph{occluded} and \emph{sensor-limited} situations the danger is by
-definition not yet visible when the avoiding maneuver must begin -- which is
-precisely why occlusion is treated as a first-class hazard in the planning
-literature~\citep{orzechowski2018tackling, bouton2018scalable}. Yet the
-majority of reinforcement learning (RL) results for driving are obtained
-under full observability in synthetic traffic, where every agent's state is
-available to the policy and the hardest part of the problem is assumed away.
+We study collision avoidance in Nocturne, a simulator that replays logged urban-driving scenarios and supports efficient multi-agent experimentation \cite{vinitsky2022nocturne}. The implementation combines a spatial occupancy representation with occlusion-risk features and time-to-zero (TTZ) conflict information. A value-based controller selects from discrete throttle--steering combinations and is trained with a scalable actor--learner loop.
 
-This paper studies collision avoidance as a problem of decision-making
-under partial observability. We train and evaluate deep RL agents
-on real-world driving scenarios from the Waymo Open Motion
-Dataset~\citep{ettinger2021waymo} replayed in the Nocturne
-simulator~\citep{vinitsky2022nocturne}, whose C++ ray-casting engine
-restricts the agent's perception to objects a physical sensor could actually
-see: vehicles behind blockers are invisible, and the view cone is limited in
-angle and range. The agent must reach a goal position extracted from the
-recorded human trajectory while avoiding collisions with road users that
-replay their logged behavior -- confronting it with unprotected turns,
-merges, jaywalking pedestrians, and occluded conflicts drawn from real
-roads rather than procedurally generated traffic.
-
-While imitation learning from human demonstrations produces strong driving
-policies~\citep{bansal2018chauffeurnet, codevilla2019exploring}, it inherits
-the biases of the demonstration distribution and offers no mechanism for
-recovering from states human drivers rarely visit -- precisely the states in
-which collisions occur. RL offers a complementary route, but introduces its
-own tension: a reward that pays for progress and penalizes collisions
-induces an explicit \emph{safety--efficiency trade-off}, in which the agent
-may learn to accept a nonzero collision probability in exchange for reaching
-goals faster. Rather than treating this trade-off as a nuisance, we measure
-and characterize it directly.
-
-Our contributions are as follows:
+The intended research question is: \emph{Can an occlusion-aware value-based policy reach logged goals while maintaining a low collision frequency under partial observation?} The supplied artifacts support a limited but concrete answer. A single deterministic evaluation contains 1,500 episodes and a complete training configuration. Accordingly, this paper makes three bounded contributions:
 \begin{itemize}
-  \item \textbf{Occlusion-aware collision avoidance from real logs.} We
-  formulate collision avoidance in replayed Waymo scenarios under a
-  ray-cast visibility model, and design an observation that makes occlusion
-  risk explicit: an ego-centric, class-weighted occupancy grid and analytic
-  time-to-zero (TTZ) conflict features -- both filtered to visible objects
-  only -- plus dedicated \emph{occlusion-risk summaries} (occluded view
-  fraction, nearest-blocker proximity, blocker density, and occlusion
-  pressure) that allow the policy to modulate its behavior in response to
-  unseen hazards (Section~\ref{sec:observation}).
-  \item \textbf{Risk-aware reward shaping and its trade-off analysis.} We
-  combine sparse terminal signals with a TTZ-barrier penalty that activates
-  only when a conflict is imminent, providing a dense safety gradient before
-  a collision becomes unavoidable (Section~\ref{sec:reward}). We then sweep
-  the collision-penalty coefficient to trace the induced Pareto frontier
-  between goal-reaching rate and collision rate
-  (Section~\ref{sec:tradeoff}), making the safety--efficiency compromise an
-  explicit, tunable design parameter rather than an implicit artifact.
-  \item \textbf{Stratified, statistically grounded evaluation.} We evaluate
-  against behavior cloning and ablated agents with multi-seed runs (mean
-  $\pm$ std, bootstrap confidence intervals, and significance tests), and
-  stratify results by traffic density (number of surrounding agents) and
-  occlusion severity, alongside trajectory-quality metrics -- ADE/FDE
-  against the human trajectory and jerk-based smoothness
-  (Section~\ref{sec:setup}).
-  \item \textbf{A scalable training system.} A modern value-based learner
-  (double dueling DQN with noisy exploration, $n$-step returns, prioritized
-  replay, and the Muon optimizer~\citep{jordan2024muon}) is trained with an
-  asynchronous actor--learner architecture in the style of Sample
-  Factory~\citep{petrenko2020sample} that scales from a laptop to a
-  multi-node Ray cluster~\citep{moritz2018ray} without code changes
-  (Sections~\ref{sec:agent}--\ref{sec:system}).
+  \item it specifies a reproducible occlusion-aware observation, reward, and double dueling DQN training configuration;
+  \item it reports episode-level safety, task-completion, trajectory, and smoothness statistics with confidence intervals; and
+  \item it audits the evaluation record, separating measured results from comparisons and causal claims that remain unsupported.
 \end{itemize}
 
-On a held-out split of Waymo scenarios, we evaluate goal-reaching rate,
-collision rate, TTZ-based near-miss statistics, ADE/FDE, and smoothness
-against behavior cloning and ablated variants of our agent.
-\results{Summarize headline numbers here: goal rate and collision rate with
-mean $\pm$ std, the shape of the penalty Pareto frontier, the
-collision-vs-density trend, and the most important ablation finding.}
+This distinction is important. The current evidence supports describing the behavior of one checkpoint. It does not support a state-of-the-art claim, a statistically controlled comparison with a non-occlusion agent, or a claim that explicit occlusion features caused the observed performance.
 
-The remainder of the paper is organized as follows. Section~\ref{sec:related}
-positions our work relative to safe RL, occlusion-aware planning, and
-scalable RL systems. Section~\ref{sec:problem} formalizes the task as a
-POMDP, and Section~\ref{sec:method} details the observation, reward, agent,
-and training system. Section~\ref{sec:setup} defines the metrics,
-statistical protocol, and baselines; Section~\ref{sec:results} presents the
-main comparison, the trade-off and stratified analyses, ablations, and
-interpretability probes.
-
-% =========================================================================
 \section{Related Work}
-\label{sec:related}
+\subsection{Driving Simulation and Logged Scenarios}
+CARLA and SUMO are widely used for synthetic autonomous-driving experiments \cite{dosovitskiy2017carla,lopez2018sumo}. Nocturne instead replays real-world motion scenarios at high throughput and was designed for learning interactive driving policies \cite{vinitsky2022nocturne}. Its source data derive from large-scale motion records such as the Waymo Open Motion Dataset \cite{ettinger2021waymo}. Logged replay increases behavioral realism, although replayed non-ego agents may not respond to the learned ego policy in the same manner as fully interactive agents.
 
-\paragraph{Driving simulators from real-world logs.}
-CARLA~\citep{dosovitskiy2017carla} and SUMO~\citep{lopez2018sumo} provide
-synthetic traffic, while Nocturne~\citep{vinitsky2022nocturne}, Waymax, and
-nuPlan replay logged human trajectories, exposing agents to realistic
-interaction patterns. We adopt Nocturne for its fast C++ core, ray-cast
-partial observability, and native support for the Waymo Open Motion
-Dataset~\citep{ettinger2021waymo}.
+\subsection{Collision Avoidance Under Occlusion}
+Prior work has treated occluded intersections as sequential decision problems and demonstrated that DRL can learn useful behavior in such settings \cite{isele2018navigating}. Model-based safety methods reason about hidden occupancy using set-based verification or sensor-occlusion POMDPs \cite{orzechowski2018tackling,bouton2018scalable}. The present system is model-free at decision time: it augments visible-scene features with low-dimensional summaries of occlusion and learns a discrete control policy. This design does not provide formal safety guarantees.
 
-\paragraph{RL for collision avoidance.}
-Value-based and policy-gradient methods have been applied to lane keeping,
-merging, and intersection handling~\citep{kiran2021deep, isele2018navigating}.
-Occupancy-grid observations are a common mid-level representation that
-balances expressiveness and sample efficiency~\citep{fridman2018deeptraffic}.
-Time-to-collision-style features have long been used in classical
-safety systems~\citep{minderhoud2001extended}; our TTZ features bring this
-inductive bias into the observation and the reward.
+\subsection{Value-Based and Safe Reinforcement Learning}
+The agent combines double Q-learning, which reduces maximization bias \cite{van2016deep}, with a dueling value--advantage decomposition \cite{wang2016dueling}. Prioritized replay \cite{schaul2015prioritized}, noisy exploration \cite{fortunato2017noisy}, and multi-step targets are components associated with strong value-based agents such as Rainbow \cite{hessel2018rainbow}. These mechanisms improve learning efficiency but do not by themselves constrain unsafe actions. Constrained objectives and shielding provide stronger safety semantics \cite{achiam2017constrained,alshiekh2018safe}; in contrast, the studied system uses reward penalties and must therefore be assessed empirically.
 
-\paragraph{Safety-critical and risk-aware RL.}
-Safe RL formalizes the tension between task performance and constraint
-violation, via constrained MDPs~\citep{altman1999constrained,
-achiam2017constrained}, risk-sensitive objectives that penalize variance or
-tail outcomes of the return~\citep{garcia2015comprehensive}, and shielding
-or barrier-style mechanisms that intervene near constraint
-boundaries~\citep{alshiekh2018safe}. Our TTZ-barrier penalty is a shaped,
-differentiable-in-effect analogue of a control-barrier condition: it applies
-increasing pressure as the most imminent conflict approaches, rather than
-penalizing only terminal collisions. Unlike hard-constraint methods we do
-not guarantee constraint satisfaction; instead we expose the
-safety--efficiency trade-off explicitly by sweeping the penalty coefficient
-and reporting the resulting Pareto frontier, following the position that in
-learned driving stacks the operating point should be a deliberate,
-measurable choice.
-
-\paragraph{Driving under occlusion.}
-Planning literature treats occlusion by reasoning over phantom agents or
-worst-case reachable sets behind blockers~\citep{orzechowski2018tackling},
-and POMDP formulations marginalize over hypotheses about unobserved
-traffic~\citep{bouton2018scalable}. These approaches hand-design the
-occlusion response. In contrast, we give a model-free agent explicit,
-low-dimensional occlusion-risk statistics computed from ray-cast visibility
-and let it \emph{learn} when caution is warranted, evaluating on real
-scenarios whose occlusion patterns arise from logged traffic rather than
-constructed worst cases.
-
-\paragraph{Imitation learning baselines.}
-Behavior cloning remains a strong supervised baseline for
-driving~\citep{bansal2018chauffeurnet, codevilla2019exploring}, but suffers
-compounding errors under distribution shift~\citep{ross2011reduction} --
-exactly the regime of near-collision states. We include a BC baseline
-trained on the same observations to quantify this gap.
-
-\paragraph{Value-based deep RL.}
-Our agent composes established components: double
-Q-learning~\citep{van2016deep}, dueling
-architectures~\citep{wang2016dueling}, prioritized experience
-replay~\citep{schaul2015prioritized}, noisy networks for
-exploration~\citep{fortunato2017noisy}, and multi-step
-returns~\citep{hessel2018rainbow}. We additionally adopt the Muon
-optimizer~\citep{jordan2024muon}, which orthogonalizes momentum updates for
-hidden weight matrices via Newton--Schulz iteration and has shown strong
-results in large-scale supervised training; we treat it as a drop-in
-optimizer choice and ablate it against AdamW rather than claiming it as a
-contribution.
-
-\paragraph{Scalable RL systems.}
-High-throughput RL architectures decouple acting from learning:
-Ape-X~\citep{horgan2018distributed}, IMPALA~\citep{espeholt2018impala}, and
-Sample Factory~\citep{petrenko2020sample} demonstrate that asynchronous
-experience collection with centralized (batched) inference dramatically
-improves hardware utilization. Our system adapts this recipe to a CPU-heavy
-simulator with an off-policy learner, and layers Ray~\citep{moritz2018ray}
-on top for multi-node scaling.
-
-% =========================================================================
 \section{Problem Formulation}
-\label{sec:problem}
-
-We consider an episodic, partially observed Markov decision process
-$(\mathcal{S}, \mathcal{A}, P, r, \gamma, \Omega, O)$. Each episode
-instantiates one scenario from the Waymo Open Motion Dataset replayed in
-Nocturne at $\Delta t = 0.1$\,s. The state $s \in \mathcal{S}$ comprises the
-full simulator state -- poses and velocities of all road users plus static
-map geometry. A single ego vehicle is controlled by the policy; all other
-road users -- vehicles, pedestrians, and cyclists, the latter two referred
-to jointly as vulnerable road users (VRUs) -- replay their logged
-trajectories, so the transition kernel $P$ is deterministic given the ego
-action. The observation function $O$ is \emph{not} the identity: it first
-applies Nocturne's ray-cast visibility model, which removes every object
-outside the ego's view cone or occluded behind a nearer object, and then
-encodes the surviving objects into the feature vector
-$o \in \Omega \subset \R^{613}$ described in Section~\ref{sec:observation}.
-Partial observability in our setting is therefore physical (sensor-like
-occlusion), not an artifact of feature compression. The ego receives the
-goal position $g \in \R^2$ recorded at the end of the human trajectory and
-must reach it within a tolerance while avoiding collisions with other
-objects and road edges. Episodes terminate on goal achievement, collision,
-or a horizon of $T_{\max} = 80$ steps (8 seconds).
-
-The action space is a discrete product of throttle and steering levels,
-$\mathcal{A} = \{-1.0, 0.0, 2.0\} \times \{-0.7, -0.2, 0.0, 0.2, 0.7\}$,
-yielding $|\mathcal{A}| = 15$ actions executed through Nocturne's kinematic
-bicycle model.
-
-% =========================================================================
-\section{Method}
-\label{sec:method}
-
-\subsection{Observation Design}
-\label{sec:observation}
-
-The observation is a flat vector concatenating four groups of features
-(Figure~\ref{fig:architecture}).
-
-\paragraph{Ego-centric occupancy grid.}
-We rasterize the local scene into a $C \times H \times W$ grid with $C = 3$
-channels, $H = 20$ rows, and $W = 10$ columns, covering $40$\,m ahead,
-$5$\,m behind, and $\pm 10$\,m laterally in the ego frame. Channel~0 encodes
-occupancy strength with class-dependent weights: vehicles ($w_{\text{veh}} =
-1.0$), vulnerable road users (pedestrians and cyclists, $w_{\text{vru}} =
-2.0$), and road edges ($w_{\text{edge}} = 3.0$); overlapping stamps take the
-maximum. Channels 1--2 encode the relative longitudinal and lateral velocity
-(normalized by $30$\,m/s) of the \emph{nearest} vehicle occupying each cell,
-resolved by a vectorized per-cell minimum-distance reduction. Road-edge
-geometry is cached in the world frame once per scenario and re-projected
-into the ego frame each step.
-
-\paragraph{Ego and goal features.}
-Four ego-state features (heading, speed, heading error to goal, speed error
-to the logged target speed, each normalized) and two goal features (distance
-to goal normalized by $100$\,m; relative bearing normalized by $\pi$).
-
-\paragraph{Time-to-zero (TTZ) conflict features.}
-For every non-ego object $i$ at displacement $\mathbf{d}_i$ from the ego, we
-compute the scalar closing speed along the line of sight,
+We model each episode as a partially observable Markov decision process $\langle\mathcal{S},\mathcal{A},P,r,\Omega,O,\gamma\rangle$. The simulator state $s_t\in\mathcal{S}$ contains the ego vehicle, surrounding road users, and map geometry. The policy receives an observation $o_t=O(s_t)$ restricted by visibility and feature construction. It selects a discrete action $a_t\in\mathcal{A}$, receives reward $r_t$, and seeks to maximize
 \begin{equation}
-  v^{\text{close}}_i \;=\;
-  \frac{\mathbf{v}_{\text{ego}} \cdot \mathbf{d}_i}{\lVert \mathbf{d}_i \rVert}
-  \;-\;
-  \frac{\mathbf{v}_i \cdot \mathbf{d}_i}{\lVert \mathbf{d}_i \rVert},
-  \qquad
-  \text{TTZ}_i \;=\;
-  \begin{cases}
-    \lVert \mathbf{d}_i \rVert \,/\, v^{\text{close}}_i & v^{\text{close}}_i > 0,\\[2pt]
-    \text{TTZ}_{\infty} & \text{otherwise},
-  \end{cases}
+J(\pi)=\mathbb{E}_{\pi}\left[\sum_{t=0}^{T-1}\gamma^t r_t\right], \qquad \gamma=0.99.
 \end{equation}
-where $\text{TTZ}_{\infty}$ is a finite sentinel (999\,s) and contact
-distances below $0.5$\,m map to $\text{TTZ} = 0$. The observation exposes
-the minimum TTZ over vehicles, the minimum over pedestrians and cyclists
-(both clipped to $20$\,s), and their difference -- a compact, analytic
-summary of the most imminent conflict of each class.
+The configured horizon is 80 steps at a simulator interval of 0.1 s. Episodes may end after goal achievement or collision; the evaluation record also permits both flags to occur in one episode, a semantic ambiguity discussed in Section~\ref{sec:limitations}.
 
-\paragraph{Occlusion-risk features.}
-A single call per step to Nocturne's C++ ray-casting engine returns the set
-of visible objects within the view cone. This visibility set serves two
-roles. First, it filters the occupancy grid and TTZ features above, so the
-agent only perceives objects a real sensor could see. Second, from the
-angular intervals subtended by visible blockers we compute four summary
-statistics that quantify what the agent \emph{cannot} see: the occluded
-fraction of the view cone, the normalized distance to the nearest blocker,
-blocker density, and an ``occlusion pressure'' term (occluded fraction
-weighted by blocker proximity). These features are part of the full model;
-the \emph{no-occlusion} ablation in Section~\ref{sec:results} removes the
-four summary statistics while keeping the visibility filtering, isolating
-the value of explicitly representing occlusion risk from the (fixed) effect
-of sensor-limited perception.
+The action space is the Cartesian product of three throttle values $\{-1,0,2\}$ and five steering values $\{-0.7,-0.2,0,0.2,0.7\}$, giving 15 discrete actions. This compact action space is suitable for Q-learning but can induce abrupt control changes.
 
-The full observation has dimension
-$3 \times 20 \times 10 + 4 + 2 + 3 + 4 = 613$ (609 for the no-occlusion
-ablation).
+\section{Method}
+\subsection{Observation Representation}
+The configuration uses a $20\times10$ ego-centric occupancy grid spanning 40 m forward, 5 m backward, and 10 m laterally. Vehicles, vulnerable road users, and road edges receive weights 1, 2, and 3, respectively. Three consecutive frames are stacked. Ego-state and goal-relative features are included, while the subscriber restricts perception using a 2.1 rad view angle and 80 m view distance.
 
-\begin{figure}[t]
-  \centering
-  \fbox{\parbox{0.9\linewidth}{\centering\vspace{3.5cm}
-  \todofig{System diagram: (left) ego-centric occupancy grid with the three
-  channels and TTZ/occlusion feature extraction; (center) dueling noisy
-  Q-network; (right) asynchronous actor--learner architecture with shared
-  memory, batched inference, transition queue, and weight sync.}
-  \vspace{3.5cm}}}
-  \caption{Overview of the observation encoding, agent architecture, and
-  asynchronous training system.}
-  \label{fig:architecture}
-\end{figure}
+Occlusion processing is enabled in both the subscriber and occupancy-grid configuration. The implementation is designed to add summaries such as occluded view fraction, blocker proximity, blocker density, and occlusion pressure. These features provide the value network with evidence about missing visibility rather than falsely exposing hidden-agent state. The supplied evaluation artifact, however, does not contain per-step feature traces, so feature utilization cannot be verified from the result JSON alone.
 
 \subsection{Reward}
-\label{sec:reward}
+The configured shaping reward can be summarized as
+\begin{align}
+r_t={}&100\,\mathbb{1}_{\mathrm{goal}}-100\,\mathbb{1}_{\mathrm{collision}}-50\,\mathbb{1}_{\mathrm{offroad}} \\
+&-0.1+2(d_{t-1}-d_t)+0.3h_t+0.5z_t,
+\end{align}
+where $d_t$ is distance to the goal, $h_t$ is a heading-alignment term, and $z_t$ is a TTZ-derived term with a 3 s safety threshold. The repository configuration also contains simulator-level terminal settings with a collision penalty of 1,000 and goal bonus of 100. Because both configuration blocks are present, the exact reward path should be logged explicitly in future runs to avoid ambiguity.
 
-The per-step reward combines sparse terminal events with dense shaping:
+\subsection{Double Dueling DQN}
+The action value is decomposed into value and centered advantage terms,
 \begin{equation}
-\label{eq:reward}
-r_t \;=\;
-\underbrace{R_g \,\mathbb{1}[\text{goal}]}_{\text{goal bonus}}
-\;-\; \underbrace{R_c \,\mathbb{1}[\text{collision}]
-      \;-\; R_o \,\mathbb{1}[\text{road-edge collision}]}_{\text{safety penalties}}
-\;-\; \underbrace{c_s}_{\text{step cost}}
-\;+\; \underbrace{c_p \,(d_{t-1} - d_t)}_{\text{progress}}
-\;+\; \underbrace{c_h \Big(1 - \tfrac{|\theta_t|}{\pi}\Big)}_{\text{heading}}
-\;-\; \underbrace{c_z \,\max\!\big(0,\; \tau - \text{TTZ}^{\min}_t\big)}_{\text{TTZ barrier}},
+Q(o,a)=V(o)+A(o,a)-\frac{1}{|\mathcal{A}|}\sum_{a'}A(o,a').
 \end{equation}
-where $d_t$ is the distance to goal, $\theta_t$ the heading error,
-$\text{TTZ}^{\min}_t$ the minimum TTZ over all object classes, and
-$\tau = 3$\,s the safety threshold. We use $R_g = 100$, $R_c = 100$,
-$R_o = 50$, $c_s = 0.1$, $c_p = 2.0$, $c_h = 0.3$, $c_z = 0.5$. The shaping
-terms are active only on non-terminal steps. The TTZ barrier is the key
-safety-shaping component: it grows linearly as the most imminent conflict
-drops below $\tau$, providing gradient signal \emph{before} a collision
-occurs rather than only at the terminal event.
-
-\subsection{Agent}
-\label{sec:agent}
-
-The agent is a double dueling DQN~\citep{van2016deep, wang2016dueling}. The
-grid channels and auxiliary features are encoded and fused by an MLP trunk
-(4 hidden layers of width 256), followed by dueling value and advantage
-heads. All exploration is state-dependent via noisy linear
-layers~\citep{fortunato2017noisy}, annealed jointly with a small
-$\epsilon$-greedy floor ($\epsilon: 1.0 \to 0.05$ over $5 \times 10^5$
-steps). Targets use $n$-step returns ($n = 3$) with double Q-learning
-bootstrapping:
+For a sampled transition, the three-step double-Q target is
 \begin{equation}
-  y_t = \sum_{k=0}^{n-1} \gamma^k r_{t+k}
-  + \gamma^n \, Q_{\bar\theta}\!\big(s_{t+n},\,
-    \argmax_{a} Q_\theta(s_{t+n}, a)\big).
+y_t=R_t^{(3)}+\gamma^3(1-d_t)Q_{\bar\theta}\!\left(o_{t+3},\arg\max_a Q_{\theta}(o_{t+3},a)\right),
 \end{equation}
-Transitions are sampled from a prioritized replay
-buffer~\citep{schaul2015prioritized} of $10^6$ transitions ($\alpha = 0.6$,
-$\beta: 0.4 \to 1$, sum-tree implementation) with importance-sampling
-correction. The target network is synchronized every $10^3$ gradient steps.
-Hidden weight matrices are optimized with Muon~\citep{jordan2024muon}
-(Newton--Schulz orthogonalized momentum), while embeddings, biases, and
-head layers use AdamW; the base learning rate is $3 \times 10^{-4}$ with
-$\gamma = 0.99$, batch size 256, and gradient-norm clipping at 10.
+where $\theta$ and $\bar\theta$ denote online and target parameters. Prioritized replay samples transitions according to their temporal-difference errors, with exponent $\alpha=0.6$ and importance-sampling coefficient annealed from $\beta=0.4$.
 
-\subsection{Asynchronous Training System}
-\label{sec:system}
+The network has four hidden layers of 256 units and uses noisy layers and a dueling head. The replay capacity is $10^6$, batch size is 512, target update interval is 1,000 learner steps, and maximum gradient norm is 10. The learning rate is $3\times10^{-4}$. Muon is enabled for compatible hidden matrices; it is an implementation choice rather than an experimentally isolated contribution.
 
-Nocturne is CPU-bound: stepping the C++ simulator plus Python-side feature
-extraction dominates wall-clock time, while the Q-network is small enough
-that per-environment GPU inference wastes the accelerator. We therefore
-adopt an asynchronous architecture in the spirit of Sample
-Factory~\citep{petrenko2020sample}, with three roles:
+\subsection{Training System}
+The supplied run used four workers and two environments per worker in synchronous vector-environment mode. Experience collection and learning are decoupled through a bounded learner queue; the configured training frequency is 512 transitions. TensorFloat-32, cuDNN benchmarking, and PyTorch compilation are enabled. The nominal training budget is 500,000 episodes, while the evaluated checkpoint name indicates 400,000 episodes. Only seed 42 is represented in the supplied configuration.
 
-\begin{itemize}
-  \item \textbf{Actors.} $N_w$ worker subprocesses each step $N_e$
-  environments sequentially ($N_w \times N_e$ environments total; 48 workers
-  $\times$ 2 environments in our default configuration). Observations are
-  written into per-worker shared-memory buffers (zero-copy transport), each
-  worker is pinned to CPU cores, and every environment receives a distinct
-  seed to decorrelate experience.
-  \item \textbf{Batched inference (main process).} The main process gathers
-  ready observations across workers, performs a single batched forward pass
-  on the GPU, and scatters actions back through pipes. Inference weights are
-  refreshed from the learner every 16 gradient steps.
-  \item \textbf{Learner (background process).} A separate process owns the
-  replay buffer and performs gradient steps. Transition batches arrive
-  through a bounded multiprocessing queue with configurable overload policy
-  (block, drop-newest, or drop-oldest); a train-step scheduler enforces a
-  fixed replay ratio (one gradient step per 512 ingested environment steps
-  after a 5{,}000-step warm-up), preventing both learner starvation and
-  runaway off-policyness. The learner periodically publishes a compact
-  inference-state snapshot through a latest-value queue.
-\end{itemize}
+\section{Experimental Protocol}
+\subsection{Evaluation Data}
+The result file identifies method \texttt{ddqn}, checkpoint \texttt{ddqn\_ep400000.pth}, and 1,500 evaluation episodes. The agent is described in the accompanying history as evaluated greedily with exploration disabled. Every episode records return, length, goal and collision flags, and the number of vehicles. Trajectory and comfort metrics are present for 1,089 episodes; TTZ-to-pedestrian is present for 362 episodes.
 
-The same training loop supports four execution modes selected by
-configuration: \texttt{dummy} (single-process, sequential; for debugging),
-\texttt{sync} (lock-step vectorized), \texttt{async} (the architecture
-above), and \texttt{ray}, in which actor workers become Ray
-actors~\citep{moritz2018ray} and the system scales across a multi-node
-cluster with scenario data synchronized from object storage to node-local
-disk on first access. Off-policy learning makes this decoupling benign: the
-policy lag introduced by asynchronous weight sync is absorbed by the replay
-buffer rather than biasing the gradient, in contrast to on-policy
-architectures that require importance-weighted
-corrections~\citep{espeholt2018impala}.
+All episodes report 50 vehicles. Consequently, the data do not support density-stratified conclusions. No non-occlusion policy, behavior-cloning policy, classical controller, alternative optimizer, or additional random seed is included.
 
-\begin{algorithm}[t]
-\caption{Asynchronous training loop (main process)}
-\label{alg:async}
-\begin{algorithmic}[1]
-\STATE Spawn $N_w$ actor workers ($N_e$ envs each) with shared-memory buffers
-\STATE Spawn learner process; wait for initial inference weights
-\WHILE{total steps $<$ budget}
-  \STATE Collect ready observations from workers (shared memory)
-  \STATE $a \leftarrow \argmax_a Q_\theta(s, a)$ \hfill (single batched GPU forward)
-  \STATE Dispatch actions to workers; receive $(s, a, r, s', d)$ batches
-  \STATE Submit transition batch to learner queue (bounded, overload policy)
-  \STATE Poll learner: ingest metrics; load refreshed weights if published
-\ENDWHILE
-\end{algorithmic}
-\end{algorithm}
+\subsection{Metrics and Uncertainty}
+Goal and collision rates are empirical proportions. We report normal-approximation 95\% confidence intervals for these rates. For a continuous metric $x$ with $n$ observations, we report sample mean $\bar{x}$, sample standard deviation $s$, and the approximate 95\% interval of the mean $\bar{x}\pm1.96s/\sqrt{n}$. These intervals quantify finite evaluation-episode uncertainty for one trained policy; they do not represent variation across training seeds.
 
-% =========================================================================
-\section{Experimental Setup}
-\label{sec:setup}
+Average displacement error (ADE) and final displacement error (FDE) compare the evaluated trajectory with the logged reference trajectory. Jerk measures control smoothness in m/s$^3$. The artifact also reports a metric named \texttt{smoothness}; because its precise formula is not included in the result file, we preserve its name but avoid interpreting its absolute scale.
 
-\paragraph{Data.}
-We use driving scenarios from the Waymo Open Motion
-Dataset~\citep{ettinger2021waymo} converted to Nocturne's format, split into
-train and held-out test scenarios. \results{Report exact scenario counts for
-train/test splits.} Each episode replays one scenario for up to 80 steps at
-10\,Hz; non-ego road users follow their logged trajectories. Scenarios in
-which the ego is removed at goal or collision follow the standard Nocturne
-configuration.
-
-\paragraph{Metrics.}
-We report safety, task, trajectory-quality, and comfort metrics:
-(i) \emph{goal rate}: fraction of episodes in which the ego reaches its goal
-position within tolerance; (ii) \emph{collision rate}: fraction of episodes
-terminating in a collision, decomposed into vehicle--vehicle,
-vehicle--VRU, and road-edge collisions; (iii) \emph{minimum TTZ statistics}:
-distribution of the per-episode minimum time-to-zero against vehicles and
-against vulnerable road users, as a near-miss measure; (iv) \emph{average
-and final displacement error} (ADE/FDE): mean and endpoint Euclidean
-distance between the agent trajectory and the logged human trajectory over
-the episode, measuring how human-like the executed path is;
-(v) \emph{smoothness}: mean absolute longitudinal jerk
-$\overline{|\dddot{x}|}$ and steering-rate magnitude, capturing ride comfort
-and control chattering -- a known concern for discrete action spaces; and
-(vi) \emph{training throughput}: environment steps per second.
-
-\paragraph{Statistical protocol.}
-All learned methods are trained with \results{K $\geq$ 3} independent seeds.
-We report per-metric mean $\pm$ standard deviation across seeds, and
-95\% confidence intervals computed by stratified bootstrap over evaluation
-episodes (\results{B = 10{,}000} resamples). Pairwise comparisons between
-our full agent and each baseline use a two-sided Welch's $t$-test across
-seeds for rate metrics, and a Mann--Whitney $U$ test for episode-level
-distributions (min-TTZ, ADE, jerk), with significance at $\alpha = 0.05$
-and Holm--Bonferroni correction for multiple comparisons. We report
-$p$-values alongside effect sizes rather than significance stars alone.
-
-\paragraph{Stratified evaluation.}
-Aggregate rates hide where a policy fails. We therefore stratify all
-safety metrics along two axes: (i) \emph{traffic density} -- the number of
-road users in the scenario, binned into \results{e.g., 1--5, 6--10, 11--20,
-$>$20} agents -- yielding collision-rate-versus-density curves that expose
-degradation under crowding; and (ii) \emph{occlusion severity} -- the mean
-occluded view fraction over the episode, binned into low/medium/high --
-isolating performance in exactly the sensor-limited regime this paper
-targets.
-
-\paragraph{Baselines.}
-We compare against: (a) \emph{behavior cloning} (BC): a supervised policy
-trained on logged expert state--action pairs with the same observation
-encoding -- including the occlusion-risk features -- and the same action
-discretization as our agent, giving a strong imitation baseline that
-shares every architectural choice except the learning signal;
-(b) a \emph{vanilla DQN} without dueling, noisy layers,
-PER, or $n$-step returns; (c) our agent with \emph{AdamW only} in place of
-Muon; and (d) our agent \emph{without TTZ features and TTZ shaping}.
-\results{Adjust the baseline list to match the runs actually executed
-(e.g., include PPO / RMAPPO if those runs complete).}
-
-\paragraph{Training details.}
-Unless stated otherwise we train with 96 parallel environments (48 workers
-$\times$ 2 environments), replay buffer of $10^6$, batch size 256, and the
-hyperparameters of Section~\ref{sec:agent}; the full configuration is in
-Appendix~\ref{app:hyper}. Training runs on \results{hardware description:
-GPU model, CPU core count, node count for Ray runs} for
-\results{N} environment steps (\results{wall-clock time}).
-
-% =========================================================================
 \section{Results}
-\label{sec:results}
-
-\subsection{Main Comparison}
+\subsection{Aggregate Performance}
+Table~\ref{tab:main} summarizes the measured results. The policy reached a recorded goal in 1,430 of 1,500 episodes and recorded a collision in 77 episodes. The corresponding approximate 95\% confidence intervals are $95.33\%\pm1.07\%$ and $5.13\%\pm1.12\%$. The mean return is positive, but return is reward-definition dependent and should not be compared across implementations without matching reward semantics.
 
 \begin{table}[t]
-\centering
-\caption{Collision avoidance performance on held-out Waymo scenarios.
-Mean $\pm$ std over \results{K} seeds; 95\% bootstrap CIs in
-Appendix~\ref{app:additional}. $\dagger$ marks differences from Ours (full)
-significant at $p < 0.05$ (Welch's $t$-test, Holm--Bonferroni corrected).
-Best in bold.}
+\caption{Deterministic evaluation of the supplied DDQN checkpoint. Continuous entries are mean $\pm$ sample standard deviation. CI denotes the approximate 95\% interval half-width for the mean or proportion.}
 \label{tab:main}
-\resizebox{\linewidth}{!}{%
-\begin{tabular}{lccccccc}
-\toprule
-Method & Goal rate (\%) $\uparrow$ & Collision (\%) $\downarrow$ &
-Off-road (\%) $\downarrow$ & Min-TTZ p10 (s) $\uparrow$ &
-ADE (m) $\downarrow$ & FDE (m) $\downarrow$ &
-Jerk (m/s$^3$) $\downarrow$ \\
-\midrule
-Behavior cloning        & \results{--} & \results{--} & \results{--} & \results{--} & \results{--} & \results{--} & \results{--} \\
-Vanilla DQN             & \results{--} & \results{--} & \results{--} & \results{--} & \results{--} & \results{--} & \results{--} \\
-Ours (AdamW)            & \results{--} & \results{--} & \results{--} & \results{--} & \results{--} & \results{--} & \results{--} \\
-Ours (no TTZ)           & \results{--} & \results{--} & \results{--} & \results{--} & \results{--} & \results{--} & \results{--} \\
-Ours (no occlusion)     & \results{--} & \results{--} & \results{--} & \results{--} & \results{--} & \results{--} & \results{--} \\
-Ours (full)             & \results{--} & \results{--} & \results{--} & \results{--} & \results{--} & \results{--} & \results{--} \\
-\bottomrule
-\end{tabular}}
-\end{table}
-
-\results{2--3 paragraphs analyzing Table~\ref{tab:main}: headline goal and
-collision rates with uncertainty, comparison to BC (expected: BC attains low
-ADE/FDE by construction but degrades in collision rate on
-out-of-distribution near-conflict states), effect of the Rainbow components
-over vanilla DQN, the contribution of TTZ features/shaping to the near-miss
-distribution, the effect of occlusion features in the high-occlusion
-stratum, and whether RL trajectories trade higher ADE for lower collision
-rate. Note which comparisons are statistically significant and report
-effect sizes.}
-
-\subsection{The Safety--Efficiency Trade-off}
-\label{sec:tradeoff}
-
-The collision penalty $R_c$ is the single most consequential reward
-coefficient: too small, and the agent accepts collisions as a cost of fast
-progress; too large, and it learns overly conservative behavior that fails
-to reach goals. We sweep
-$R_c \in \results{\{25, 50, 100, 200, 400\}}$ with all other
-coefficients fixed and plot the resulting (goal rate, collision rate)
-operating points in Figure~\ref{fig:pareto}.
-
-\begin{figure}[t]
-  \centering
-  \fbox{\parbox{0.9\linewidth}{\centering\vspace{2.8cm}
-  \todofig{Pareto frontier: goal rate (x-axis) vs.\ collision rate (y-axis),
-  one point per $R_c$ value with seed error bars; annotate each point with
-  its $R_c$. Include BC as a reference point. Optionally a second panel with
-  the TTZ-barrier scale $c_z$ swept the same way.}
-  \vspace{2.8cm}}}
-  \caption{Safety--efficiency trade-off traced by the collision penalty
-  $R_c$. Each point is one operating regime; the frontier makes the
-  compromise between goal-reaching and collision acceptance explicit and
-  tunable.}
-  \label{fig:pareto}
-\end{figure}
-
-\results{Analysis paragraph: shape of the frontier (is it steep near the
-low-collision end, i.e.\ cheap safety gains?), the knee point, whether the
-TTZ barrier shifts the entire frontier inward (a strict improvement) or
-merely moves along it, and a recommended operating point for
-safety-critical deployment.}
-
-\subsection{Collision Rate vs.\ Traffic Density and Occlusion}
-\label{sec:density}
-
-Figure~\ref{fig:density} stratifies collision rate by the two axes defined
-in Section~\ref{sec:setup}: the number of road users in the scenario and
-the mean occluded view fraction over the episode. Figure~\ref{fig:curves}
-complements the held-out analysis with learning curves on the training
-distribution, showing how goal rate and collision rate co-evolve during
-training for each method.
-
-\begin{figure}[t]
-  \centering
-  \fbox{\parbox{0.9\linewidth}{\centering\vspace{2.8cm}
-  \todofig{Two panels. (a) Collision rate vs.\ number of agents in the
-  scenario (binned), one curve per method with seed error bars. (b)
-  Collision rate vs.\ occlusion-severity bin (low/medium/high mean occluded
-  view fraction), comparing Ours (full) against Ours (no occlusion) and
-  BC.}
-  \vspace{2.8cm}}}
-  \caption{Stratified safety analysis: degradation with traffic density
-  (a) and with occlusion severity (b).}
-  \label{fig:density}
-\end{figure}
-
-\results{Analysis: how quickly each method degrades as agent count grows
-(slope comparison); whether the gap between full and no-occlusion variants
-widens in the high-occlusion stratum, which would directly support the
-claim that explicit occlusion-risk features drive robust behavior under
-partial observability; and any density $\times$ occlusion interaction.}
-
-\begin{figure}[t]
-  \centering
-  \fbox{\parbox{0.9\linewidth}{\centering\vspace{2.8cm}
-  \todofig{Training curves: goal rate and collision rate vs.\ environment
-  steps for all methods, with seed variance bands. Suggested source:
-  \texttt{scripts/paper\_plots}.}
-  \vspace{2.8cm}}}
-  \caption{Learning curves on the training distribution.}
-  \label{fig:curves}
-\end{figure}
-
-\subsection{Ablations}
-
-\begin{table}[t]
 \centering
-\caption{Ablations of observation and agent components. \results{Fill from
-ablation runs (e.g., depth-4/16/64/256 network variants, occlusion features
-on/off, PER on/off, $n$-step $\in \{1,3\}$).}}
-\label{tab:ablations}
-\begin{tabular}{lccc}
+\begin{tabular}{lrrr}
 \toprule
-Variant & Goal rate (\%) $\uparrow$ & Collision rate (\%) $\downarrow$ & Steps/s $\uparrow$ \\
+Metric & $n$ & Estimate & CI \\
 \midrule
-Full model                    & \results{--} & \results{--} & \results{--} \\
-$-$ noisy layers              & \results{--} & \results{--} & \results{--} \\
-$-$ prioritized replay        & \results{--} & \results{--} & \results{--} \\
-$-$ $n$-step ($n{=}1$)        & \results{--} & \results{--} & \results{--} \\
-$-$ velocity channels         & \results{--} & \results{--} & \results{--} \\
-$-$ occlusion features        & \results{--} & \results{--} & \results{--} \\
+Goal rate & 1500 & 95.33\% & $\pm$1.07\% \\
+Collision rate & 1500 & 5.13\% & $\pm$1.12\% \\
+Return & 1500 & $109.99\pm48.84$ & $\pm$2.47 \\
+Episode length & 1500 & $20.63\pm17.85$ & $\pm$0.90 \\
+ADE (m) & 1089 & $2.24\pm2.13$ & $\pm$0.13 \\
+FDE (m) & 1089 & $6.40\pm6.20$ & $\pm$0.37 \\
+Jerk (m/s$^3$) & 1089 & $10.27\pm4.08$ & $\pm$0.24 \\
+Smoothness & 1089 & $10.14\pm1.13$ & $\pm$0.07 \\
+Minimum vehicle TTZ (s) & 1089 & $2.04\pm1.71$ & $\pm$0.10 \\
+Minimum pedestrian TTZ (s) & 362 & $2.40\pm0.11$ & $\pm$0.01 \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-\results{Ablation analysis paragraph(s).}
+The trajectory subset yields an ADE of 2.24 m and FDE of 6.40 m. FDE has high dispersion, indicating substantial scenario-to-scenario variation. Mean jerk of 10.27 m/s$^3$ is also high for comfortable passenger motion and is consistent with the use of discrete acceleration and steering commands. These observations motivate a continuous-control or action-smoothing comparison, but such a comparison is not available in the current record.
 
-\subsection{Scaling and Throughput}
+\subsection{Outcome Consistency Audit}
+The goal and collision events are not mutually exclusive: seven episodes have both flags set. No episode has neither flag. Moreover, 411 episodes, or 27.4\%, terminate after one step. These properties may be valid consequences of scenario initialization and event ordering, but they can also inflate the apparent completion rate if an ego vehicle begins inside the goal tolerance. At minimum, future evaluation should report exclusive terminal categories in a fixed priority order and separately identify initial-goal episodes.
 
-\begin{figure}[t]
-  \centering
-  \fbox{\parbox{0.9\linewidth}{\centering\vspace{2.8cm}
-  \todofig{Throughput scaling: (a) env steps/s vs.\ number of workers on a
-  single node for sync vs.\ async modes; (b) steps/s vs.\ number of Ray
-  nodes. Optionally learner train-step lag over time to show the replay-ratio
-  scheduler holding.}
-  \vspace{2.8cm}}}
-  \caption{Training-system scaling.}
-  \label{fig:scaling}
-\end{figure}
+Trajectory metrics are absent from the same 411 one-step episodes, which explains why ADE, FDE, jerk, smoothness, and vehicle TTZ each have $n=1{,}089$. Pedestrian TTZ has still lower support. Comparing these conditional metrics directly with methods that use a different missingness rule would be misleading.
 
-\results{Paragraph on system results: async vs.\ sync speedup on one node,
-near-linear (or not) scaling with Ray nodes, GPU utilization from batched
-inference, and the effect of the bounded-queue overload policy under
-learner stalls.}
+\subsection{What the Results Do and Do Not Show}
+The results show that the evaluated checkpoint frequently triggers the configured goal criterion on the sampled scenarios while collisions are recorded less often. They also show nontrivial trajectory deviation and abruptness. They do not isolate the effect of occlusion-aware features because no otherwise identical checkpoint without those four features is present. Likewise, the narrow episode-level confidence intervals do not establish training stability: a multi-seed interval could be much wider.
 
-\subsection{Interpretability: What Does the Policy Attend To?}
-\label{sec:interpretability}
+\section{Discussion}
+The combination of spatial encoding, explicit visibility cues, and TTZ features is a plausible inductive bias for partially observed driving. A purely visible occupancy grid tells the policy what is present but not why regions are empty. Occlusion summaries can distinguish genuinely clear space from space hidden by blockers. TTZ features, meanwhile, compress relative position and velocity into a conflict-oriented statistic. A learned value function can use these signals to trade progress against risk.
 
-Safety-critical deployment requires understanding \emph{why} a policy
-brakes or swerves, not only that it does. We probe the trained agent with
-three complementary analyses:
+The evaluation suggests a useful policy was learned, but the present evidence should be treated as a pilot result. A strong final study requires a paired factorial design: with versus without explicit occlusion features; full versus restricted visibility; Muon versus AdamW; and DDQN versus behavior cloning or a rule-based controller. Each condition should use at least three training seeds and an identical held-out scenario manifest. Evaluation should include bootstrap intervals over scenarios and seed-level summaries, with paired tests where policies see the same episodes.
 
-\paragraph{Feature attribution.} We compute gradient-based saliency of the
-chosen action's Q-value with respect to the observation, aggregated over
-evaluation episodes and separated by feature group (occupancy channels, TTZ
-features, occlusion features, goal features). \results{Report the relative
-attribution mass per group, and how it shifts between free-driving and
-near-conflict states -- the expected signature is attribution concentrating
-on TTZ and occlusion features as min-TTZ drops.}
+Safety analysis should also stratify by occlusion severity, number and class of nearby agents, minimum TTZ, intersection type, and episode length. A penalty sweep could trace a goal-rate--collision-rate Pareto frontier rather than selecting one reward weight implicitly. Finally, action smoothing or continuous control should be tested because the current jerk values indicate that task completion and comfort are not aligned automatically.
 
-\paragraph{Q-value decomposition over risk.} We bin evaluation states by
-min-TTZ and plot the advantage gap between braking and accelerating actions
-as a function of imminence. \results{Figure/paragraph: the gap should widen
-monotonically as TTZ falls if the policy has internalized the risk
-gradient; report where the crossover to braking-preferred occurs and how
-the TTZ-barrier ablation shifts it.}
-
-\paragraph{Behavioral probes under synthetic occlusion.} We take scenarios
-the agent completes safely, artificially inflate the occluded view fraction
-in its observation, and measure the induced speed reduction.
-\results{Report the dose--response curve: a policy that has learned
-occlusion-aware caution should slow smoothly as occlusion pressure rises;
-the no-occlusion ablation should show no response.}
-
-\begin{figure}[t]
-  \centering
-  \fbox{\parbox{0.9\linewidth}{\centering\vspace{2.8cm}
-  \todofig{Interpretability panel: (a) saliency mass per feature group in
-  free vs.\ near-conflict states; (b) brake-vs-accelerate advantage gap
-  vs.\ min-TTZ bin; (c) speed response to synthetically increased occlusion
-  pressure, full model vs.\ no-occlusion ablation.}
-  \vspace{2.8cm}}}
-  \caption{Probing the learned policy's risk reasoning.}
-  \label{fig:interpret}
-\end{figure}
-
-\subsection{Qualitative Behavior}
-
-\results{Qualitative analysis with 2--4 rendered rollouts (from
-\texttt{visualize.py}): e.g., the agent yielding to a jaywalking pedestrian,
-slowing for an occluded intersection when occlusion features are enabled
-(paired with the same scenario under the no-occlusion ablation colliding or
-near-missing), and a characteristic failure mode.}
-
-% =========================================================================
-\section{Limitations}
+\section{Threats to Validity}
 \label{sec:limitations}
+\textbf{Single policy and seed:} the artifact contains one checkpoint associated with seed 42, so training variance is unknown. \textbf{No comparator:} no baseline or ablation result is available; causal and superiority claims are therefore excluded. \textbf{Terminal-label overlap:} seven episodes record both success and collision, making the rates nonexclusive. \textbf{Initial-state effects:} 411 one-step episodes may represent starts already satisfying the goal criterion. \textbf{Metric missingness:} trajectory and TTZ statistics are computed on subsets, not all episodes. \textbf{Fixed density:} every episode reports 50 vehicles, preventing density analysis. \textbf{Reward ambiguity:} two collision-penalty settings appear in the configuration hierarchy. \textbf{External validity:} results come from one scenario source and simulator and do not imply real-vehicle safety.
 
-Non-ego road users replay logged trajectories and do not react to the ego,
-so the agent cannot learn to exploit (or be robust to) reactive behavior of
-others; closed-loop multi-agent training is a natural extension.
+\section{Reproducibility Checklist}
+A reproducible rerun should preserve the checkpoint, complete resolved configuration, source commit, scenario manifest, seed, evaluation command, and raw per-episode JSON. Exploration must remain disabled during evaluation. The evaluator should add explicit \texttt{timeout}, \texttt{offroad}, \texttt{initial\_goal}, and exclusive \texttt{terminal\_reason} fields. It should also store the resolved observation dimension and whether occlusion features are enabled, preventing checkpoint/configuration mismatches. For statistical reporting, training should be repeated over multiple seeds and all policies should be evaluated on the same ordered scenario list.
 
-\paragraph{Discrete vs.\ continuous control.}
-Our 15-action discrete space (3 throttle $\times$ 5 steering levels) makes
-value-based learning tractable and exploration well-behaved, but it limits
-fine maneuvering and can induce control chattering, which we quantify with
-the jerk and steering-rate metrics of Section~\ref{sec:setup}. Continuous
-control via actor--critic methods (e.g., SAC or TD3) would permit smoother
-trajectories at the cost of a harder exploration problem in
-sparse-conflict scenarios; a finer discretization (Nocturne supports up to
-630 actions including head-angle control) is an intermediate point. A
-systematic discrete-vs-continuous comparison under identical observations
-and rewards is important future work; our smoothness metrics are designed
-to make that comparison well-posed.
-
-\paragraph{Safety guarantees.}
-Our approach is risk-\emph{aware}, not risk-\emph{guaranteed}: the TTZ
-barrier shapes behavior away from imminent conflicts but provides no formal
-constraint satisfaction, and the residual collision rate -- while
-tunable along the Pareto frontier of Section~\ref{sec:tradeoff} -- remains
-above the threshold required for deployment in safety-critical systems.
-Combining the learned policy with a verified shield or control-barrier
-filter is a natural direction.
-
-\paragraph{Other limitations.}
-The occupancy grid discards agent identity and history beyond relative
-velocity; our evaluation horizon (8\,s) is short relative to full-route
-driving; and results are in a 2D simulator, so transfer to
-perception-driven stacks is out of scope.
-
-% =========================================================================
 \section{Conclusion}
-\label{sec:conclusion}
+We presented an occlusion-aware double dueling DQN system for collision avoidance in replayed urban-driving scenarios and analyzed the supplied 1,500-episode evaluation. The checkpoint records a 95.33\% goal rate and 5.13\% collision rate, with ADE 2.24 m and FDE 6.40 m on episodes carrying trajectory statistics. The episode-level evidence is promising but insufficient for a comparative safety claim because it contains one seed, no baseline, overlapping terminal labels, and many one-step episodes. The most important next step is not a stronger claim but a controlled multi-seed ablation campaign with exclusive outcome accounting and scenario-matched comparisons.
 
-We presented a risk-aware deep RL system for collision avoidance under
-physically grounded partial observability, trained on real-world driving
-logs: an
-observation design that makes occlusion risk explicit through ray-cast
-visibility filtering and dedicated occlusion-risk summaries, a TTZ-barrier
-shaped reward that provides a dense safety gradient before conflicts become
-unavoidable, and a statistically grounded evaluation that characterizes the
-safety--efficiency Pareto frontier and stratifies performance by traffic
-density and occlusion severity. \results{One or two sentences summarizing
-the empirical findings once available: headline rates, the frontier shape,
-and the occlusion-stratum result.} We believe that treating the
-safety--efficiency compromise as an explicit, measurable design axis --
-rather than an implicit artifact of reward tuning -- together with
-log-replay realism and high-throughput off-policy training, is a practical
-recipe for studying safety-critical driving behaviors at scale.
-
-% =========================================================================
-\bibliographystyle{plainnat}
+\bibliographystyle{IEEEtran}
 \bibliography{references}
-
-% =========================================================================
-\appendix
-
-\section{Hyperparameters}
-\label{app:hyper}
-
-\begin{table}[h]
-\centering
-\caption{Full training configuration.}
-\label{tab:hyper}
-\begin{tabular}{llll}
-\toprule
-\multicolumn{2}{l}{\textbf{Agent}} & \multicolumn{2}{l}{\textbf{System}} \\
-\midrule
-Learning rate            & $3 \times 10^{-4}$ & Workers $N_w$              & 48 \\
-Discount $\gamma$        & 0.99               & Envs per worker $N_e$      & 2 \\
-$n$-step                 & 3                  & Vec-env mode               & async \\
-Batch size               & 256                & Learner queue size         & $2^{20}$ \\
-Replay buffer size       & $10^6$             & Overload policy            & block \\
-Min replay before train  & 5{,}000            & Weight sync interval       & 16 steps \\
-Train frequency          & 1 / 512 env steps  & Max train steps per cycle  & 32 \\
-Target update            & every 1{,}000 steps& TF32                       & on \\
-PER $\alpha$             & 0.6                & cuDNN benchmark            & on \\
-PER $\beta$              & $0.4 \to 1.0$      & \textbf{Reward}            & \\
-\cmidrule(lr){3-4}
-$\epsilon$ decay         & $1.0 \to 0.05$ over $5{\times}10^5$ & Goal bonus $R_g$ & 100 \\
-Hidden layers            & $4 \times 256$     & Collision penalty $R_c$    & 100 \\
-Dueling / Noisy          & yes / yes          & Off-road penalty $R_o$     & 50 \\
-Optimizer                & Muon + AdamW       & Step cost $c_s$            & 0.1 \\
-Grad-norm clip           & 10                 & Progress scale $c_p$       & 2.0 \\
-\textbf{Observation}     &                    & Heading scale $c_h$        & 0.3 \\
-\cmidrule(lr){1-2}
-Grid ($C{\times}H{\times}W$) & $3 \times 20 \times 10$ & TTZ threshold $\tau$ & 3.0\,s \\
-Range (fwd/back/lat)     & 40 / 5 / 10\,m     & TTZ scale $c_z$            & 0.5 \\
-VRU / veh / edge weights & 2.0 / 1.0 / 3.0    & Episode horizon            & 80 steps \\
-TTZ clip                 & 20\,s              & Simulation $\Delta t$      & 0.1\,s \\
-\bottomrule
-\end{tabular}
-\end{table}
-
-\section{Additional Results}
-\label{app:additional}
-
-\results{Space reserved for: full 95\% bootstrap confidence intervals and
-$p$-values/effect sizes for every comparison in Table~\ref{tab:main};
-per-scenario-type breakdowns (intersections, merges, pedestrian-dense
-scenes); the full collision-penalty sweep table behind
-Figure~\ref{fig:pareto}; per-density-bin numbers behind
-Figure~\ref{fig:density}; sensitivity to the remaining reward coefficients;
-network-depth sweep (depth 4/16/64/256 configurations); full TTZ, ADE/FDE,
-and jerk distribution plots; and BC training details (dataset size, epochs,
-validation accuracy).}
 
 \end{document}
