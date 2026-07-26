@@ -11,6 +11,7 @@
 #include <numeric>
 #include <optional>
 #include <type_traits>
+#include <unordered_set>
 #include <utility>
 
 #include "geometry/geometry_utils.h"
@@ -135,14 +136,105 @@ ViewField::ViewField(const geometry::Vector2D& center, float radius,
 std::vector<const ObjectBase*> ViewField::VisibleObjects(
     const std::vector<const ObjectBase*>& objects) const {
   const int64_t n = objects.size();
+  if (n <= 1) {
+    return objects;
+  }
+  // For small N the overhead of the angular sweep setup exceeds the savings.
+  // The crossover is empirically around 8-12 objects within the view field.
+  if (n < 10) {
+    const Vector2D& o = vision_->center();
+    std::vector<Vector2D> sight_endpoints = ComputeSightEndpoints(objects);
+    const std::vector<geometry::utils::MaskType> mask =
+        VisibleObjectsImpl(objects, o, sight_endpoints);
+    std::vector<const ObjectBase*> ret;
+    for (int64_t i = 0; i < n; ++i) {
+      if (mask[i]) ret.push_back(objects[i]);
+    }
+    return ret;
+  }
+  return VisibleObjectsAngularSweep(objects);
+}
+
+std::vector<const ObjectBase*> ViewField::VisibleObjectsAngularSweep(
+    const std::vector<const ObjectBase*>& objects) const {
+  // O(N log N) angular-sweep visibility:
+  // 1. For each blocker, compute the angular interval [a_min, a_max] it
+  //    subtends from the observer, and its minimum distance.
+  // 2. Sort blockers by min distance (closest first).
+  // 3. Sweep in distance order, maintaining a covered-interval set. A
+  //    blocker is visible iff its angular interval is NOT fully covered by
+  //    the union of intervals of closer blockers.
+  // This replaces the O(N^2) BatchParametricIntersection + BatchIntersects
+  // approach with angular arithmetic + interval operations.
+  const int64_t n = objects.size();
   const Vector2D& o = vision_->center();
-  std::vector<Vector2D> sight_endpoints = ComputeSightEndpoints(objects);
-  const std::vector<geometry::utils::MaskType> mask =
-      VisibleObjectsImpl(objects, o, sight_endpoints);
-  std::vector<const ObjectBase*> ret;
+  const float radius = vision_->radius();
+
+  struct BlockerInfo {
+    const ObjectBase* ptr;
+    float min_dist;
+    float a_min;
+    float a_max;
+  };
+
+  std::vector<BlockerInfo> blockers;
+  blockers.reserve(n);
   for (int64_t i = 0; i < n; ++i) {
-    if (mask[i]) {
-      ret.push_back(objects[i]);
+    if (!objects[i]->can_block_sight()) continue;
+    const auto poly = objects[i]->BoundingPolygon();
+    const auto vertices = poly.Vertices();
+    if (vertices.empty()) continue;
+    float a_min = std::numeric_limits<float>::max();
+    float a_max = std::numeric_limits<float>::lowest();
+    float min_dist = std::numeric_limits<float>::max();
+    for (const auto& v : vertices) {
+      const Vector2D d = v - o;
+      const float dist = d.Norm();
+      if (dist < 1e-6f) continue;
+      if (!vision_->Contains(v)) continue;
+      const float angle = std::atan2(d.y(), d.x());
+      a_min = std::min(a_min, angle);
+      a_max = std::max(a_max, angle);
+      min_dist = std::min(min_dist, dist);
+    }
+    if (a_min > a_max) continue;  // No visible vertices
+    blockers.push_back({objects[i], min_dist, a_min, a_max});
+  }
+
+  // Sort by min distance (closest first) so closer blockers occlude farther.
+  std::sort(blockers.begin(), blockers.end(),
+            [](const BlockerInfo& a, const BlockerInfo& b) {
+              return a.min_dist < b.min_dist;
+            });
+
+  // Covered angular intervals (sorted, non-overlapping). A blocker is
+  // visible iff its [a_min, a_max] is not fully contained in the union.
+  std::vector<std::pair<float, float>> covered;
+
+  std::vector<const ObjectBase*> ret;
+  for (const auto& b : blockers) {
+    // Check if [b.a_min, b.a_max] is fully covered by `covered`.
+    bool fully_covered = false;
+    for (const auto& c : covered) {
+      if (c.first <= b.a_min && c.second >= b.a_max) {
+        fully_covered = true;
+        break;
+      }
+    }
+    if (!fully_covered) {
+      ret.push_back(b.ptr);
+      // Insert [b.a_min, b.a_max] into the covered set and merge overlaps.
+      covered.emplace_back(b.a_min, b.a_max);
+      std::sort(covered.begin(), covered.end());
+      std::vector<std::pair<float, float>> merged;
+      for (const auto& iv : covered) {
+        if (!merged.empty() && iv.first <= merged.back().second) {
+          merged.back().second = std::max(merged.back().second, iv.second);
+        } else {
+          merged.push_back(iv);
+        }
+      }
+      covered = std::move(merged);
     }
   }
   return ret;
@@ -150,12 +242,25 @@ std::vector<const ObjectBase*> ViewField::VisibleObjects(
 
 void ViewField::FilterVisibleObjects(
     std::vector<const ObjectBase*>& objects) const {
-  const Vector2D& o = vision_->center();
-  std::vector<Vector2D> sight_endpoints = ComputeSightEndpoints(objects);
-  const std::vector<geometry::utils::MaskType> mask =
-      VisibleObjectsImpl(objects, o, sight_endpoints);
-  const int64_t pivot = utils::MaskedPartition(mask, objects);
-  objects.resize(pivot);
+  const int64_t n = objects.size();
+  if (n <= 1) return;
+  if (n < 10) {
+    const Vector2D& o = vision_->center();
+    std::vector<Vector2D> sight_endpoints = ComputeSightEndpoints(objects);
+    const std::vector<geometry::utils::MaskType> mask =
+        VisibleObjectsImpl(objects, o, sight_endpoints);
+    const int64_t pivot = utils::MaskedPartition(mask, objects);
+    objects.resize(pivot);
+  } else {
+    std::vector<const ObjectBase*> visible = VisibleObjectsAngularSweep(objects);
+    std::unordered_set<const ObjectBase*> visible_set(visible.begin(),
+                                                       visible.end());
+    auto pivot = std::partition(objects.begin(), objects.end(),
+                                 [&](const ObjectBase* o) {
+                                   return visible_set.count(o) > 0;
+                                 });
+    objects.resize(std::distance(objects.begin(), pivot));
+  }
 }
 
 std::vector<const ObjectBase*> ViewField::VisibleNonblockingObjects(

@@ -1,6 +1,7 @@
 import logging
 import random
 import threading
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -44,6 +45,8 @@ class DDQNAgentConfig:
     max_grad_norm: float = 10.0
     use_torch_compile: bool = False
     compile_mode: str = "reduce-overhead"
+    use_cuda_graph: bool = False
+    cuda_graph_warmup_steps: int = 3
     inference_sync_interval: int = 4
     profile_cuda: bool = False
     profile_first_train_step: bool = True
@@ -53,6 +56,16 @@ class DDQNAgentConfig:
     profile_trace_path: str = "trace.json"
     use_muon: bool = True
     num_envs: int = 1
+    # Shrink-and-perturb reset (SR-SPR / BBF style) to protect plasticity
+    # under high replay ratios. 0 disables.
+    spr_interval: int = 0
+    spr_scale: float = 0.5
+    spr_noise_std: float = 0.001
+    # GPU-resident replay: store obs once, derive next_obs by index.
+    gpu_replay: bool = True
+    replay_obs_dtype: str = "float16"
+    # Sync loss.item() / priority D2H only every N train steps.
+    loss_sync_interval: int = 32
 
     @classmethod
     def from_drl_cfg(
@@ -92,6 +105,8 @@ class DDQNAgentConfig:
             max_grad_norm=drl_cfg["max_grad_norm"],
             use_torch_compile=bool(drl_cfg["use_torch_compile"]),
             compile_mode=str(drl_cfg["compile_mode"]),
+            use_cuda_graph=bool(drl_cfg.get("use_cuda_graph", False)),
+            cuda_graph_warmup_steps=int(drl_cfg.get("cuda_graph_warmup_steps", 3)),
             inference_sync_interval=drl_cfg["inference_sync_interval"],
             profile_cuda=bool(drl_cfg["profile_cuda"]),
             profile_first_train_step=bool(drl_cfg["profile_first_train_step"]),
@@ -101,6 +116,12 @@ class DDQNAgentConfig:
             profile_trace_path=str(drl_cfg["profile_trace_path"]),
             use_muon=bool(drl_cfg["use_muon"]),
             num_envs=int(drl_cfg["num_envs"]),
+            spr_interval=int(drl_cfg.get("spr_interval", 0)),
+            spr_scale=float(drl_cfg.get("spr_scale", 0.5)),
+            spr_noise_std=float(drl_cfg.get("spr_noise_std", 0.001)),
+            gpu_replay=bool(drl_cfg.get("gpu_replay", True)),
+            replay_obs_dtype=str(drl_cfg.get("replay_obs_dtype", "float16")),
+            loss_sync_interval=int(drl_cfg.get("loss_sync_interval", 32)),
         )
 
 
@@ -127,6 +148,19 @@ class DDQNAgent:
         self.epsilon_start = config.epsilon_start
         self.epsilon_end = config.epsilon_end
         self.epsilon_decay_steps = config.epsilon_decay_steps
+
+        # Shrink-and-perturb reset (SR-SPR / BBF style) to protect plasticity
+        # under high replay ratios. Every spr_interval gradient steps the
+        # online net is reset to a shrunken copy of itself with noise injected.
+        self.spr_interval = int(config.spr_interval)
+        self.spr_scale = float(config.spr_scale)
+        self.spr_noise_std = float(config.spr_noise_std)
+
+        # Must be set before _reset_amp_state (bf16 vs fp16 + GradScaler).
+        self._use_cuda_graph = (
+            config.use_cuda_graph and self.device.type == "cuda"
+        )
+        self._cuda_graph_warmup_steps = config.cuda_graph_warmup_steps
 
         self._reset_amp_state()
         self.compile_mode = str(config.compile_mode)
@@ -166,6 +200,11 @@ class DDQNAgent:
             self.use_muon,
         )
 
+        replay_device = (
+            self.device
+            if (config.gpu_replay and self.device.type == "cuda")
+            else None
+        )
         self.replay_buffer = ReplayBuffer(
             obs_dim=obs_dim,
             size=config.replay_buffer_size,
@@ -177,12 +216,50 @@ class DDQNAgent:
             beta_frames=config.beta_frames,
             epsilon=config.per_epsilon,
             num_envs=config.num_envs,
+            device=replay_device,
+            obs_dtype=config.replay_obs_dtype,
         )
+        self._gpu_replay = bool(replay_device is not None)
         self._gamma_n: float = self.gamma**config.n_step
         self.train_steps = 0
         self._grad_accum_counter = 0
         self._pin_buffers = self._init_pin_buffers(config.batch_size, obs_dim)
         self._inference_pin_buf = self._init_inference_pin_buf(config.num_envs, obs_dim)
+
+        # CUDA graph runtime state (flag already set above for AMP).
+        self._train_graph = None
+        self._train_graph_inputs = None
+        self._train_graph_loss = None
+        self._train_graph_td_errors = None
+
+        # Separate streams so actor inference and learner training can overlap
+        # when they share one GPU (same process, or via the GPU scheduler).
+        self._train_stream = (
+            torch.cuda.Stream() if self.device.type == "cuda" else None
+        )
+        self._infer_stream = (
+            torch.cuda.Stream() if self.device.type == "cuda" else None
+        )
+
+        # Deferred host sync for loss / PER priorities.
+        self._loss_sync_interval = max(1, int(config.loss_sync_interval))
+        self._loss_accum = None
+        self._loss_count = 0
+        self._last_loss: Optional[float] = None
+        self._pending_prio: List[Tuple[np.ndarray, torch.Tensor]] = []
+        # Ring of pinned staging buffers for async |td_error| D2H.
+        self._td_pin_ring: List[torch.Tensor] = []
+        self._td_pin_slot = 0
+        if self.device.type == "cuda":
+            ring = max(self._loss_sync_interval, 4)
+            self._td_pin_ring = [
+                torch.empty(config.batch_size, pin_memory=True) for _ in range(ring)
+            ]
+
+        # TF32 matmul precision boost on Ampere+.
+        if self.device.type == "cuda":
+            torch.backends.cuda.matmul.allow_tf32 = True
+            torch.backends.cudnn.allow_tf32 = True
 
     def _instantiate_networks(
         self, make_fn: Callable[[], QNetwork]
@@ -254,7 +331,15 @@ class DDQNAgent:
         # autocast (bf16/fp16 forward) is compatible with Muon; only GradScaler
         # (FP16 loss scaling) conflicts because Muon updates from unscaled grads.
         self._use_amp = self.device.type == "cuda"
-        self._use_scaler = self._use_amp and not self.use_muon
+        # CUDA graphs require bf16 autocast (no GradScaler) because the scaler's
+        # inf/nan checks and dynamic scale updates are host-side logic that
+        # cannot be captured or replayed.
+        if self._use_cuda_graph:
+            self._amp_dtype = torch.bfloat16
+            self._use_scaler = False
+        else:
+            self._amp_dtype = torch.float16
+            self._use_scaler = self._use_amp and not self.use_muon
         self._scaler = torch.amp.GradScaler(enabled=self._use_scaler)
 
     def _set_eval_network_modes(self, target: nn.Module, inference: nn.Module) -> None:
@@ -266,6 +351,37 @@ class DDQNAgent:
     def _reset_inference_noise_if_needed(self) -> None:
         if self.noisy:
             self._unwrap_module(self.inference_net).reset_noise()
+
+        # CUDA graph state for the fixed-shape inference path.
+        self._inference_graph = None
+        self._inference_graph_input = None
+        self._inference_graph_output = None
+        self._inference_graph_max_batch = int(config.num_envs)
+
+    def _capture_inference_graph(self):
+        """Capture the inference net forward pass as a CUDA graph.
+
+        Uses a fixed-size static input tensor (padded to num_envs). The QNetwork
+        processes samples independently, so padding does not affect the first
+        n rows of the output.
+        """
+        max_batch = self._inference_graph_max_batch
+        self._inference_graph_input = torch.zeros(
+            max_batch, self.obs_dim, device=self.device, dtype=torch.float32
+        )
+        # Warmup
+        for _ in range(3):
+            with self.inference_lock:
+                self._reset_inference_noise_if_needed()
+                _ = self.inference_net(self._inference_graph_input)
+        # Capture
+        self._inference_graph = torch.cuda.CUDAGraph()
+        with self.inference_lock:
+            self._reset_inference_noise_if_needed()
+            with torch.cuda.graph(self._inference_graph):
+                self._inference_graph_output = self.inference_net(
+                    self._inference_graph_input
+                )
 
     def _greedy_inference(self, states_t: torch.Tensor) -> torch.Tensor:
         """Forward pass on inference_net under lock with noise reset. Returns Q-values."""
@@ -300,9 +416,8 @@ class DDQNAgent:
             # NoisyNet handles exploration — always greedy
             with torch.no_grad():
                 states_t = self._to_device_pinned(states)
-                actions[:] = (
-                    self._greedy_inference(states_t).argmax(dim=1).cpu().numpy()
-                )
+                q_values = self._greedy_inference_graphed(states_t, batch_size)
+                actions[:] = q_values.argmax(dim=1).cpu().numpy()
             return actions
 
         random_mask = np.random.rand(batch_size) < self.epsilon
@@ -315,10 +430,40 @@ class DDQNAgent:
         if greedy_mask.any():
             with torch.no_grad():
                 states_t = self._to_device_pinned(states[greedy_mask])
-                actions[greedy_mask] = (
-                    self._greedy_inference(states_t).argmax(dim=1).cpu().numpy()
-                )
+                n_greedy = int(greedy_mask.sum())
+                q_values = self._greedy_inference_graphed(states_t, n_greedy)
+                actions[greedy_mask] = q_values.argmax(dim=1).cpu().numpy()
         return actions
+
+    def _greedy_inference_graphed(
+        self, states_t: torch.Tensor, n_valid: int
+    ) -> torch.Tensor:
+        """Run inference via CUDA graph if available and shapes fit, else eager."""
+        stream_ctx = (
+            torch.cuda.stream(self._infer_stream)
+            if self._infer_stream is not None
+            else nullcontext()
+        )
+        with stream_ctx:
+            if (
+                self._use_cuda_graph
+                and n_valid <= self._inference_graph_max_batch
+                and self.device.type == "cuda"
+            ):
+                if self._inference_graph is None:
+                    self._capture_inference_graph()
+                # Copy into padded static tensor and replay.
+                self._inference_graph_input[:n_valid].copy_(states_t)
+                if n_valid < self._inference_graph_max_batch:
+                    self._inference_graph_input[n_valid:].zero_()
+                with self.inference_lock:
+                    self._reset_inference_noise_if_needed()
+                    self._inference_graph.replay()
+                return self._inference_graph_output[:n_valid]
+            # Eager fallback
+            with self.inference_lock:
+                self._reset_inference_noise_if_needed()
+                return self.inference_net(states_t)
 
     def _to_device_pinned(self, np_array: np.ndarray) -> torch.Tensor:
         """Copy numpy array to GPU via pinned memory for faster H2D transfer."""
@@ -351,7 +496,20 @@ class DDQNAgent:
 
     # --- Training ---
 
-    def _batch_to_tensors(self, batch: Dict[str, np.ndarray]):
+    def _batch_to_tensors(self, batch):
+        # GPU-resident replay already returns device tensors — no H2D copy.
+        if self._gpu_replay and torch.is_tensor(batch["obs"]):
+            obs = batch["obs"].float()
+            next_obs = batch["next_obs"].float()
+            return (
+                obs,
+                next_obs,
+                batch["acts"],
+                batch["rews"],
+                batch["done"],
+                batch["weights"],
+            )
+
         if self._pin_buffers is not None:
             pb = self._pin_buffers
             pb["obs"].copy_(torch.from_numpy(batch["obs"]))
@@ -384,7 +542,11 @@ class DDQNAgent:
         )
 
     def _compute_loss(self, obs_t, acts_t, next_obs_t, rews_t, dones_t, weights_t):
-        with torch.amp.autocast(device_type=self.device.type, enabled=self._use_amp):
+        with torch.amp.autocast(
+            device_type=self.device.type,
+            dtype=self._amp_dtype,
+            enabled=self._use_amp,
+        ):
             current_q = self.online_net(obs_t).gather(1, acts_t.unsqueeze(1)).squeeze(1)
             with torch.no_grad():
                 best_acts = self.online_net(next_obs_t).argmax(dim=1)
@@ -430,26 +592,66 @@ class DDQNAgent:
 
         self._profiler.maybe_start()
 
-        # Noisy layers re-sample each forward pass; reset ensures fresh noise for this step.
-        self.online_net.train()
-        if self.noisy:
-            self._unwrap_module(self.online_net).reset_noise()
-            self._unwrap_module(self.target_net).reset_noise()
-
-        batch = self.replay_buffer.sample_batch()
-        obs_t, next_obs_t, acts_t, rews_t, dones_t, weights_t = self._batch_to_tensors(
-            batch
+        stream_ctx = (
+            torch.cuda.stream(self._train_stream)
+            if self._train_stream is not None
+            else nullcontext()
         )
-        loss, td_errors = self._compute_loss(
-            obs_t, acts_t, next_obs_t, rews_t, dones_t, weights_t
-        )
-        self._apply_gradient_step(loss)
+        with stream_ctx:
+            # Noisy layers re-sample each forward pass; reset ensures fresh noise.
+            self.online_net.train()
+            if self.noisy:
+                self._unwrap_module(self.online_net).reset_noise()
+                self._unwrap_module(self.target_net).reset_noise()
 
-        new_priorities = td_errors.detach().abs().cpu().numpy()
-        self.replay_buffer.update_priorities(batch["indices"], new_priorities)
+            batch = self.replay_buffer.sample_batch()
+            obs_t, next_obs_t, acts_t, rews_t, dones_t, weights_t = (
+                self._batch_to_tensors(batch)
+            )
+
+            # Use CUDA graph replay after warmup if enabled and shapes are stable.
+            if (
+                self._use_cuda_graph
+                and self.train_steps >= self._cuda_graph_warmup_steps
+                and self.grad_accum_steps == 1
+            ):
+                if self._train_graph is None:
+                    self._capture_train_graph(
+                        obs_t, next_obs_t, acts_t, rews_t, dones_t, weights_t
+                    )
+                loss, td_errors = self._replay_train_graph(
+                    obs_t, next_obs_t, acts_t, rews_t, dones_t, weights_t
+                )
+            else:
+                loss, td_errors = self._compute_loss(
+                    obs_t, acts_t, next_obs_t, rews_t, dones_t, weights_t
+                )
+                self._apply_gradient_step(loss)
+
+            # Queue priority update without forcing a D2H sync this step.
+            self._queue_priority_update(batch["indices"], td_errors)
+
+            # Accumulate loss on-device; sync to host every N steps.
+            loss_det = loss.detach()
+            if self._loss_accum is None:
+                self._loss_accum = loss_det
+            else:
+                self._loss_accum = self._loss_accum + loss_det
+            self._loss_count += 1
+
         self.train_steps += 1
         self.replay_buffer.update_beta(env_steps)
         self.update_exploration(env_steps)
+
+        if self.train_steps % self._loss_sync_interval == 0:
+            self._flush_host_syncs()
+
+        # Shrink-and-perturb reset to protect plasticity under high replay ratio.
+        if (self.spr_interval > 0
+                and self.train_steps % self.spr_interval == 0
+                and self.train_steps > 0):
+            self._flush_host_syncs()
+            self._shrink_and_perturb()
 
         should_sync_inference = (self.train_steps % self.inference_sync_interval) == 0
         if self.train_steps % self.target_update_freq == 0:
@@ -461,9 +663,141 @@ class DDQNAgent:
         self._profiler.maybe_log_memory(self.train_steps)
         self._profiler.advance()
 
-        return float(loss.item())
+        return self._last_loss
+
+    def _queue_priority_update(self, indices, td_errors: torch.Tensor) -> None:
+        """Stage a non-blocking D2H of |td_errors| for a later priority update."""
+        td_abs = td_errors.detach().abs()
+        idx_np = (
+            indices.detach().cpu().numpy()
+            if torch.is_tensor(indices)
+            else np.asarray(indices, dtype=np.int64).copy()
+        )
+        if (
+            self._td_pin_ring
+            and td_abs.shape[0] == self._td_pin_ring[0].shape[0]
+        ):
+            staged = self._td_pin_ring[self._td_pin_slot]
+            self._td_pin_slot = (self._td_pin_slot + 1) % len(self._td_pin_ring)
+            staged.copy_(td_abs, non_blocking=True)
+            self._pending_prio.append((idx_np, staged))
+        else:
+            self._pending_prio.append((idx_np, td_abs.detach().cpu()))
+
+    def _flush_host_syncs(self) -> None:
+        """Sync pending loss and PER priority updates to the host."""
+        if self._loss_count > 0 and self._loss_accum is not None:
+            self._last_loss = float(
+                (self._loss_accum / self._loss_count).item()
+            )
+            self._loss_accum = None
+            self._loss_count = 0
+
+        if self._pending_prio:
+            # Ensure all non-blocking D2H copies have completed.
+            if self.device.type == "cuda":
+                torch.cuda.current_stream().synchronize()
+            for indices, td_tensor in self._pending_prio:
+                self.replay_buffer.update_priorities(
+                    indices, td_tensor.numpy()
+                )
+            self._pending_prio.clear()
+
+    # --- CUDA Graph Capture ---
+
+    def _capture_train_graph(self, obs_t, next_obs_t, acts_t, rews_t, dones_t, weights_t):
+        """Capture forward + backward + optimizer as a single CUDA graph.
+
+        Static input tensors are allocated once and reused for every replay.
+        The graph reads from these tensors, so the caller must copy new batch
+        data into them before each replay.
+        """
+        # Allocate static input tensors on the GPU.
+        self._train_graph_inputs = {
+            "obs": torch.zeros_like(obs_t),
+            "next_obs": torch.zeros_like(next_obs_t),
+            "acts": torch.zeros_like(acts_t),
+            "rews": torch.zeros_like(rews_t),
+            "dones": torch.zeros_like(dones_t),
+            "weights": torch.zeros_like(weights_t),
+        }
+        # Copy current batch into static inputs so warmup runs on real data.
+        self._train_graph_inputs["obs"].copy_(obs_t)
+        self._train_graph_inputs["next_obs"].copy_(next_obs_t)
+        self._train_graph_inputs["acts"].copy_(acts_t)
+        self._train_graph_inputs["rews"].copy_(rews_t)
+        self._train_graph_inputs["dones"].copy_(dones_t)
+        self._train_graph_inputs["weights"].copy_(weights_t)
+
+        # Warmup runs (required before graph capture for cudnn/cublas init).
+        for _ in range(3):
+            self._run_graph_interior()
+
+        # Capture the graph.
+        self._train_graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(self._train_graph):
+            self._train_graph_loss, self._train_graph_td_errors = (
+                self._run_graph_interior()
+            )
+
+    def _run_graph_interior(self):
+        """Forward + backward + optimizer step using static input tensors.
+
+        Returns (loss, td_errors) from the static output tensors.
+        """
+        gi = self._train_graph_inputs
+        loss, td_errors = self._compute_loss(
+            gi["obs"], gi["acts"], gi["next_obs"], gi["rews"], gi["dones"], gi["weights"]
+        )
+        self._apply_gradient_step(loss)
+        return loss, td_errors
+
+    def _replay_train_graph(self, obs_t, next_obs_t, acts_t, rews_t, dones_t, weights_t):
+        """Copy new inputs into static tensors and replay the captured graph."""
+        gi = self._train_graph_inputs
+        gi["obs"].copy_(obs_t)
+        gi["next_obs"].copy_(next_obs_t)
+        gi["acts"].copy_(acts_t)
+        gi["rews"].copy_(rews_t)
+        gi["dones"].copy_(dones_t)
+        gi["weights"].copy_(weights_t)
+        self._train_graph.replay()
+        return self._train_graph_loss, self._train_graph_td_errors
 
     # --- Network Sync ---
+
+    def _shrink_and_perturb(self):
+        """Shrink-and-perturb reset (SR-SPR / BBF style).
+
+        Resets the online network to a shrunken copy of itself (scaled by
+        ``spr_scale``) with Gaussian noise injected (``spr_noise_std``). This
+        restores plasticity lost under high replay ratios while preserving
+        the learned features. The optimizer state is also reset.
+        """
+        online = self._unwrap_module(self.online_net)
+        with torch.no_grad():
+            for param in online.parameters():
+                param.mul_(self.spr_scale)
+                if self.spr_noise_std > 0.0:
+                    param.add_(torch.randn_like(param) * self.spr_noise_std)
+        # Reset the optimizer so it doesn't apply stale momentum to the
+        # perturbed weights.
+        self.optimizer.zero_grad(set_to_none=True)
+        if hasattr(self.optimizer, 'reset_state'):
+            self.optimizer.reset_state()
+        else:
+            # Fallback: rebuild the optimizer from scratch with the same lr.
+            lr = get_optimizer_lr(self.optimizer)
+            self.optimizer = build_optimizer(
+                self._unwrap_module(self.online_net),
+                lr,
+                self.device.type,
+                self.use_muon,
+            )
+        # Invalidate the CUDA graph since the optimizer was rebuilt and its
+        # momentum buffers now live at different addresses.
+        self._train_graph = None
+        self._train_graph_inputs = None
 
     def sync_target(self):
         online_state = self._unwrap_module(self.online_net).state_dict()

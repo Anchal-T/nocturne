@@ -58,10 +58,9 @@ class NoisyLinear(nn.Module):
             self.bias_sigma.data.fill_(self.std_init / math.sqrt(self.out_features))
 
     def reset_noise(self):
-        epsilon_in = self._scale_noise(self.in_features)
-        epsilon_out = self._scale_noise(self.out_features)
-        epsilon_in = epsilon_in.to(self.weight_mu.device)
-        epsilon_out = epsilon_out.to(self.weight_mu.device)
+        device = self.weight_mu.device
+        epsilon_in = self._scale_noise(self.in_features, device)
+        epsilon_out = self._scale_noise(self.out_features, device)
 
         self.weight_epsilon.copy_(epsilon_out.ger(epsilon_in))
         if self.use_bias:
@@ -81,7 +80,7 @@ class NoisyLinear(nn.Module):
         return F.linear(x, weight, bias)
 
     @staticmethod
-    def _scale_noise(size):
-        x = torch.randn(size)
+    def _scale_noise(size, device=None):
+        x = torch.randn(size, device=device)
         x = x.sign().mul(x.abs().sqrt())
         return x

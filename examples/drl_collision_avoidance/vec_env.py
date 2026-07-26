@@ -327,6 +327,8 @@ class AsyncSubprocVecEnv:
         self.num_workers = self.n_envs // num_envs_per_worker
         self.closed = False
         self._pending_workers = set()
+        # Workers that finished while we were waiting on the other half.
+        self._parked_ready_workers = []
 
         if (observation_space is None) != (action_space is None):
             raise ValueError(
@@ -475,8 +477,13 @@ class AsyncSubprocVecEnv:
             self.remotes[worker_id].send(("step", None))
             self._pending_workers.add(worker_id)
 
-    def step_wait(self, min_ready=1, timeout=None):
-        """Wait for signals from workers and read results from shared memory."""
+    def step_wait(self, min_ready=1, timeout=None, env_ids=None):
+        """Wait for signals from workers and read results from shared memory.
+
+        If ``env_ids`` is given, wait until every worker covering those envs is
+        ready (used by the alternating-half overlap collector). Otherwise wait
+        until at least ``min_ready`` envs are ready.
+        """
         if min_ready < 1:
             raise ValueError("min_ready must be >= 1")
         if not self._pending_workers:
@@ -486,13 +493,39 @@ class AsyncSubprocVecEnv:
             empty_dones = np.empty((0,), dtype=bool)
             return empty_ids, empty_obs, empty_rewards, empty_dones, []
 
-        target_ready_workers = min(
-            max(1, math.ceil(min_ready / self.num_envs_per_worker)),
-            len(self._pending_workers),
-        )
+        target_worker_ids = None
+        if env_ids is not None:
+            env_ids_arr = np.asarray(env_ids, dtype=np.int64).reshape(-1)
+            target_worker_ids = {
+                int(eid) // self.num_envs_per_worker for eid in env_ids_arr
+            }
+            # Only wait for workers that are actually pending.
+            target_worker_ids &= set(self._pending_workers)
+            if not target_worker_ids:
+                empty_ids = np.empty((0,), dtype=np.int64)
+                empty_obs = np.empty((0, *self._obs_shape), dtype=np.float32)
+                empty_rewards = np.empty((0,), dtype=np.float32)
+                empty_dones = np.empty((0,), dtype=bool)
+                return empty_ids, empty_obs, empty_rewards, empty_dones, []
+            target_ready_workers = len(target_worker_ids)
+        else:
+            target_ready_workers = min(
+                max(1, math.ceil(min_ready / self.num_envs_per_worker)),
+                len(self._pending_workers),
+            )
         deadline = None if timeout is None else (time.monotonic() + timeout)
 
         ready_workers = []
+
+        # First, claim any parked workers that match this wait.
+        if target_worker_ids is not None and self._parked_ready_workers:
+            claimed = [w for w in self._parked_ready_workers if w in target_worker_ids]
+            if claimed:
+                self._parked_ready_workers = [
+                    w for w in self._parked_ready_workers if w not in target_worker_ids
+                ]
+                ready_workers.extend(claimed)
+
         while len(ready_workers) < target_ready_workers and self._pending_workers:
             pending_remotes = [self.remotes[i] for i in self._pending_workers]
             wait_timeout = None
@@ -511,6 +544,9 @@ class AsyncSubprocVecEnv:
                     raise RuntimeError(
                         f"Worker {worker_id} died with exception: {msg}"
                     ) from msg
+                if target_worker_ids is not None and worker_id not in target_worker_ids:
+                    self._parked_ready_workers.append(worker_id)
+                    continue
                 ready_workers.append(worker_id)
 
         if not ready_workers:
@@ -554,6 +590,7 @@ class AsyncSubprocVecEnv:
 
     def reset(self):
         self._pending_workers.clear()
+        self._parked_ready_workers.clear()
         for remote in self.remotes:
             remote.send(("reset", None))
         for remote in self.remotes:
@@ -775,33 +812,74 @@ class RayAsyncVecEnv:
             worker_actions = np.asarray([action_by_env[eid] for eid in worker_env_ids])
             self._pending[wid] = self._workers[wid].step.remote(worker_actions)
 
-    def step_wait(self, min_ready=1, timeout=None):
-        """Wait for at least min_ready env results and return a batch.
+    def step_wait(self, min_ready=1, timeout=None, env_ids=None):
+        """Wait for ready workers and return a batch.
 
-        Returns (ready_ids, obs, rewards, dones, infos) — same signature as
+        If ``env_ids`` is given, wait until every worker covering those envs is
+        ready (alternating-half overlap). Same return signature as
         AsyncSubprocVecEnv.step_wait().
         """
-        if not self._pending:
+        if not hasattr(self, "_parked_ready"):
+            self._parked_ready = {}
+
+        if not self._pending and not self._parked_ready:
             return self._empty_result()
 
-        n_workers_needed = min(
-            max(1, math.ceil(min_ready / self.num_envs_per_worker)),
-            len(self._pending),
-        )
-        wids = list(self._pending.keys())
-        futures = [self._pending[wid] for wid in wids]
-        # ray.wait() returns the same ObjectRef objects from the input list, so id() is stable.
-        id_to_wid = {id(f): wid for f, wid in zip(futures, wids)}
+        if env_ids is not None:
+            target_wids = {
+                int(eid) // self.num_envs_per_worker
+                for eid in np.asarray(env_ids, dtype=np.int64).reshape(-1)
+            }
+            # Wait specifically for the target half's pending futures.
+            missing = [w for w in target_wids if w in self._pending]
+            if missing:
+                futures = [self._pending[w] for w in missing]
+                id_to_wid = {id(f): w for f, w in zip(futures, missing)}
+                ready_futures, _ = self._ray.wait(
+                    futures, num_returns=len(futures), timeout=timeout
+                )
+                for f in ready_futures:
+                    wid = id_to_wid[id(f)]
+                    self._parked_ready[wid] = self._ray.get(self._pending.pop(wid))
+            # Also drain any non-target pending that already finished so they
+            # don't pile up — park them for the other half.
+            if self._pending:
+                wids = list(self._pending.keys())
+                futures = [self._pending[w] for w in wids]
+                id_to_wid = {id(f): w for f, w in zip(futures, wids)}
+                done_futures, _ = self._ray.wait(
+                    futures, num_returns=len(futures), timeout=0
+                )
+                for f in done_futures:
+                    wid = id_to_wid[id(f)]
+                    self._parked_ready[wid] = self._ray.get(self._pending.pop(wid))
+            ready_wids = sorted(w for w in target_wids if w in self._parked_ready)
+        else:
+            n_workers_needed = min(
+                max(1, math.ceil(min_ready / self.num_envs_per_worker)),
+                len(self._pending) + len(self._parked_ready),
+            )
+            ready_wids = sorted(self._parked_ready.keys())
+            still_needed = n_workers_needed - len(ready_wids)
+            if still_needed > 0 and self._pending:
+                wids = list(self._pending.keys())
+                futures = [self._pending[w] for w in wids]
+                id_to_wid = {id(f): w for f, w in zip(futures, wids)}
+                ready_futures, _ = self._ray.wait(
+                    futures, num_returns=still_needed, timeout=timeout
+                )
+                for f in ready_futures:
+                    wid = id_to_wid[id(f)]
+                    self._parked_ready[wid] = self._ray.get(self._pending.pop(wid))
+                    ready_wids.append(wid)
+            ready_wids = sorted(ready_wids)[:n_workers_needed]
 
-        ready_futures, _ = self._ray.wait(futures, num_returns=n_workers_needed, timeout=timeout)
-        if not ready_futures:
+        if not ready_wids:
             return self._empty_result()
-
-        ready_wids = sorted(id_to_wid[id(f)] for f in ready_futures)
 
         all_obs, all_rew, all_done, all_info, ready_env_ids = [], [], [], [], []
         for wid in ready_wids:
-            obs, rewards, dones, infos = self._ray.get(self._pending.pop(wid))
+            obs, rewards, dones, infos = self._parked_ready.pop(wid)
             start = wid * self.num_envs_per_worker
             all_obs.append(np.asarray(obs, dtype=np.float32))
             all_rew.append(np.asarray(rewards, dtype=np.float32))
@@ -810,7 +888,6 @@ class RayAsyncVecEnv:
             ready_env_ids.extend(range(start, start + self.num_envs_per_worker))
 
         obs_arr = np.concatenate(all_obs, axis=0)
-        # Keep a local obs cache so get_obs() doesn't need to contact workers.
         if self._last_obs is None:
             self._last_obs = np.zeros((self.n_envs, *self._obs_shape), dtype=np.float32)
         self._last_obs[ready_env_ids] = obs_arr

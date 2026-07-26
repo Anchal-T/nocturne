@@ -48,6 +48,10 @@ class BVH {
     const Node* RChild() const { return children_[1]; }
     Node* RChild() { return children_[1]; }
 
+    // Update the AABB of this node. Used by BVH::Refit to refresh leaf
+    // AABBs (from moved objects) and propagate up to internal nodes.
+    void RefitAABB(const AABB& aabb) { aabb_ = aabb; }
+
    protected:
     AABB aabb_;
     const AABBInterface* object_ = nullptr;
@@ -128,6 +132,25 @@ class BVH {
                                                           candidates);
     }
     return candidates;
+  }
+
+  // Refit the BVH in-place: update each leaf's AABB from its object's current
+  // position, then propagate the new AABBs up to the root. This is O(N)
+  // (one pass over nodes_) vs Reset's O(N log N) (Morton encode + sort +
+  // tree build). Safe to call when objects have moved but none were added
+  // or removed; the tree topology is unchanged.
+  void Refit() {
+    if (root_ == nullptr) return;
+    // nodes_ stores children before parents (MakeNode pushes children
+    // before the parent that links them), so a forward pass updates
+    // leaves first, then internal nodes after their children.
+    for (Node* node : nodes_) {
+      if (node->IsLeaf()) {
+        node->RefitAABB(node->object()->GetAABB());
+      } else {
+        node->RefitAABB(node->LChild()->aabb() || node->RChild()->aabb());
+      }
+    }
   }
 
  protected:

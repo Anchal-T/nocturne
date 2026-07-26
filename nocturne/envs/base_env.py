@@ -33,6 +33,10 @@ class BaseEnv(Env):
         """
         super().__init__()
         self.cfg = cfg
+        # Hoist the scenario config dict out of the per-reset _get_simulation
+        # path: get_scenario_dict re-converts the OmegaConf tree every call,
+        # and reset() hits it on every scenario switch.
+        self._scenario_config = get_scenario_dict(cfg)
         with open(os.path.join(cfg['scenario_path'],
                                'valid_files.json')) as file:
             self.valid_veh_dict = json.load(file)
@@ -44,7 +48,7 @@ class BaseEnv(Env):
         self.file = self.files[np.random.randint(len(self.files))]
         self.simulation = Simulation(os.path.join(cfg['scenario_path'],
                                                   self.file),
-                                     config=get_scenario_dict(cfg))
+                                     config=self._scenario_config)
 
         self.scenario = self.simulation.getScenario()
         self.controlled_vehicles = self.scenario.getObjectsThatMoved()
@@ -75,6 +79,16 @@ class BaseEnv(Env):
         if self._pool_size > 0:
             self._pool_files = [self.files[np.random.randint(len(self.files))]
                                 for _ in range(self._pool_size)]
+
+        # Lazy blacklist of scenario files that yielded zero controllable
+        # vehicles, so the `while not enough_vehicles` retry loop in reset()
+        # never retries a known-bad file (removes a straggler source).
+        self._bad_files: set = set()
+
+        # Simulation+snapshot cache: reuse a single Simulation per file and
+        # restore its post-warmup state instead of re-parsing JSON and running
+        # 10 physics steps on every reset. Keyed by filename.
+        self._sim_cache: Dict[str, Any] = {}
 
         obs_dict, _ = self.reset()
         self.observation_space = Box(low=-np.inf,
@@ -336,7 +350,13 @@ class BaseEnv(Env):
         return obs_dict, rew_dict, done_dict, truncated_dict, info_dict
 
     def _get_simulation(self):
-        """Return (file, Simulation) — from pool working set if enabled."""
+        """Return (file, Simulation) — from pool working set if enabled.
+
+        On cache hit (file seen before), restores the post-warmup snapshot on
+        the cached Simulation instead of re-parsing JSON. The caller
+        (reset()) checks the returned Simulation's ``_from_cache`` attribute to
+        decide whether to run the 10-step warmup.
+        """
         if self._pool_size > 0:
             self._pool_reset_count += 1
             if self._resample_interval > 0 and self._pool_reset_count % self._resample_interval == 0:
@@ -346,10 +366,57 @@ class BaseEnv(Env):
             f = self._pool_files[np.random.randint(self._pool_size)]
         else:
             f = self.files[np.random.randint(len(self.files))]
+        # Cache hit: restore snapshot on the cached Simulation (avoids JSON
+        # parse + 10 physics steps). Cache miss: create a fresh Simulation.
+        if f in self._sim_cache:
+            sim = self._sim_cache[f]
+            sim.getScenario().restore_snapshot()
+            sim._from_cache = True
+            return f, sim
         path = os.path.join(self.cfg['scenario_path'], f)
-        return f, Simulation(path, config=get_scenario_dict(self.cfg))
+        sim = Simulation(path, config=self._scenario_config)
+        sim._from_cache = False
+        return f, sim
 
-    def reset(self):
+    def _compute_obs_dim(self) -> int:
+        """Compute the observation dimension from C++ size getters.
+
+        This avoids building a full observation just to measure its shape,
+        which is what the original reset() did via `dead_obs =
+        self.get_observation(...)`.
+        """
+        sc = self.scenario
+        sub = self.cfg['subscriber']
+        use_ego = sub.get('use_ego_state', True)
+        use_obs = sub.get('use_observations', True)
+        dim = 0
+        if use_ego:
+            dim += sc.getEgoFeatureSize()
+        if use_obs:
+            dim += (
+                sc.getMaxNumVisibleObjects() * sc.getObjectFeatureSize()
+                + sc.getMaxNumVisibleRoadPoints() * sc.getRoadPointFeatureSize()
+                + sc.getMaxNumVisibleTrafficLights() * sc.getTrafficLightFeatureSize()
+                + sc.getMaxNumVisibleStopSigns() * sc.getStopSignsFeatureSize()
+            )
+        if sub.get('use_occlusion_features', False):
+            from nocturne.utils.occlusion_features import OCCLUSION_FEATURE_SIZE
+            dim += OCCLUSION_FEATURE_SIZE
+        return dim
+
+    def reset(self, build_obs: bool = True):
+        """See superclass.
+
+        Args:
+            build_obs: When False, skip observation construction during the
+                10-step expert warmup and the final per-vehicle obs loop.
+                The simulation still advances (scene dynamics are needed)
+                but no ``get_observation`` calls are made. The returned
+                ``obs_dict`` maps each controlled vehicle id to a zero-length
+                placeholder array; callers that build their own observations
+                (e.g. ``CollisionAvoidanceEnv``) pass ``build_obs=False``
+                to avoid computing and discarding ~13k-float observations.
+        """
         """See superclass."""
         self.t = 0
         self.step_num = 0
@@ -364,9 +431,13 @@ class BaseEnv(Env):
                 Construct context dictionary of observations that can be used to
                 warm up policies by stepping all vehicles as experts.
             #####################################################################'''
-            dead_obs = self.get_observation(self.scenario.getVehicles()[0])
-            self.dead_feat = -np.ones(
-                dead_obs.shape[0] * self.n_frames_stacked)
+            if build_obs:
+                dead_obs = self.get_observation(self.scenario.getVehicles()[0])
+                self.dead_feat = -np.ones(
+                    dead_obs.shape[0] * self.n_frames_stacked)
+            else:
+                obs_dim = self._compute_obs_dim()
+                self.dead_feat = -np.ones(obs_dim * self.n_frames_stacked)
             # step all the vehicles forward by one second and record their observations as context
             context_len = max(10, self.n_frames_stacked)
             self.context_dict = {
@@ -377,11 +448,18 @@ class BaseEnv(Env):
             }
             for veh in self.scenario.getObjectsThatMoved():
                 veh.expert_control = True
-            for _ in range(10):
-                for veh in self.scenario.getObjectsThatMoved():
-                    self.context_dict[veh.getID()].append(
-                        self.get_observation(veh))
-                self.simulation.step(self.cfg['dt'])
+            from_cache = getattr(self.simulation, '_from_cache', False)
+            if not from_cache:
+                for _ in range(10):
+                    if build_obs:
+                        for veh in self.scenario.getObjectsThatMoved():
+                            self.context_dict[veh.getID()].append(
+                                self.get_observation(veh))
+                    self.simulation.step(self.cfg['dt'])
+                # Save the post-warmup state so the next reset of this file is a
+                # snapshot restore instead of a JSON parse + 10 physics steps.
+                self.scenario.save_snapshot()
+                self._sim_cache[self.file] = self.simulation
             # now hand back control to our actual controllers
             for veh in self.scenario.getObjectsThatMoved():
                 veh.expert_control = False
@@ -435,6 +513,15 @@ class BaseEnv(Env):
             # make all the vehicles that are in excess of max_num_vehicles controlled by an expert
             for veh in self.expert_controlled_vehicles:
                 veh.expert_control = True
+            # Scope collision checking to controlled vehicles only: set
+            # check_collision=False on non-controlled objects so the O(N^2)
+            # all-pairs loop in UpdateCollision skips pairs where neither
+            # side is controlled. If a controlled ego (check_collision=True)
+            # hits a non-controlled object, the check still runs and both
+            # get collided=True, so behavior is preserved.
+            controlled_id_set = set(self.all_vehicle_ids)
+            for veh in self.scenario.getObjects():
+                veh.check_collision = veh.getID() in controlled_id_set
             # remove vehicles that are currently at an invalid position
             for veh in self.vehicles_to_delete:
                 self.scenario.removeVehicle(veh)
@@ -443,6 +530,27 @@ class BaseEnv(Env):
             # or else we might be stuck in an infinite loop
             if len(self.all_vehicle_ids) > 0 or len(self.files) == 1:
                 enough_vehicles = True
+            else:
+                # Blacklist this file so we never retry it; remove from the
+                # working set so the next pick is guaranteed different.
+                self._bad_files.add(self.file)
+                if self.file in self.files:
+                    self.files.remove(self.file)
+                if self._pool_size > 0:
+                    self._pool_files = [
+                        f for f in self._pool_files if f != self.file
+                    ]
+                    if self.files:
+                        self._pool_files.append(
+                            self.files[np.random.randint(len(self.files))])
+                if not self.files:
+                    # Exhausted all known files; fall back to the original list
+                    # rather than crashing.
+                    self.files = [f for f in self.valid_veh_dict
+                                  if f not in self._bad_files] or list(
+                                      self.valid_veh_dict.keys())
+                    if not self.files:
+                        enough_vehicles = True
 
         # for one reason or another (probably we had a file where all the agents achieved their goals)
         # we have no controlled vehicles
@@ -470,17 +578,22 @@ class BaseEnv(Env):
             goal_pos = np.array([goal_pos.x, goal_pos.y])
             dist = np.linalg.norm(obj_pos - goal_pos)
             self.goal_dist_normalizers[veh_id] = dist
-            # compute the obs
-            self.context_dict[veh_id].append(self.get_observation(veh_obj))
-            if self.n_frames_stacked > 1:
-                veh_deque = self.context_dict[veh_id]
-                context_list = list(
-                    islice(veh_deque,
-                           len(veh_deque) - self.n_frames_stacked,
-                           len(veh_deque)))
-                obs_dict[veh_id] = np.concatenate(context_list)
+            if build_obs:
+                # compute the obs
+                self.context_dict[veh_id].append(self.get_observation(veh_obj))
+                if self.n_frames_stacked > 1:
+                    veh_deque = self.context_dict[veh_id]
+                    context_list = list(
+                        islice(veh_deque,
+                               len(veh_deque) - self.n_frames_stacked,
+                               len(veh_deque)))
+                    obs_dict[veh_id] = np.concatenate(context_list)
+                else:
+                    obs_dict[veh_id] = self.context_dict[veh_id][-1]
             else:
-                obs_dict[veh_id] = self.context_dict[veh_id][-1]
+                # Caller builds its own observations; just register the id
+                # with a zero-length placeholder so next(iter(obs_dict)) works.
+                obs_dict[veh_id] = np.zeros(0, dtype=np.float32)
             # pick the vehicle that has to travel the furthest distance and use it for rendering
             if dist > max_goal_dist:
                 # this attribute is just used for rendering of the view
@@ -510,37 +623,61 @@ class BaseEnv(Env):
         subscriber_cfg = self.cfg['subscriber']
         use_occlusion_features = subscriber_cfg.get('use_occlusion_features',
                                                     False)
+        use_ego = subscriber_cfg.get('use_ego_state', True)
+        use_obs = subscriber_cfg.get('use_observations', True)
+        view_dist = subscriber_cfg['view_dist']
+        view_angle = subscriber_cfg['view_angle']
+        head_angle = veh_obj.head_angle
+
         if use_occlusion_features:
-            occ_obs = compute_occlusion_features(
-                self.scenario,
+            # Single visibility pass: call visible_state once with padding=True
+            # and derive both the flattened features and the occlusion features
+            # from the same dict. This replaces the previous pattern of calling
+            # flattened_visible_state (one full ray-cast) and then
+            # compute_occlusion_features (a second full ray-cast with identical
+            # parameters).
+            visible = self.scenario.visible_state(
                 veh_obj,
-                subscriber_cfg['view_dist'],
-                subscriber_cfg['view_angle'],
-                head_angle=veh_obj.head_angle,
+                view_dist=view_dist,
+                view_angle=view_angle,
+                head_angle=head_angle,
+                padding=True,
             )
-        if self.cfg['subscriber']['use_ego_state'] and self.cfg['subscriber'][
-                'use_observations']:
-            obs_parts = [
-                ego_obs,
-                self.scenario.flattened_visible_state(
-                    veh_obj,
-                    view_dist=self.cfg['subscriber']['view_dist'],
-                    view_angle=self.cfg['subscriber']['view_angle'],
-                    head_angle=veh_obj.head_angle)
-            ]
-        elif self.cfg['subscriber']['use_ego_state'] and not self.cfg[
-                'subscriber']['use_observations']:
-            obs_parts = [ego_obs]
-        else:
-            obs_parts = [
-                self.scenario.flattened_visible_state(
-                    veh_obj,
-                    view_dist=self.cfg['subscriber']['view_dist'],
-                    view_angle=self.cfg['subscriber']['view_angle'],
-                    head_angle=veh_obj.head_angle)
-            ]
-        if use_occlusion_features:
+            occ_obs = compute_occlusion_features_from_objects(
+                visible.get("objects", np.zeros((0, 13), dtype=np.float32)),
+                view_dist, view_angle,
+            )
+            obs_parts = []
+            if use_ego:
+                obs_parts.append(ego_obs)
+            if use_obs:
+                obs_parts.extend([
+                    visible["objects"].reshape(-1),
+                    visible["road_points"].reshape(-1),
+                    visible["traffic_lights"].reshape(-1),
+                    visible["stop_signs"].reshape(-1),
+                ])
             obs_parts.append(occ_obs)
+        else:
+            if use_ego and use_obs:
+                obs_parts = [
+                    ego_obs,
+                    self.scenario.flattened_visible_state(
+                        veh_obj,
+                        view_dist=view_dist,
+                        view_angle=view_angle,
+                        head_angle=head_angle)
+                ]
+            elif use_ego and not use_obs:
+                obs_parts = [ego_obs]
+            else:
+                obs_parts = [
+                    self.scenario.flattened_visible_state(
+                        veh_obj,
+                        view_dist=view_dist,
+                        view_angle=view_angle,
+                        head_angle=head_angle)
+                ]
         obs = np.concatenate(obs_parts)
         return obs
 

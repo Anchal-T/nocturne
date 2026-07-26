@@ -23,6 +23,7 @@ def _make_async_vec_env(n_envs=4, num_envs_per_worker=2):
     env.num_envs_per_worker = num_envs_per_worker
     env._action_buf = torch.full((n_envs,), -1.0, dtype=torch.float32)
     env._pending_workers = set()
+    env._parked_ready_workers = []
     env.closed = True
     env.remotes = [
         _RemoteStub() for _ in range((n_envs + num_envs_per_worker - 1) // num_envs_per_worker)
@@ -57,7 +58,7 @@ class _RayCollectorVecEnvStub:
         self.step_wait_calls = []
         self.step_async_calls = []
 
-    def step_wait(self, min_ready):
+    def step_wait(self, min_ready=1, timeout=None, env_ids=None):
         self.step_wait_calls.append(min_ready)
         return (
             np.array([2, 3], dtype=np.int64),

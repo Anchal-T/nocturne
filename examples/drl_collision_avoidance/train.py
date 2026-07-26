@@ -634,6 +634,23 @@ def _uses_async_collection(vec_env_mode):
     return vec_env_mode in ('async', 'ray')
 
 
+def _split_env_halves(num_envs, num_envs_per_worker):
+    """Split env ids into two worker-aligned halves for overlap collection.
+
+    Returns (half_a_ids, half_b_ids). If there is only one worker, half_b is empty
+    and the caller should fall back to the non-overlapped path.
+    """
+    num_workers = num_envs // max(1, num_envs_per_worker)
+    if num_workers < 2:
+        all_ids = np.arange(num_envs, dtype=np.int64)
+        return all_ids, np.empty((0,), dtype=np.int64)
+
+    mid = (num_workers // 2) * num_envs_per_worker
+    half_a = np.arange(0, mid, dtype=np.int64)
+    half_b = np.arange(mid, num_envs, dtype=np.int64)
+    return half_a, half_b
+
+
 def _collect_transition_batch(
     vec_env,
     vec_env_mode,
@@ -643,10 +660,19 @@ def _collect_transition_batch(
     num_envs,
     agent,
     min_ready_fraction=0.5,
+    overlap_half_ids=None,
 ):
     if _uses_async_collection(vec_env_mode):
-        min_ready = max(1, int(num_envs * min_ready_fraction))
-        ready_ids, next_obs, rewards, dones, infos = vec_env.step_wait(min_ready=min_ready)
+        # Alternating-half overlap: wait only for one half so the other half
+        # keeps stepping on the CPU while we run GPU inference.
+        wait_kwargs = {}
+        if overlap_half_ids is not None and len(overlap_half_ids) > 0:
+            wait_kwargs['env_ids'] = overlap_half_ids
+            wait_kwargs['min_ready'] = len(overlap_half_ids)
+        else:
+            wait_kwargs['min_ready'] = max(1, int(num_envs * min_ready_fraction))
+
+        ready_ids, next_obs, rewards, dones, infos = vec_env.step_wait(**wait_kwargs)
         if len(ready_ids) == 0:
             return None, obs, current_obs, current_actions, 0
 
@@ -719,6 +745,7 @@ def _maybe_print_episode_log(
     learner,
     agent,
     info,
+    loop_timer=None,
 ):
     if episodes_completed % log_interval != 0:
         return
@@ -735,6 +762,7 @@ def _maybe_print_episode_log(
             f' | lag={learner.train_step_lag:4d}'
             f' | dropped={learner.dropped_batches:4d}'
         )
+    timer_fragment = loop_timer.summary() if loop_timer is not None else ''
     print(
         f'Episode {episodes_completed:5d} | '
         f'avg_reward={avg_rew:8.2f} | '
@@ -745,7 +773,10 @@ def _maybe_print_episode_log(
         f'train_steps={train_steps}'
         f'{queue_fragment}'
         f' | fps={fps}'
+        f'{timer_fragment}'
     )
+    if loop_timer is not None:
+        loop_timer.reset()
 
 
 def _maybe_save_checkpoint(episodes_completed, save_interval, checkpoint_dir, agent, learner):
@@ -776,6 +807,7 @@ def _process_done_episodes(
     global_step,
     start_time,
     num_episodes,
+    loop_timer=None,
 ):
     for local_idx, env_idx in enumerate(ready_ids):
         if not dones[local_idx]:
@@ -797,6 +829,7 @@ def _process_done_episodes(
             learner=learner,
             agent=agent,
             info=info,
+            loop_timer=loop_timer,
         )
         _maybe_save_checkpoint(episodes_completed, save_interval, checkpoint_dir, agent, learner)
 
@@ -807,6 +840,81 @@ def _process_done_episodes(
             break
 
     return episodes_completed
+
+
+class _LoopTimer:
+    """Accumulates wall time spent in each phase of the training loop.
+
+    Wraps `vec_env.step_wait` and `agent.select_action_batch` with timing
+    decorators so the actor-side breakdown (env-wait vs inference vs submit)
+    is visible without changing any called function's signature.
+    """
+
+    __slots__ = ('step_wait', 'inference', 'submit', 'poll', 'iters')
+
+    def __init__(self):
+        self.step_wait = 0.0
+        self.inference = 0.0
+        self.submit = 0.0
+        self.poll = 0.0
+        self.iters = 0
+
+    def wrap_step_wait(self, fn):
+        timer = self
+        def timed(*a, **kw):
+            t0 = time.perf_counter()
+            try:
+                return fn(*a, **kw)
+            finally:
+                timer.step_wait += time.perf_counter() - t0
+        return timed
+
+    def wrap_inference(self, fn):
+        timer = self
+        def timed(*a, **kw):
+            t0 = time.perf_counter()
+            try:
+                return fn(*a, **kw)
+            finally:
+                timer.inference += time.perf_counter() - t0
+        return timed
+
+    def time_submit(self):
+        return self._timer(self, 'submit')
+
+    def time_poll(self):
+        return self._timer(self, 'poll')
+
+    @staticmethod
+    def _timer(timer, attr):
+        class _Ctx:
+            def __enter__(self_):
+                self_._t0 = time.perf_counter()
+            def __exit__(self_, *exc):
+                setattr(timer, attr, getattr(timer, attr) + time.perf_counter() - self_._t0)
+        return _Ctx()
+
+    def summary(self) -> str:
+        total = self.step_wait + self.inference + self.submit + self.poll
+        if total <= 0:
+            return ''
+        return (
+            f' | wait={self.step_wait:.2f}s'
+            f'({self.step_wait / total:.0%})'
+            f' infer={self.inference:.2f}s'
+            f'({self.inference / total:.0%})'
+            f' submit={self.submit:.2f}s'
+            f'({self.submit / total:.0%})'
+            f' poll={self.poll:.2f}s'
+            f'({self.poll / total:.0%})'
+        )
+
+    def reset(self):
+        self.step_wait = 0.0
+        self.inference = 0.0
+        self.submit = 0.0
+        self.poll = 0.0
+        self.iters = 0
 
 
 def _run_training_loop(
@@ -825,12 +933,33 @@ def _run_training_loop(
     writer,
     start_time,
     running_state,
+    num_envs_per_worker=1,
+    overlap_halves=True,
 ):
     episode_rewards = np.zeros(num_envs, dtype=np.float64)
     episode_lengths = np.zeros(num_envs, dtype=np.int64)
     episodes_completed = 0
     global_step = 0
     reward_history = []
+
+    loop_timer = _LoopTimer()
+    vec_env.step_wait = loop_timer.wrap_step_wait(vec_env.step_wait)
+    agent.select_action_batch = loop_timer.wrap_inference(agent.select_action_batch)
+
+    # Alternating halves: GPU inference on half A overlaps CPU stepping of half B.
+    half_a, half_b = _split_env_halves(num_envs, num_envs_per_worker)
+    use_overlap = (
+        overlap_halves
+        and _uses_async_collection(vec_env_mode)
+        and len(half_b) > 0
+    )
+    overlap_halves_list = [half_a, half_b] if use_overlap else [None]
+    overlap_idx = 0
+    if use_overlap:
+        print(
+            f"Overlap collection: half_a={len(half_a)} envs, "
+            f"half_b={len(half_b)} envs (worker-aligned)\n"
+        )
 
     obs = vec_env.reset()
     print("Collecting experience...\n")
@@ -842,8 +971,10 @@ def _run_training_loop(
 
     while episodes_completed < num_episodes and running_state['running']:
         if learner is not None:
-            learner.poll(agent)
+            with loop_timer.time_poll():
+                learner.poll(agent)
 
+        active_half = overlap_halves_list[overlap_idx]
         step_batch, obs, current_obs, current_actions, step_size = _collect_transition_batch(
             vec_env=vec_env,
             vec_env_mode=vec_env_mode,
@@ -853,30 +984,36 @@ def _run_training_loop(
             num_envs=num_envs,
             agent=agent,
             min_ready_fraction=min_ready_fraction,
+            overlap_half_ids=active_half,
         )
+        if use_overlap:
+            overlap_idx = 1 - overlap_idx
+        loop_timer.iters += 1
         if step_batch is None:
             continue
 
         ready_ids, prev_obs, prev_actions, next_obs, rewards, dones, infos = step_batch
         global_step += step_size
 
-        _submit_or_train_batch(
-            learner=learner,
-            agent=agent,
-            env_ids=ready_ids,
-            prev_obs=prev_obs,
-            prev_actions=prev_actions,
-            rewards=rewards,
-            next_obs=next_obs,
-            dones=dones,
-            min_replay=min_replay,
-            train_freq=train_freq,
-            global_step=global_step,
-        )
+        with loop_timer.time_submit():
+            _submit_or_train_batch(
+                learner=learner,
+                agent=agent,
+                env_ids=ready_ids,
+                prev_obs=prev_obs,
+                prev_actions=prev_actions,
+                rewards=rewards,
+                next_obs=next_obs,
+                dones=dones,
+                min_replay=min_replay,
+                train_freq=train_freq,
+                global_step=global_step,
+            )
 
         if learner is not None:
             agent.update_exploration(global_step)
-            learner.poll(agent)
+            with loop_timer.time_poll():
+                learner.poll(agent)
 
         episode_rewards[ready_ids] += rewards
         episode_lengths[ready_ids] += 1
@@ -897,6 +1034,7 @@ def _run_training_loop(
             global_step=global_step,
             start_time=start_time,
             num_episodes=num_episodes,
+            loop_timer=loop_timer,
         )
 
     return episodes_completed, global_step
@@ -1015,6 +1153,8 @@ def main(cfg):
             writer=writer,
             start_time=start_time,
             running_state=running_state,
+            num_envs_per_worker=num_envs_per_worker,
+            overlap_halves=bool(drl_cfg.get('overlap_halves', True)),
         )
     finally:
         elapsed = time.time() - start_time

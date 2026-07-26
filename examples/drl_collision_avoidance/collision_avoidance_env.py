@@ -29,6 +29,38 @@ GRID_CHANNELS = 3
 MAX_RESET_ATTEMPTS = 50
 
 
+def _scatter_min(out: np.ndarray, idx: np.ndarray, vals: np.ndarray) -> None:
+    """Scatter-min via sort + reduceat. Replaces slow np.minimum.at.
+
+    ``out[idx] = min(out[idx], vals)`` but using a stable sort by (idx, vals)
+    so the first element of each idx group is the minimum, then a single
+    indexed assignment. O(N log N) but avoids the unbuffered-ufunc path that
+    makes np.minimum.at ~50x slower for small N.
+    """
+    if len(idx) == 0:
+        return
+    order = np.lexsort((vals, idx))
+    s_idx = idx[order]
+    s_vals = vals[order]
+    starts = np.concatenate(([0], np.flatnonzero(np.diff(s_idx)) + 1))
+    mins = np.minimum.reduceat(s_vals, starts)
+    target = s_idx[starts]
+    out[target] = np.minimum(out[target], mins)
+
+
+def _scatter_max_const(out: np.ndarray, idx: np.ndarray, weight: float) -> None:
+    """Scatter-max with a constant value. Replaces np.maximum.at for constant weights.
+
+    Since the weight is the same for all entries, scatter-max reduces to
+    ``out[unique(idx)] = max(out[unique(idx)], weight)`` which is a single
+    deduplicated indexed assignment instead of an unbuffered ufunc loop.
+    """
+    if len(idx) == 0:
+        return
+    unique_idx = np.unique(idx)
+    out[unique_idx] = np.maximum(out[unique_idx], weight)
+
+
 class CollisionAvoidanceEnv(gym.Env):
     def __init__(self, cfg: Dict[str, Any]):
         super().__init__()
@@ -85,11 +117,14 @@ class CollisionAvoidanceEnv(gym.Env):
         self._ttz_pedestrian: float = NO_CONFLICT_TTZ
         self._road_edge_pts = np.empty((0, 2), dtype=np.float32)
         self._visible_set = None
+        # Use the C++ occupancy_grid method when available; falls back to
+        # the Python implementation on first AttributeError/TypeError.
+        self._use_cpp_grid: bool = True
 
     def reset(self, *, seed=None, options=None) -> tuple:
         super().reset(seed=seed)
         for _ in range(MAX_RESET_ATTEMPTS):
-            obs_dict, _ = self.base_env.reset()
+            obs_dict, _ = self.base_env.reset(build_obs=False)
             if not obs_dict:
                 continue
             ego_id = next(iter(obs_dict))
@@ -160,21 +195,70 @@ class CollisionAvoidanceEnv(gym.Env):
     # --- Road-edge caching ---
 
     def _cache_road_edges(self):
-        """Cache world-frame road-edge geometry points once per scenario."""
-        pts = []
-        for road_line in self.base_env.scenario.getRoadLines():
-            if road_line.road_type == nocturne.RoadType.ROAD_EDGE:
-                for pt in road_line.geometry_points():
-                    pts.append((pt.x, pt.y))
-        if pts:
-            self._road_edge_pts = np.array(pts, dtype=np.float32)
+        """Cache world-frame road-edge geometry points once per scenario.
+
+        Uses ``scenario.road_edge_points()`` -> (M, 2) batched C++ call instead
+        of a Python loop over RoadLine objects and their geometry_points().
+        """
+        pts = self.base_env.scenario.road_edge_points()
+        if pts is not None and pts.shape[0] > 0:
+            self._road_edge_pts = np.ascontiguousarray(pts, dtype=np.float32)
         else:
             self._road_edge_pts = np.empty((0, 2), dtype=np.float32)
 
     # --- Batch data extraction from C++ objects ---
 
+    def _extract_all_objects(self, ego_id=None, visible_set=None):
+        """Fetch all object states in one C++ call and split by type.
+
+        Uses ``scenario.all_object_states()`` -> (N, 6) array of
+        (id, x, y, speed, heading, type) instead of three Python loops over
+        C++ object lists. Returns three dicts (vehicles, peds, cyclists)
+        with visibility and ego-exclusion filters applied in vectorized numpy.
+        """
+        states = self.base_env.scenario.all_object_states()
+        if states is None or states.shape[0] == 0:
+            return None, None, None
+
+        ids = states[:, 0]
+        px = states[:, 1]
+        py = states[:, 2]
+        speeds = states[:, 3]
+        headings = states[:, 4]
+        types = states[:, 5]
+
+        def _filter(type_val, vis_key, exclude):
+            mask = types == type_val
+            if exclude is not None:
+                mask &= ids != exclude
+            if visible_set is not None and vis_key is not None:
+                vis_ids = visible_set.get(vis_key)
+                if vis_ids is not None:
+                    if len(vis_ids) == 0:
+                        return None
+                    vis_arr = np.fromiter(vis_ids, dtype=np.float32)
+                    mask &= np.isin(ids, vis_arr)
+            if not mask.any():
+                return None
+            return {
+                "px": px[mask],
+                "py": py[mask],
+                "speeds": speeds[mask],
+                "headings": headings[mask],
+            }
+
+        veh = _filter(0.0, "vehicles", ego_id)
+        ped = _filter(1.0, "peds", None)
+        cyc = _filter(2.0, "cyclists", None)
+        return veh, ped, cyc
+
     def _extract_objects(self, objs, visible_set_key=None, exclude_id=None):
-        """Extract C++ object positions/speeds/headings into numpy arrays."""
+        """Extract C++ object positions/speeds/headings into numpy arrays.
+
+        Deprecated: prefer ``_extract_all_objects`` which fetches all types in
+        one C++ call. Kept for backward compatibility with any callers that
+        still pass a raw C++ object list.
+        """
         if not objs:
             return None
 
@@ -221,10 +305,19 @@ class CollisionAvoidanceEnv(gym.Env):
 
         self._visible_set = visible_set
 
-        grid = self._build_occupancy_grid(ego_veh)
+        # Single C++ call to fetch all object states (id, x, y, speed,
+        # heading, type) as a batched (N, 6) array, then split by type and
+        # apply visibility / ego-exclusion filters in vectorized numpy.
+        # Replaces 3 separate Python loops over C++ object lists (each doing
+        # 4 pybind property reads per object).
+        veh_data, ped_data, cyc_data = self._extract_all_objects(
+            ego_id=self._ego_id, visible_set=visible_set,
+        )
+
+        grid = self._build_occupancy_grid(ego_veh, veh_data, ped_data, cyc_data)
         ego_state = self._get_ego_state(ego_veh)
         target_info = self._get_target_info(ego_veh)
-        ttz_info = self._get_ttz_info(ego_veh)
+        ttz_info = self._get_ttz_info(ego_veh, veh_data, ped_data, cyc_data)
 
         parts = [grid.flatten(), ego_state, target_info, ttz_info]
         if self.use_occlusion:
@@ -235,13 +328,19 @@ class CollisionAvoidanceEnv(gym.Env):
     # --- Visibility / Occlusion ---
 
     def _query_visible_objects(self, ego_veh) -> np.ndarray:
-        """Single call to C++ ray-casting. Returns the objects feature array."""
+        """Single call to C++ ray-casting. Returns the objects feature array.
+
+        Uses ``visible_objects_state`` (scoped to objects only) instead of
+        ``visible_state`` (which also range-searches and NearestK-sorts up to
+        1000 road points, traffic lights, and stop signs that this caller
+        discards).
+        """
         view_dist = max(self.forward_dist, self.lateral_dist) + 5.0
-        visible = self.base_env.scenario.visible_state(
+        visible = self.base_env.scenario.visible_objects_state(
             ego_veh, view_dist=view_dist,
             view_angle=self.occlusion_view_angle, head_angle=0.0, padding=False
         )
-        return visible.get("objects", np.zeros((0, 13), dtype=np.float32))
+        return visible if visible is not None else np.zeros((0, 13), dtype=np.float32)
 
     def _match_visible_to_vehicles(self, ego_veh, objects: np.ndarray) -> dict:
         """Match visible_state features to object IDs by type.
@@ -336,7 +435,35 @@ class CollisionAvoidanceEnv(gym.Env):
 
     # --- Vectorized occupancy grid ---
 
-    def _build_occupancy_grid(self, ego_veh) -> np.ndarray:
+    def _build_occupancy_grid(self, ego_veh, veh_data=None,
+                              ped_data=None, cyc_data=None) -> np.ndarray:
+        # Fast path: C++ occupancy grid stamping. Eliminates per-step numpy
+        # allocations and the Python scatter-max loop. Falls back to the
+        # Python implementation if the C++ method is unavailable.
+        if self._use_cpp_grid:
+            try:
+                grid = self.base_env.scenario.occupancy_grid(
+                    ego=ego_veh,
+                    rows=self.grid_rows,
+                    cols=self.grid_cols,
+                    forward_dist=self.forward_dist,
+                    backward_dist=self.backward_dist,
+                    lateral_dist=self.lateral_dist,
+                    vehicle_weight=self.vehicle_weight,
+                    vru_weight=self.vru_weight,
+                    road_edge_weight=self.road_edge_weight,
+                    ego_id=self._ego_id if self._ego_id is not None else -1,
+                )
+                if grid is not None:
+                    return np.ascontiguousarray(grid, dtype=np.float32)
+            except (AttributeError, TypeError):
+                self._use_cpp_grid = False
+
+        return self._build_occupancy_grid_py(
+            ego_veh, veh_data, ped_data, cyc_data)
+
+    def _build_occupancy_grid_py(self, ego_veh, veh_data=None,
+                                 ped_data=None, cyc_data=None) -> np.ndarray:
         grid = np.zeros(
             (self.grid_channels, self.grid_rows, self.grid_cols), dtype=np.float32
         )
@@ -348,10 +475,6 @@ class CollisionAvoidanceEnv(gym.Env):
         ego_vx, ego_vy = self._get_velocity_components(ego_veh)
 
         # Vehicles (occupancy + velocity channels)
-        veh_data = self._extract_objects(
-            self.base_env.scenario.getVehicles(),
-            visible_set_key="vehicles", exclude_id=self._ego_id,
-        )
         if veh_data is not None:
             self._stamp_vehicle_grid(
                 veh_data, ego_pos, ego_vx, ego_vy,
@@ -359,10 +482,6 @@ class CollisionAvoidanceEnv(gym.Env):
             )
 
         # Pedestrians (occupancy only)
-        ped_data = self._extract_objects(
-            self.base_env.scenario.getPedestrians(),
-            visible_set_key="peds",
-        )
         if ped_data is not None:
             self._stamp_simple_grid(
                 ped_data, ego_pos, cos_h, sin_h, cell_long, cell_lat,
@@ -370,10 +489,6 @@ class CollisionAvoidanceEnv(gym.Env):
             )
 
         # Cyclists (occupancy only)
-        cyc_data = self._extract_objects(
-            self.base_env.scenario.getCyclists(),
-            visible_set_key="cyclists",
-        )
         if cyc_data is not None:
             self._stamp_simple_grid(
                 cyc_data, ego_pos, cos_h, sin_h, cell_long, cell_lat,
@@ -427,7 +542,7 @@ class CollisionAvoidanceEnv(gym.Env):
         flat_idx = rows * self.grid_cols + cols
         n_cells = self.grid_rows * self.grid_cols
         min_dist = np.full(n_cells, np.inf, dtype=np.float32)
-        np.minimum.at(min_dist, flat_idx, cell_dist)
+        _scatter_min(min_dist, flat_idx, cell_dist)
         is_closest = cell_dist == min_dist[flat_idx]
 
         grid[1, rows[is_closest], cols[is_closest]] = rel_vx[is_closest] / SPEED_NORM
@@ -458,7 +573,7 @@ class CollisionAvoidanceEnv(gym.Env):
             ((ly + self.lateral_dist) / cell_lat).astype(np.int32),
             0, self.grid_cols - 1,
         )
-        np.maximum.at(grid[0], (rows, cols), weight)
+        _scatter_max_const(grid[0], rows * self.grid_cols + cols, weight)
 
     def _stamp_road_edges(self, ego_pos, cos_h, sin_h, cell_long, cell_lat, grid):
         """Vectorized road-edge stamping using cached world-frame points."""
@@ -487,11 +602,12 @@ class CollisionAvoidanceEnv(gym.Env):
             ((ly + self.lateral_dist) / cell_lat).astype(np.int32),
             0, self.grid_cols - 1,
         )
-        np.maximum.at(grid[0], (rows, cols), self.road_edge_weight)
+        _scatter_max_const(grid[0], rows * self.grid_cols + cols, self.road_edge_weight)
 
     # --- Vectorized TTZ ---
 
-    def _get_ttz_info(self, ego_veh) -> np.ndarray:
+    def _get_ttz_info(self, ego_veh, veh_data=None, ped_data=None,
+                      cyc_data=None) -> np.ndarray:
         ego_pos = ego_veh.position
         ego_speed = max(ego_veh.speed, 0.1)
 
@@ -499,10 +615,6 @@ class CollisionAvoidanceEnv(gym.Env):
         min_ttz_ped = NO_CONFLICT_TTZ
 
         # Vehicles
-        veh_data = self._extract_objects(
-            self.base_env.scenario.getVehicles(),
-            visible_set_key="vehicles", exclude_id=self._ego_id,
-        )
         if veh_data is not None:
             ttz = self._compute_ttz_batch(
                 veh_data["px"], veh_data["py"],
@@ -513,10 +625,6 @@ class CollisionAvoidanceEnv(gym.Env):
                 min_ttz_veh = float(np.min(ttz))
 
         # Pedestrians
-        ped_data = self._extract_objects(
-            self.base_env.scenario.getPedestrians(),
-            visible_set_key="peds",
-        )
         if ped_data is not None:
             ttz = self._compute_ttz_batch(
                 ped_data["px"], ped_data["py"],
@@ -527,10 +635,6 @@ class CollisionAvoidanceEnv(gym.Env):
                 min_ttz_ped = min(min_ttz_ped, float(np.min(ttz)))
 
         # Cyclists
-        cyc_data = self._extract_objects(
-            self.base_env.scenario.getCyclists(),
-            visible_set_key="cyclists",
-        )
         if cyc_data is not None:
             ttz = self._compute_ttz_batch(
                 cyc_data["px"], cyc_data["py"],

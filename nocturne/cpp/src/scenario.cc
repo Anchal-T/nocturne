@@ -280,8 +280,10 @@ void Scenario::Step(float dt) {
     object->set_current_time(current_time_);
   }
 
-  // update the vehicle bvh
-  object_bvh_.Reset(objects_);
+  // Refit the object BVH in-place (O(N) AABB update + propagate) instead of
+  // rebuilding from scratch (O(N log N) Morton encode + sort + tree build).
+  // The tree topology is unchanged since no objects were added or removed.
+  object_bvh_.Refit();
   UpdateCollision();
 }
 
@@ -475,6 +477,244 @@ std::unordered_map<std::string, NdArray<float>> Scenario::VisibleState(
           {"road_points", r_feature},
           {"traffic_lights", t_feature},
           {"stop_signs", s_feature}};
+}
+
+NdArray<float> Scenario::VisibleObjectsState(
+    const Object& src, float view_dist, float view_angle, float head_angle,
+    bool padding) const {
+  // Only compute the visible-objects part of VisibleState, skipping road
+  // points, traffic lights, and stop signs entirely. This avoids the
+  // road_point_tree_ range search, the FilterVisiblePoints occlusion pass,
+  // and the NearestK sort over up to max_visible_road_points_ entries.
+  const float heading = geometry::utils::AngleAdd(src.heading(), head_angle);
+  const geometry::Vector2D& position = src.position();
+  const ViewField vf(position, view_dist, heading, view_angle);
+
+  std::vector<const ObjectBase*> objects =
+      VisibleCandidates(object_bvh_, src, vf);
+  vf.FilterVisibleObjects(objects);
+
+  const auto o_targets = NearestK(src, objects, max_visible_objects_);
+
+  const int64_t num_objects =
+      padding ? max_visible_objects_ : static_cast<int64_t>(o_targets.size());
+
+  NdArray<float> o_feature({num_objects, kObjectFeatureSize}, 0.0f);
+  float* o_feature_ptr = o_feature.DataPtr();
+  for (const auto [obj, dis] : o_targets) {
+    ExtractObjectFeature(src, *(dynamic_cast<const Object*>(obj)), dis,
+                         o_feature_ptr);
+    o_feature_ptr += kObjectFeatureSize;
+  }
+
+  return o_feature;
+}
+
+NdArray<float> Scenario::AllObjectStates() const {
+  // Count total objects across vehicles, pedestrians, cyclists.
+  int64_t n = static_cast<int64_t>(vehicles_.size() + pedestrians_.size() +
+                                   cyclists_.size());
+  NdArray<float> states({n, 6}, 0.0f);
+  float* ptr = states.DataPtr();
+  // type: 0=vehicle, 1=pedestrian, 2=cyclist
+  for (const auto& obj : vehicles_) {
+    *ptr++ = static_cast<float>(obj->id());
+    *ptr++ = obj->position().x;
+    *ptr++ = obj->position().y;
+    *ptr++ = obj->speed();
+    *ptr++ = obj->heading();
+    *ptr++ = 0.0f;
+  }
+  for (const auto& obj : pedestrians_) {
+    *ptr++ = static_cast<float>(obj->id());
+    *ptr++ = obj->position().x;
+    *ptr++ = obj->position().y;
+    *ptr++ = obj->speed();
+    *ptr++ = obj->heading();
+    *ptr++ = 1.0f;
+  }
+  for (const auto& obj : cyclists_) {
+    *ptr++ = static_cast<float>(obj->id());
+    *ptr++ = obj->position().x;
+    *ptr++ = obj->position().y;
+    *ptr++ = obj->speed();
+    *ptr++ = obj->heading();
+    *ptr++ = 2.0f;
+  }
+  return states;
+}
+
+NdArray<float> Scenario::RoadEdgePoints() const {
+  // First pass: count total points across all road-edge lines.
+  int64_t total = 0;
+  for (const auto& line : road_lines_) {
+    if (line->road_type() == RoadType::kRoadEdge) {
+      total += static_cast<int64_t>(line->geometry_points().size());
+    }
+  }
+  NdArray<float> pts({total, 2}, 0.0f);
+  float* ptr = pts.DataPtr();
+  for (const auto& line : road_lines_) {
+    if (line->road_type() == RoadType::kRoadEdge) {
+      for (const auto& p : line->geometry_points()) {
+        *ptr++ = p.x;
+        *ptr++ = p.y;
+      }
+    }
+  }
+  return pts;
+}
+
+void Scenario::SaveSnapshot() {
+  snapshot_time_ = current_time_;
+  snapshot_.clear();
+  snapshot_.reserve(vehicles_.size() + pedestrians_.size() + cyclists_.size() +
+                     objects_.size());
+  auto save_obj = [this](const Object* obj) {
+    snapshot_.push_back({
+        obj->id(),
+        obj->position().x, obj->position().y,
+        obj->heading(), obj->speed(),
+        obj->acceleration(), obj->steering(), obj->head_angle(),
+        obj->expert_control(), obj->manual_control(),
+        obj->collided(),
+        static_cast<int>(obj->collision_type()),
+    });
+  };
+  for (const auto& obj : vehicles_) save_obj(obj.get());
+  for (const auto& obj : pedestrians_) save_obj(obj.get());
+  for (const auto& obj : cyclists_) save_obj(obj.get());
+  for (const auto& obj : objects_) save_obj(obj.get());
+}
+
+void Scenario::RestoreSnapshot() {
+  if (snapshot_.empty()) return;
+  current_time_ = snapshot_time_;
+  // Build a lookup from object id -> snapshot entry.
+  std::unordered_map<int64_t, const ObjectSnapshot*> lookup;
+  lookup.reserve(snapshot_.size());
+  for (const auto& snap : snapshot_) {
+    lookup[snap.id] = &snap;
+  }
+  auto restore_vec = [&](auto& vec) {
+    for (auto& obj : vec) {
+      auto it = lookup.find(obj->id());
+      if (it == lookup.end()) continue;
+      const auto* snap = it->second;
+      obj->set_position(snap->x, snap->y);
+      obj->set_heading(snap->heading);
+      obj->set_speed(snap->speed);
+      obj->set_acceleration(snap->acceleration);
+      obj->set_steering(snap->steering);
+      obj->set_head_angle(snap->head_angle);
+      obj->set_expert_control(snap->expert_control);
+      obj->set_manual_control(snap->manual_control);
+      obj->set_collided(snap->collided);
+      obj->set_collision_type(static_cast<CollisionType>(snap->collision_type));
+    }
+  };
+  restore_vec(vehicles_);
+  restore_vec(pedestrians_);
+  restore_vec(cyclists_);
+  restore_vec(objects_);
+}
+
+NdArray<float> Scenario::OccupancyGrid(
+    const Object& ego, int64_t rows, int64_t cols,
+    float forward_dist, float backward_dist, float lateral_dist,
+    float vehicle_weight, float vru_weight, float road_edge_weight,
+    int64_t ego_id) const {
+  NdArray<float> grid({3, rows, cols}, 0.0f);
+  float* grid_data = grid.DataPtr();
+
+  const float ego_x = ego.position().x;
+  const float ego_y = ego.position().y;
+  const float cos_h = std::cos(ego.heading());
+  const float sin_h = std::sin(ego.heading());
+  const float cell_long = (forward_dist + backward_dist) / static_cast<float>(rows);
+  const float cell_lat = (2.0f * lateral_dist) / static_cast<float>(cols);
+  const geometry::Vector2D ego_vel = ego.Velocity();
+  const float ego_vx = ego_vel.x;
+  const float ego_vy = ego_vel.y;
+
+  // Per-cell closest-vehicle tracking for velocity channel.
+  std::vector<float> min_dist(rows * cols,
+                               std::numeric_limits<float>::infinity());
+  std::vector<int> closest_cell(rows * cols, -1);
+
+  auto stamp_vehicle = [&](const Object& obj) {
+    if (obj.id() == ego_id) return;
+    const float dx = obj.position().x - ego_x;
+    const float dy = obj.position().y - ego_y;
+    const float lx = dx * cos_h + dy * sin_h;
+    const float ly = -dx * sin_h + dy * cos_h;
+    if (lx < -backward_dist || lx > forward_dist ||
+        std::fabs(ly) > lateral_dist) return;
+    int r = static_cast<int>((forward_dist - lx) / cell_long);
+    int c = static_cast<int>((ly + lateral_dist) / cell_lat);
+    r = std::max(0, std::min(static_cast<int>(rows) - 1, r));
+    c = std::max(0, std::min(static_cast<int>(cols) - 1, c));
+    const int idx = r * cols + c;
+    const float dist = lx * lx + ly * ly;
+    // Occupancy (scatter-max)
+    if (vehicle_weight > grid_data[idx]) grid_data[idx] = vehicle_weight;
+    // Track closest vehicle per cell for velocity channel
+    if (dist < min_dist[idx]) {
+      min_dist[idx] = dist;
+      closest_cell[idx] = idx;
+      // Store velocity at this cell (will be overwritten if a closer vehicle
+      // arrives; the last write for the closest is correct since we update
+      // min_dist atomically per cell).
+      const geometry::Vector2D obj_vel = obj.Velocity();
+      const float rvx = (obj_vel.x - ego_vx) * cos_h + (obj_vel.y - ego_vy) * sin_h;
+      const float rvy = -(obj_vel.x - ego_vx) * sin_h + (obj_vel.y - ego_vy) * cos_h;
+      grid_data[rows * cols + idx] = rvx / 30.0f;
+      grid_data[2 * rows * cols + idx] = rvy / 30.0f;
+    }
+  };
+
+  auto stamp_simple = [&](const Object& obj, float weight) {
+    const float dx = obj.position().x - ego_x;
+    const float dy = obj.position().y - ego_y;
+    const float lx = dx * cos_h + dy * sin_h;
+    const float ly = -dx * sin_h + dy * cos_h;
+    if (lx < -backward_dist || lx > forward_dist ||
+        std::fabs(ly) > lateral_dist) return;
+    int r = static_cast<int>((forward_dist - lx) / cell_long);
+    int c = static_cast<int>((ly + lateral_dist) / cell_lat);
+    r = std::max(0, std::min(static_cast<int>(rows) - 1, r));
+    c = std::max(0, std::min(static_cast<int>(cols) - 1, c));
+    const int idx = r * cols + c;
+    if (weight > grid_data[idx]) grid_data[idx] = weight;
+  };
+
+  for (const auto& obj : vehicles_) stamp_vehicle(*obj);
+  for (const auto& obj : pedestrians_) stamp_simple(*obj, vru_weight);
+  for (const auto& obj : cyclists_) stamp_simple(*obj, vru_weight);
+
+  // Road edges: use the road_point_tree_ for range search within the grid extent
+  const float max_extent = std::max(forward_dist + backward_dist,
+                                    2.0f * lateral_dist);
+  // Simple approach: iterate road_lines_ and stamp road-edge points.
+  for (const auto& line : road_lines_) {
+    if (line->road_type() != RoadType::kRoadEdge) continue;
+    for (const auto& pt : line->geometry_points()) {
+      const float dx = pt.x - ego_x;
+      const float dy = pt.y - ego_y;
+      const float lx = dx * cos_h + dy * sin_h;
+      const float ly = -dx * sin_h + dy * cos_h;
+      if (lx < -backward_dist || lx > forward_dist ||
+          std::fabs(ly) > lateral_dist) continue;
+      int r = static_cast<int>((forward_dist - lx) / cell_long);
+      int c = static_cast<int>((ly + lateral_dist) / cell_lat);
+      r = std::max(0, std::min(static_cast<int>(rows) - 1, r));
+      c = std::max(0, std::min(static_cast<int>(cols) - 1, c));
+      const int idx = r * cols + c;
+      if (road_edge_weight > grid_data[idx]) grid_data[idx] = road_edge_weight;
+    }
+  }
+
+  return grid;
 }
 
 NdArray<float> Scenario::FlattenedVisibleState(const Object& src,

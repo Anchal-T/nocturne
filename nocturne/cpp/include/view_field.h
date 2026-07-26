@@ -29,6 +29,11 @@ class ViewField : public geometry::AABBInterface {
       const std::vector<const ObjectBase*>& objects) const;
   void FilterVisibleObjects(std::vector<const ObjectBase*>& objects) const;
 
+  // O(N log N) angular-sweep visibility. Used by VisibleObjects when the
+  // number of candidates is large enough to justify the setup cost.
+  std::vector<const ObjectBase*> VisibleObjectsAngularSweep(
+      const std::vector<const ObjectBase*>& objects) const;
+
   std::vector<const ObjectBase*> VisibleNonblockingObjects(
       const std::vector<const ObjectBase*>& objects) const;
   void FilterVisibleNonblockingObjects(

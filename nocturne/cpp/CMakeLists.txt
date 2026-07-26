@@ -11,6 +11,22 @@ set(
 
 project(nocturne)
 
+# Enable Link-Time Optimization / Interprocedural Optimization when supported.
+# This lets the compiler inline across translation units (e.g. the visibility
+# hot path in view_field.cc into scenario.cc) and eliminate dead code.
+include(CheckIPOSupported)
+check_ipo_supported(RESULT lto_supported LANGUAGES CXX)
+if(lto_supported)
+  set(CMAKE_INTERPROCEDURAL_OPTIMIZATION TRUE)
+  message(STATUS "LTO/IPO enabled for nocturne C++ build.")
+endif()
+
+# Ensure NDEBUG is defined for non-Debug builds so asserts in the C++ core
+# (BVH, view field, collision) are compiled out of the hot path.
+if(NOT CMAKE_BUILD_TYPE STREQUAL "Debug")
+  add_compile_definitions(NDEBUG)
+endif()
+
 add_library(
   nocturne_geometry
   STATIC

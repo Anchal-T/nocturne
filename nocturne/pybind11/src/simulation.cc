@@ -24,9 +24,17 @@ void DefineSimulation(py::module& m) {
            "Constructor for Simulation", py::arg("scenario_path") = "",
            py::arg("config") =
                std::unordered_map<std::string,
-                                  std::variant<bool, int64_t, float>>())
-      .def("reset", &Simulation::Reset)
-      .def("step", &Simulation::Step)
+                                  std::variant<bool, int64_t, float>>(),
+           // JSON parse + object construction is pure C++; release the GIL so
+           // worker processes can construct Simulations concurrently.
+           py::call_guard<py::gil_scoped_release>())
+      .def("reset", &Simulation::Reset,
+           // Reset re-parses JSON and rebuilds the scenario; release the GIL.
+           py::call_guard<py::gil_scoped_release>())
+      .def("step", &Simulation::Step,
+           // Physics + collision + BVH rebuild is pure C++; release the GIL so
+           // multiple env workers in the same process can step concurrently.
+           py::call_guard<py::gil_scoped_release>())
       .def("render", &Simulation::Render)
       .def("scenario", &Simulation::GetScenario,
            py::return_value_policy::reference)

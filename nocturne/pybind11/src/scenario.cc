@@ -45,14 +45,34 @@ void DefineScenario(py::module& m) {
 
       .def("ego_state",
            [](const Scenario& scenario, const Object& src) {
-             return utils::AsNumpyArray(scenario.EgoState(src));
+             // EgoState is pure C++ (no Python objects); release the GIL for
+             // the computation, re-acquire before building the numpy array.
+             py::gil_scoped_release release;
+             const auto state = scenario.EgoState(src);
+             py::gil_scoped_acquire acquire;
+             return utils::AsNumpyArray(state);
            })
       .def(
           "visible_state",
           [](const Scenario& scenario, const Object& src, float view_dist,
              float view_angle, float head_angle, bool padding) {
-            return utils::AsNumpyArrayDict(
-                scenario.VisibleState(src, view_dist, view_angle, head_angle, padding));
+            py::gil_scoped_release release;
+            const auto result =
+                scenario.VisibleState(src, view_dist, view_angle, head_angle, padding);
+            py::gil_scoped_acquire acquire;
+            return utils::AsNumpyArrayDict(result);
+          },
+          py::arg("object"), py::arg("view_dist") = 60,
+          py::arg("view_angle") = kHalfPi, py::arg("head_angle") = 0.0, py::arg("padding") = false)
+      .def(
+          "visible_objects_state",
+          [](const Scenario& scenario, const Object& src, float view_dist,
+             float view_angle, float head_angle, bool padding) {
+            py::gil_scoped_release release;
+            const auto result = scenario.VisibleObjectsState(
+                src, view_dist, view_angle, head_angle, padding);
+            py::gil_scoped_acquire acquire;
+            return utils::AsNumpyArray(result);
           },
           py::arg("object"), py::arg("view_dist") = 60,
           py::arg("view_angle") = kHalfPi, py::arg("head_angle") = 0.0, py::arg("padding") = false)
@@ -60,11 +80,66 @@ void DefineScenario(py::module& m) {
           "flattened_visible_state",
           [](const Scenario& scenario, const Object& src, float view_dist,
              float view_angle, float head_angle) {
-            return utils::AsNumpyArray(scenario.FlattenedVisibleState(
-                src, view_dist, view_angle, head_angle));
+            py::gil_scoped_release release;
+            const auto result = scenario.FlattenedVisibleState(
+                src, view_dist, view_angle, head_angle);
+            py::gil_scoped_acquire acquire;
+            return utils::AsNumpyArray(result);
           },
           py::arg("object"), py::arg("view_dist") = 60,
           py::arg("view_angle") = kHalfPi, py::arg("head_angle") = 0.0)
+      .def(
+          "all_object_states",
+          [](const Scenario& scenario) {
+            py::gil_scoped_release release;
+            const auto result = scenario.AllObjectStates();
+            py::gil_scoped_acquire acquire;
+            return utils::AsNumpyArray(result);
+          },
+          "Return (N, 6) float32 array of (id, x, y, speed, heading, type) "
+          "for all vehicles/pedestrians/cyclists. type: 0=vehicle, "
+          "1=pedestrian, 2=cyclist.")
+      .def(
+          "road_edge_points",
+          [](const Scenario& scenario) {
+            py::gil_scoped_release release;
+            const auto result = scenario.RoadEdgePoints();
+            py::gil_scoped_acquire acquire;
+            return utils::AsNumpyArray(result);
+          },
+          "Return (M, 2) float32 array of (x, y) for all road-edge geometry "
+          "points.")
+      .def("save_snapshot",
+           [](Scenario& scenario) {
+             py::gil_scoped_release release;
+             scenario.SaveSnapshot();
+           },
+           "Save post-warmup object state for fast reset.")
+      .def("restore_snapshot",
+           [](Scenario& scenario) {
+             py::gil_scoped_release release;
+             scenario.RestoreSnapshot();
+           },
+           "Restore object state from a previously saved snapshot.")
+      .def(
+          "occupancy_grid",
+          [](const Scenario& scenario, const Object& ego, int64_t rows,
+             int64_t cols, float forward_dist, float backward_dist,
+             float lateral_dist, float vehicle_weight, float vru_weight,
+             float road_edge_weight, int64_t ego_id) {
+            py::gil_scoped_release release;
+            const auto result = scenario.OccupancyGrid(
+                ego, rows, cols, forward_dist, backward_dist, lateral_dist,
+                vehicle_weight, vru_weight, road_edge_weight, ego_id);
+            py::gil_scoped_acquire acquire;
+            return utils::AsNumpyArray(result);
+          },
+          "Return (3, rows, cols) float32 occupancy grid (occ, rel_vx, rel_vy).",
+          py::arg("ego"), py::arg("rows"), py::arg("cols"),
+          py::arg("forward_dist"), py::arg("backward_dist"),
+          py::arg("lateral_dist"), py::arg("vehicle_weight"),
+          py::arg("vru_weight"), py::arg("road_edge_weight"),
+          py::arg("ego_id") = -1)
       .def("expert_position", &Scenario::ExpertPosition)
       .def("expert_heading", &Scenario::ExpertHeading)
       .def("expert_speed", &Scenario::ExpertSpeed)

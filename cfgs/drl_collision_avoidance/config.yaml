@@ -10,8 +10,11 @@ scenario_split: train
 scenario_path: null
 dt: 0.1
 
-# Scenario pool: 0 = disabled (load fresh file every reset)
-scenario_pool_size: 0
+# Scenario pool: 0 = disabled (load fresh file every reset).
+# A pool of ~64 keeps hot files in the OS page cache so resets avoid
+# re-parsing JSON from cold disk. Pool members are resampled every
+# resample_pool_interval resets for diversity.
+scenario_pool_size: 64
 resample_pool_interval: 5000
 
 discretize_actions: False
@@ -80,7 +83,7 @@ drl:
     replay_buffer_size: 1000000
     batch_size: 256
     target_update_freq: 1000
-    train_freq: 512
+    train_freq: 32
     min_ready_fraction: 0.5
     min_replay_size: 5000
     hidden_layers: [256, 256, 256, 256]
@@ -104,6 +107,8 @@ drl:
     learner_startup_timeout_s: 60.0
     use_torch_compile: false
     compile_mode: reduce-overhead
+    use_cuda_graph: true       # Capture forward+backward+optimizer as one CUDA graph
+    cuda_graph_warmup_steps: 3  # Eager steps before capture
     use_tf32: true
     cudnn_benchmark: true
     inference_sync_interval: 16
@@ -120,6 +125,21 @@ drl:
     beta_start: 0.4
     beta_frames: 100000
     per_epsilon: 1e-6
+    # Shrink-and-perturb reset (SR-SPR / BBF style) to protect plasticity
+    # under the high replay ratio (8x). Every spr_interval gradient steps,
+    # the online network is reset to a shrunken copy of itself (spr_scale)
+    # with noise injected (spr_noise_std). Set to 0 to disable.
+    spr_interval: 200000
+    spr_scale: 0.5
+    spr_noise_std: 0.001
+    # GPU-resident replay: store obs once on device, derive next_obs by index.
+    # fp16 → ~1.2 GB for 1M x 609; set gpu_replay=false to keep host numpy.
+    gpu_replay: true
+    replay_obs_dtype: float16
+    # Sync loss.item() / PER priority D2H only every N gradient steps.
+    loss_sync_interval: 32
+    # Alternating-half collection: infer half A while half B steps (and vice versa).
+    overlap_halves: true
 
 occupancy_grid:
     rows: 20

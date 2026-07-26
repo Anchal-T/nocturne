@@ -31,15 +31,29 @@ def compute_occlusion_features(scenario, ego_veh, view_dist, view_angle,
     ego vehicle. They summarize how much of the sensor cone is blocked by those
     visible objects and avoid exposing labels for truly hidden vehicles.
     """
-    visible = scenario.visible_state(
+    visible = scenario.visible_objects_state(
         ego_veh,
         view_dist=view_dist,
         view_angle=view_angle,
         head_angle=head_angle,
         padding=False,
     )
-    objects = visible.get("objects", np.zeros((0, 13), dtype=np.float32))
-    if len(objects) == 0:
+    return compute_occlusion_features_from_objects(
+        visible, view_dist, view_angle)
+
+
+def compute_occlusion_features_from_objects(
+    objects: np.ndarray,
+    view_dist: float,
+    view_angle: float,
+) -> np.ndarray:
+    """Compute occlusion features from a pre-computed visible-objects array.
+
+    This avoids a redundant C++ visibility pass when the caller has already
+    obtained the visible objects (e.g. from a ``visible_state`` call that was
+    also used to build the flattened observation).
+    """
+    if objects is None or len(objects) == 0:
         return np.zeros(OCCLUSION_FEATURE_SIZE, dtype=np.float32)
 
     intervals = []

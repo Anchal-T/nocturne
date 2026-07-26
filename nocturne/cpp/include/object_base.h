@@ -44,6 +44,15 @@ class ObjectBase : public sf::Drawable, public geometry::AABBInterface {
   bool can_block_sight() const { return can_block_sight_; }
   bool can_be_collided() const { return can_be_collided_; }
   bool check_collision() const { return check_collision_; }
+  // Allow runtime toggling so the env can scope collision checks to only
+  // controlled agents (non-controlled objects get check_collision=false,
+  // so the O(N^2) all-pairs loop skips pairs where neither side is
+  // controlled). Both sides stay correct: if ego (check_collision=true)
+  // hits a non-ego (check_collision=false), the check still runs and
+  // both get collided=true.
+  void set_check_collision(bool check_collision) {
+    check_collision_ = check_collision;
+  }
 
   bool collided() const { return collided_; }
   void set_collided(bool collided) { collided_ = collided; }
@@ -71,7 +80,7 @@ class ObjectBase : public sf::Drawable, public geometry::AABBInterface {
 
   const bool can_block_sight_ = false;
   const bool can_be_collided_ = false;
-  const bool check_collision_ = false;
+  bool check_collision_ = false;
   bool collided_ = false;
   CollisionType collision_type_ = CollisionType::kNotCollided;
 };

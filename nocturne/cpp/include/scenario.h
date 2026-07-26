@@ -242,6 +242,44 @@ class Scenario : public sf::Drawable {
       const Object& src, float view_dist, float view_angle,
       float head_angle = 0.0f, bool padding = false) const;
 
+  // Compute only the visible-objects feature array, skipping road points,
+  // traffic lights, and stop signs. This is the cheap path for callers that
+  // only need object-level occlusion info (e.g. the occupancy-grid env's
+  // _query_visible_objects) and avoids the O(N) road-point range search,
+  // occlusion filter, and NearestK sort over up to 1000 road points.
+  NdArray<float> VisibleObjectsState(
+      const Object& src, float view_dist, float view_angle,
+      float head_angle = 0.0f, bool padding = false) const;
+
+  // Batched object-state getter: returns (N, 6) float32 array of
+  // (id, x, y, speed, heading, type) for all vehicles, pedestrians, and
+  // cyclists in one C++ pass. type: 0=vehicle, 1=pedestrian, 2=cyclist.
+  // Replaces the Python per-object property-read loop in _extract_objects.
+  NdArray<float> AllObjectStates() const;
+
+  // Batched road-edge-point getter: returns (M, 2) float32 array of (x, y)
+  // for all geometry points belonging to RoadType::kRoadEdge lines.
+  // Replaces the Python per-line per-point loop in _cache_road_edges.
+  NdArray<float> RoadEdgePoints() const;
+
+  // Snapshot/restore: save the post-warmup object state so reset is a memcpy
+  // instead of a JSON parse + 10 physics steps. The snapshot captures
+  // position, heading, speed, acceleration, steering, head_angle, and
+  // control/collision flags for every dynamic object, plus current_time_.
+  void SaveSnapshot();
+  void RestoreSnapshot();
+
+  // Build the occupancy grid in C++ for a single ego agent, returning a
+  // (3, rows, cols) float32 array (occupancy, rel_vx, rel_vy). This moves
+  // the grid stamping out of Python, eliminating per-step numpy allocations
+  // and the scatter-max loop. The agent-list signature makes multi-agent
+  // cheap later (call once per controlled agent).
+  NdArray<float> OccupancyGrid(
+      const Object& ego, int64_t rows, int64_t cols,
+      float forward_dist, float backward_dist, float lateral_dist,
+      float vehicle_weight, float vru_weight, float road_edge_weight,
+      int64_t ego_id) const;
+
   NdArray<float> FlattenedVisibleState(const Object& src, float view_dist,
                                        float view_angle,
                                        float head_angle = 0.0f) const;
@@ -356,6 +394,20 @@ class Scenario : public sf::Drawable {
 
   std::unique_ptr<sf::RenderTexture> image_texture_ = nullptr;
   sf::FloatRect road_network_bounds_;
+
+  // Snapshot of post-warmup object state for fast reset. Populated by
+  // SaveSnapshot(); consumed by RestoreSnapshot(). Stores per-object:
+  // position, heading, speed, acceleration, steering, head_angle,
+  // expert_control, manual_control, collided, collision_type.
+  struct ObjectSnapshot {
+    int64_t id;
+    float x, y;
+    float heading, speed, acceleration, steering, head_angle;
+    bool expert_control, manual_control, collided;
+    int collision_type;
+  };
+  int64_t snapshot_time_ = 0;
+  std::vector<ObjectSnapshot> snapshot_;
 };
 
 }  // namespace nocturne
