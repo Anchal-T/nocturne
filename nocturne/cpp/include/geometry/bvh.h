@@ -144,11 +144,11 @@ class BVH {
     // nodes_ stores children before parents (MakeNode pushes children
     // before the parent that links them), so a forward pass updates
     // leaves first, then internal nodes after their children.
-    for (Node* node : nodes_) {
-      if (node->IsLeaf()) {
-        node->RefitAABB(node->object()->GetAABB());
+    for (Node& node : nodes_) {
+      if (node.IsLeaf()) {
+        node.RefitAABB(node.object()->GetAABB());
       } else {
-        node->RefitAABB(node->LChild()->aabb() || node->RChild()->aabb());
+        node.RefitAABB(node.LChild()->aabb() || node.RChild()->aabb());
       }
     }
   }

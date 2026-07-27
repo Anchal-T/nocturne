@@ -519,24 +519,24 @@ NdArray<float> Scenario::AllObjectStates() const {
   // type: 0=vehicle, 1=pedestrian, 2=cyclist
   for (const auto& obj : vehicles_) {
     *ptr++ = static_cast<float>(obj->id());
-    *ptr++ = obj->position().x;
-    *ptr++ = obj->position().y;
+    *ptr++ = obj->position().x();
+    *ptr++ = obj->position().y();
     *ptr++ = obj->speed();
     *ptr++ = obj->heading();
     *ptr++ = 0.0f;
   }
   for (const auto& obj : pedestrians_) {
     *ptr++ = static_cast<float>(obj->id());
-    *ptr++ = obj->position().x;
-    *ptr++ = obj->position().y;
+    *ptr++ = obj->position().x();
+    *ptr++ = obj->position().y();
     *ptr++ = obj->speed();
     *ptr++ = obj->heading();
     *ptr++ = 1.0f;
   }
   for (const auto& obj : cyclists_) {
     *ptr++ = static_cast<float>(obj->id());
-    *ptr++ = obj->position().x;
-    *ptr++ = obj->position().y;
+    *ptr++ = obj->position().x();
+    *ptr++ = obj->position().y();
     *ptr++ = obj->speed();
     *ptr++ = obj->heading();
     *ptr++ = 2.0f;
@@ -557,8 +557,8 @@ NdArray<float> Scenario::RoadEdgePoints() const {
   for (const auto& line : road_lines_) {
     if (line->road_type() == RoadType::kRoadEdge) {
       for (const auto& p : line->geometry_points()) {
-        *ptr++ = p.x;
-        *ptr++ = p.y;
+        *ptr++ = p.x();
+        *ptr++ = p.y();
       }
     }
   }
@@ -573,7 +573,7 @@ void Scenario::SaveSnapshot() {
   auto save_obj = [this](const Object* obj) {
     snapshot_.push_back({
         obj->id(),
-        obj->position().x, obj->position().y,
+        obj->position().x(), obj->position().y(),
         obj->heading(), obj->speed(),
         obj->acceleration(), obj->steering(), obj->head_angle(),
         obj->expert_control(), obj->manual_control(),
@@ -627,15 +627,15 @@ NdArray<float> Scenario::OccupancyGrid(
   NdArray<float> grid({3, rows, cols}, 0.0f);
   float* grid_data = grid.DataPtr();
 
-  const float ego_x = ego.position().x;
-  const float ego_y = ego.position().y;
+  const float ego_x = ego.position().x();
+  const float ego_y = ego.position().y();
   const float cos_h = std::cos(ego.heading());
   const float sin_h = std::sin(ego.heading());
   const float cell_long = (forward_dist + backward_dist) / static_cast<float>(rows);
   const float cell_lat = (2.0f * lateral_dist) / static_cast<float>(cols);
   const geometry::Vector2D ego_vel = ego.Velocity();
-  const float ego_vx = ego_vel.x;
-  const float ego_vy = ego_vel.y;
+  const float ego_vx = ego_vel.x();
+  const float ego_vy = ego_vel.y();
 
   // Per-cell closest-vehicle tracking for velocity channel.
   std::vector<float> min_dist(rows * cols,
@@ -644,8 +644,8 @@ NdArray<float> Scenario::OccupancyGrid(
 
   auto stamp_vehicle = [&](const Object& obj) {
     if (obj.id() == ego_id) return;
-    const float dx = obj.position().x - ego_x;
-    const float dy = obj.position().y - ego_y;
+    const float dx = obj.position().x() - ego_x;
+    const float dy = obj.position().y() - ego_y;
     const float lx = dx * cos_h + dy * sin_h;
     const float ly = -dx * sin_h + dy * cos_h;
     if (lx < -backward_dist || lx > forward_dist ||
@@ -666,16 +666,16 @@ NdArray<float> Scenario::OccupancyGrid(
       // arrives; the last write for the closest is correct since we update
       // min_dist atomically per cell).
       const geometry::Vector2D obj_vel = obj.Velocity();
-      const float rvx = (obj_vel.x - ego_vx) * cos_h + (obj_vel.y - ego_vy) * sin_h;
-      const float rvy = -(obj_vel.x - ego_vx) * sin_h + (obj_vel.y - ego_vy) * cos_h;
+      const float rvx = (obj_vel.x() - ego_vx) * cos_h + (obj_vel.y() - ego_vy) * sin_h;
+      const float rvy = -(obj_vel.x() - ego_vx) * sin_h + (obj_vel.y() - ego_vy) * cos_h;
       grid_data[rows * cols + idx] = rvx / 30.0f;
       grid_data[2 * rows * cols + idx] = rvy / 30.0f;
     }
   };
 
   auto stamp_simple = [&](const Object& obj, float weight) {
-    const float dx = obj.position().x - ego_x;
-    const float dy = obj.position().y - ego_y;
+    const float dx = obj.position().x() - ego_x;
+    const float dy = obj.position().y() - ego_y;
     const float lx = dx * cos_h + dy * sin_h;
     const float ly = -dx * sin_h + dy * cos_h;
     if (lx < -backward_dist || lx > forward_dist ||
@@ -699,8 +699,8 @@ NdArray<float> Scenario::OccupancyGrid(
   for (const auto& line : road_lines_) {
     if (line->road_type() != RoadType::kRoadEdge) continue;
     for (const auto& pt : line->geometry_points()) {
-      const float dx = pt.x - ego_x;
-      const float dy = pt.y - ego_y;
+      const float dx = pt.x() - ego_x;
+      const float dy = pt.y() - ego_y;
       const float lx = dx * cos_h + dy * sin_h;
       const float ly = -dx * sin_h + dy * cos_h;
       if (lx < -backward_dist || lx > forward_dist ||

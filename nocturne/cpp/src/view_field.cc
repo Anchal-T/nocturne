@@ -182,7 +182,7 @@ std::vector<const ObjectBase*> ViewField::VisibleObjectsAngularSweep(
   for (int64_t i = 0; i < n; ++i) {
     if (!objects[i]->can_block_sight()) continue;
     const auto poly = objects[i]->BoundingPolygon();
-    const auto vertices = poly.Vertices();
+    const auto vertices = poly.vertices();
     if (vertices.empty()) continue;
     float a_min = std::numeric_limits<float>::max();
     float a_max = std::numeric_limits<float>::lowest();
