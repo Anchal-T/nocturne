@@ -7,6 +7,7 @@ from examples.drl_collision_avoidance.dqn_modules.q_network import (
     _lecun_init_linear,
 )
 from examples.drl_collision_avoidance.vec_env import AsyncSubprocVecEnv, RayAsyncVecEnv
+from examples.drl_collision_avoidance.dqn_modules.sum_tree import SumTree
 
 
 class _RemoteStub:
@@ -41,6 +42,23 @@ def test_async_step_preserves_env_action_mapping():
 
     assert env._action_buf.tolist() == [-1.0, -1.0, 20.0, 30.0]
     assert env.remotes[1].messages == [("step", None)]
+
+
+def test_sum_tree_batch_update_coalesces_duplicate_leaves():
+    """PER updates must preserve the root sum when a batch repeats a leaf."""
+    tree = SumTree(capacity=8)
+    for priority in range(1, 9):
+        tree.add(priority)
+
+    leaf = tree.capacity - 1 + 3
+    tree.update_batch(
+        np.array([leaf, leaf, leaf + 1], dtype=np.int64),
+        np.array([4.0, 7.0, 2.0], dtype=np.float32),
+    )
+
+    leaves = tree.tree[tree.capacity - 1:]
+    assert leaves[3] == 7.0
+    assert np.isclose(tree.total(), np.sum(leaves, dtype=np.float32))
 
 
 class _AgentStub:

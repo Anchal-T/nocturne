@@ -61,7 +61,7 @@ rew_cfg:
 subscriber:
     view_angle: 2.1
     view_dist: 80
-    use_occlusion_features: True
+    use_occlusion_features: False
     use_ego_state: True
     use_observations: True
     keep_inactive_agents: False
@@ -87,7 +87,12 @@ drl:
     min_ready_fraction: 0.5
     min_replay_size: 5000
     hidden_layers: [256, 256, 256, 256]
+    # Stop after this many completed episodes when max_env_steps is disabled.
     num_episodes: 500000
+    # A positive value makes environment transitions the primary stop condition.
+    # The run continues until this threshold and min_runtime_seconds are both met.
+    max_env_steps: 400000
+    min_runtime_seconds: 57600  # 16 hours
     max_episode_steps: 80
     log_interval: 1000
     save_interval: 100000

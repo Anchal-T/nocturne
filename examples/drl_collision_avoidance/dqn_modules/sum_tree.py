@@ -115,9 +115,27 @@ class SumTree:
         """
         priorities = np.asarray(priorities, dtype=np.float32)
         tree_indices = np.asarray(tree_indices, dtype=np.int64)
+        if tree_indices.size == 0:
+            return
+        if tree_indices.shape != priorities.shape:
+            raise ValueError(
+                "tree_indices and priorities must have identical shapes, got "
+                f"{tree_indices.shape} and {priorities.shape}"
+            )
         # Sanitize
         valid = np.isfinite(priorities) & (priorities > 0.0)
         priorities = np.where(valid, priorities, 1e-6)
+
+        # A stratified sample can still contain the same high-priority leaf
+        # multiple times.  ``tree[idx] = priorities`` has last-write-wins
+        # semantics, so propagate only that final value for each leaf.  Without
+        # this coalescing, every duplicate delta is added to the ancestors and
+        # the root silently drifts above the sum of its leaves.
+        reverse_indices = tree_indices[::-1]
+        _, reverse_first = np.unique(reverse_indices, return_index=True)
+        keep = np.sort(tree_indices.size - 1 - reverse_first)
+        tree_indices = tree_indices[keep]
+        priorities = priorities[keep]
 
         old = self.tree[tree_indices]
         self.tree[tree_indices] = priorities

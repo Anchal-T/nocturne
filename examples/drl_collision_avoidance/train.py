@@ -935,6 +935,8 @@ def _run_training_loop(
     running_state,
     num_envs_per_worker=1,
     overlap_halves=True,
+    max_env_steps=0,
+    min_runtime_seconds=0.0,
 ):
     episode_rewards = np.zeros(num_envs, dtype=np.float64)
     episode_lengths = np.zeros(num_envs, dtype=np.int64)
@@ -969,7 +971,17 @@ def _run_training_loop(
     if _uses_async_collection(vec_env_mode):
         vec_env.step_async(current_actions)
 
-    while episodes_completed < num_episodes and running_state['running']:
+    def _training_target_reached():
+        """Return whether the configured transition and runtime minima are met."""
+        target_reached = (
+            global_step >= max_env_steps
+            if max_env_steps > 0
+            else episodes_completed >= num_episodes
+        )
+        runtime_reached = (time.time() - start_time) >= min_runtime_seconds
+        return target_reached and runtime_reached
+
+    while not _training_target_reached() and running_state['running']:
         if learner is not None:
             with loop_timer.time_poll():
                 learner.poll(agent)
@@ -1033,7 +1045,8 @@ def _run_training_loop(
             checkpoint_dir=checkpoint_dir,
             global_step=global_step,
             start_time=start_time,
-            num_episodes=num_episodes,
+            # A transition-limited run can continue past this episode count.
+            num_episodes=(num_episodes if max_env_steps <= 0 else sys.maxsize),
             loop_timer=loop_timer,
         )
 
@@ -1107,6 +1120,12 @@ def main(cfg):
     agent = _build_agent(cfg_dict, drl_cfg, obs_dim, n_actions, num_envs=num_envs)
 
     num_episodes = drl_cfg['num_episodes']
+    max_env_steps = int(drl_cfg.get('max_env_steps', 0))
+    min_runtime_seconds = float(drl_cfg.get('min_runtime_seconds', 0))
+    if max_env_steps < 0:
+        raise ValueError('drl.max_env_steps must be >= 0')
+    if min_runtime_seconds < 0:
+        raise ValueError('drl.min_runtime_seconds must be >= 0')
     train_freq = drl_cfg['train_freq']
     min_replay = drl_cfg['min_replay_size']
     log_interval = drl_cfg['log_interval']
@@ -1144,6 +1163,8 @@ def main(cfg):
             learner=learner,
             num_envs=num_envs,
             num_episodes=num_episodes,
+            max_env_steps=max_env_steps,
+            min_runtime_seconds=min_runtime_seconds,
             min_replay=min_replay,
             train_freq=train_freq,
             min_ready_fraction=float(drl_cfg.get('min_ready_fraction', 0.5)),
