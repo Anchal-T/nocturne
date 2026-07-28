@@ -95,25 +95,27 @@ drl:
     min_runtime_seconds: 57600  # 16 hours
     max_episode_steps: 80
     log_interval: 1000
+    # Persist weights every 100k completed episodes (plus final/emergency saves).
     save_interval: 100000
     checkpoint_dir: checkpoints/drl_collision_avoidance
-    # Match the 8 CPU cores available on the T4 job rather than oversubscribing.
-    num_workers: 8
+    # T4 has 8 vCPUs; keep headroom for the learner process to avoid OOM kills.
+    num_workers: 4
     num_envs_per_worker: 2
-    num_envs: 16
+    num_envs: 8
     vec_env_mode: async # async | sync | dummy | ray
     ray_address: null          # null = local cluster; "auto" = Anyscale cluster
     train_in_background: true
-    learner_queue_size: 1048576
+    # Large queues + high actor lag previously ballooned host RAM until a worker died.
+    learner_queue_size: 512
     learner_queue_put_timeout_s: 0.25
-    learner_overload_policy: block
+    learner_overload_policy: drop_oldest
     learner_max_train_steps_per_cycle: 32
     learner_weight_sync_interval: 16
     learner_metrics_interval_s: 1.0
     learner_startup_timeout_s: 60.0
     use_torch_compile: false
     compile_mode: reduce-overhead
-    use_cuda_graph: true       # Capture forward+backward+optimizer as one CUDA graph
+    use_cuda_graph: false
     cuda_graph_warmup_steps: 3  # Eager steps before capture
     use_tf32: true
     cudnn_benchmark: true

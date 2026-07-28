@@ -231,6 +231,11 @@ class DDQNAgent:
         self._train_graph_inputs = None
         self._train_graph_loss = None
         self._train_graph_td_errors = None
+        self._inference_graph = None
+        self._inference_graph_input = None
+        self._inference_graph_output = None
+        self._inference_graph_max_batch = max(1, int(config.num_envs))
+        self._inference_cuda_graph = self._use_cuda_graph
 
         # Separate streams so actor inference and learner training can overlap
         # when they share one GPU (same process, or via the GPU scheduler).
@@ -352,12 +357,6 @@ class DDQNAgent:
         if self.noisy:
             self._unwrap_module(self.inference_net).reset_noise()
 
-        # CUDA graph state for the fixed-shape inference path.
-        self._inference_graph = None
-        self._inference_graph_input = None
-        self._inference_graph_output = None
-        self._inference_graph_max_batch = int(config.num_envs)
-
     def _capture_inference_graph(self):
         """Capture the inference net forward pass as a CUDA graph.
 
@@ -445,21 +444,30 @@ class DDQNAgent:
             else nullcontext()
         )
         with stream_ctx:
-            if (
-                self._use_cuda_graph
+            use_graph = (
+                self._inference_cuda_graph
                 and n_valid <= self._inference_graph_max_batch
                 and self.device.type == "cuda"
-            ):
-                if self._inference_graph is None:
-                    self._capture_inference_graph()
-                # Copy into padded static tensor and replay.
-                self._inference_graph_input[:n_valid].copy_(states_t)
-                if n_valid < self._inference_graph_max_batch:
-                    self._inference_graph_input[n_valid:].zero_()
-                with self.inference_lock:
-                    self._reset_inference_noise_if_needed()
-                    self._inference_graph.replay()
-                return self._inference_graph_output[:n_valid]
+            )
+            if use_graph:
+                try:
+                    if self._inference_graph is None:
+                        self._capture_inference_graph()
+                    # Copy into padded static tensor and replay.
+                    self._inference_graph_input[:n_valid].copy_(states_t)
+                    if n_valid < self._inference_graph_max_batch:
+                        self._inference_graph_input[n_valid:].zero_()
+                    with self.inference_lock:
+                        self._reset_inference_noise_if_needed()
+                        self._inference_graph.replay()
+                    return self._inference_graph_output[:n_valid]
+                except Exception as exc:
+                    print(
+                        f"[DDQNAgent] inference CUDA graph failed ({exc}); "
+                        "falling back to eager inference."
+                    )
+                    self._inference_graph = None
+                    self._inference_cuda_graph = False
             # Eager fallback
             with self.inference_lock:
                 self._reset_inference_noise_if_needed()

@@ -538,7 +538,20 @@ class AsyncSubprocVecEnv:
                 break
             for remote in ready_remotes:
                 worker_id = self._remote_to_id[remote]
-                msg = remote.recv()
+                try:
+                    msg = remote.recv()
+                except (ConnectionResetError, EOFError, BrokenPipeError, OSError) as exc:
+                    self._pending_workers.discard(worker_id)
+                    exit_code = None
+                    if 0 <= worker_id < len(self.processes):
+                        proc = self.processes[worker_id]
+                        if proc.exitcode is None and proc.is_alive():
+                            proc.join(timeout=0.1)
+                        exit_code = proc.exitcode
+                    raise RuntimeError(
+                        f"Worker {worker_id} connection lost "
+                        f"(exitcode={exit_code}). Often OOM or a native crash."
+                    ) from exc
                 self._pending_workers.discard(worker_id)
                 if isinstance(msg, Exception):
                     raise RuntimeError(
@@ -601,17 +614,17 @@ class AsyncSubprocVecEnv:
         if self.closed:
             return
         self._pending_workers.clear()
-        for remote in self.remotes:
+        for remote in getattr(self, "remotes", ()):
             try:
                 remote.send(("close", None))
             except (BrokenPipeError, EOFError, OSError):
                 pass
-        for p in self.processes:
+        for p in getattr(self, "processes", ()):
             p.join(timeout=5)
             if p.is_alive():
                 p.terminate()
 
-        for remote in self.remotes:
+        for remote in getattr(self, "remotes", ()):
             try:
                 remote.close()
             except Exception:

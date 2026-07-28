@@ -89,6 +89,9 @@ class BaseEnv(Env):
         # restore its post-warmup state instead of re-parsing JSON and running
         # 10 physics steps on every reset. Keyed by filename.
         self._sim_cache: Dict[str, Any] = {}
+        # pybind11 Simulation instances do not allow arbitrary Python
+        # attributes, so cache state belongs to the Python environment.
+        self._simulation_from_cache = False
 
         obs_dict, _ = self.reset()
         self.observation_space = Box(low=-np.inf,
@@ -354,8 +357,8 @@ class BaseEnv(Env):
 
         On cache hit (file seen before), restores the post-warmup snapshot on
         the cached Simulation instead of re-parsing JSON. The caller
-        (reset()) checks the returned Simulation's ``_from_cache`` attribute to
-        decide whether to run the 10-step warmup.
+        (reset()) checks ``self._simulation_from_cache`` to decide whether to
+        run the 10-step warmup.
         """
         if self._pool_size > 0:
             self._pool_reset_count += 1
@@ -371,11 +374,11 @@ class BaseEnv(Env):
         if f in self._sim_cache:
             sim = self._sim_cache[f]
             sim.getScenario().restore_snapshot()
-            sim._from_cache = True
+            self._simulation_from_cache = True
             return f, sim
         path = os.path.join(self.cfg['scenario_path'], f)
         sim = Simulation(path, config=self._scenario_config)
-        sim._from_cache = False
+        self._simulation_from_cache = False
         return f, sim
 
     def _compute_obs_dim(self) -> int:
@@ -448,7 +451,7 @@ class BaseEnv(Env):
             }
             for veh in self.scenario.getObjectsThatMoved():
                 veh.expert_control = True
-            from_cache = getattr(self.simulation, '_from_cache', False)
+            from_cache = self._simulation_from_cache
             if not from_cache:
                 for _ in range(10):
                     if build_obs:

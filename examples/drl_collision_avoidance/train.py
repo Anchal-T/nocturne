@@ -1177,12 +1177,28 @@ def main(cfg):
             num_envs_per_worker=num_envs_per_worker,
             overlap_halves=bool(drl_cfg.get('overlap_halves', True)),
         )
+    except Exception:
+        # Best-effort emergency checkpoint so a worker crash still leaves weights.
+        emergency_path = os.path.join(checkpoint_dir, 'ddqn_emergency.pth')
+        try:
+            if learner is not None:
+                learner.poll(agent)
+                learner.save(emergency_path)
+            else:
+                agent.save(emergency_path)
+            print(f'  Emergency checkpoint: {emergency_path}')
+        except Exception as save_exc:
+            print(f'  Emergency checkpoint failed: {save_exc}')
+        raise
     finally:
         elapsed = time.time() - start_time
         print(f'\nTraining finished after {elapsed:.1f}s. Cleaning up...')
 
         if learner is not None:
-            learner.poll(agent)
+            try:
+                learner.poll(agent)
+            except Exception:
+                pass
             print(
                 f'  Learner: {learner.train_steps} gradient steps, '
                 f'{learner.buffer_size} transitions in buffer, '
@@ -1190,7 +1206,10 @@ def main(cfg):
                 f'train_step_lag={learner.train_step_lag}'
             )
 
-        vec_env.close()
+        try:
+            vec_env.close()
+        except Exception as close_exc:
+            print(f'  vec_env.close() failed: {close_exc}')
 
         if vec_env_mode == 'ray':
             try:
@@ -1204,8 +1223,13 @@ def main(cfg):
             try:
                 learner.save(final_path)
                 print(f'  Final checkpoint: {final_path}')
+            except Exception as save_exc:
+                print(f'  Final checkpoint failed: {save_exc}')
             finally:
-                learner.stop()
+                try:
+                    learner.stop()
+                except Exception:
+                    pass
         else:
             agent.finalize_profiling()
             agent.save(final_path)
