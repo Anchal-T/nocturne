@@ -47,6 +47,11 @@ import torch
 from omegaconf import OmegaConf
 
 from cfgs.config import set_display_window
+from nocturne.utils.distributed import (
+    cleanup_distributed,
+    init_distributed,
+    rank_offset_seed,
+)
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 
@@ -594,7 +599,8 @@ def _build_vec_env(cfg_dict, num_envs, num_envs_per_worker, vec_env_mode):
     return vec_env_cls(env_fns, **kwargs), vec_env_cls
 
 
-def _build_agent(cfg_dict, drl_cfg, obs_dim, n_actions, num_envs: int = 1):
+def _build_agent(cfg_dict, drl_cfg, obs_dim, n_actions, num_envs: int = 1,
+                 dist_info=None):
     from examples.drl_collision_avoidance.dqn_modules.ddqn_agent import DDQNAgent, DDQNAgentConfig
 
     grid_cfg = cfg_dict['occupancy_grid']
@@ -616,7 +622,8 @@ def _build_agent(cfg_dict, drl_cfg, obs_dim, n_actions, num_envs: int = 1):
         grid_cols=grid_cols,
         device=device,
     )
-    return DDQNAgent(obs_dim=obs_dim, n_actions=n_actions, config=agent_cfg)
+    return DDQNAgent(obs_dim=obs_dim, n_actions=n_actions, config=agent_cfg,
+                     dist_info=dist_info)
 
 
 def _print_training_header(num_workers, num_envs_per_worker, num_envs, vec_env_cls, train_in_bg, obs_dim, n_actions):
@@ -712,7 +719,8 @@ def _submit_or_train_batch(learner, agent, env_ids, prev_obs, prev_actions, rewa
 
     agent.store_transition_batch(prev_obs, prev_actions, rewards, next_obs, dones_f32, env_ids=env_ids)
     if len(agent.replay_buffer) >= min_replay and global_step % train_freq == 0:
-        agent.train_step(env_steps=global_step)
+        world = getattr(getattr(agent, "dist_info", None), "world_size", 1) or 1
+        agent.train_step(env_steps=global_step * world)
 
 
 def _write_episode_metrics(writer, learner, agent, ep_reward, ep_length, info, episodes_completed):
@@ -749,9 +757,14 @@ def _maybe_print_episode_log(
 ):
     if episodes_completed % log_interval != 0:
         return
+    dist_info = getattr(agent, 'dist_info', None)
+    if dist_info is not None and not dist_info.is_rank0:
+        return
 
     avg_rew = np.mean(reward_history[-log_interval:])
     elapsed = max(time.time() - start_time, 1e-3)
+    world_size = dist_info.world_size if dist_info is not None else 1
+    global_step = global_step * world_size
     fps = int(global_step / elapsed)
     buf_sz = learner.buffer_size if learner else len(agent.replay_buffer)
     train_steps = learner.train_steps if learner else agent.train_steps
@@ -781,6 +794,9 @@ def _maybe_print_episode_log(
 
 def _maybe_save_checkpoint(episodes_completed, save_interval, checkpoint_dir, agent, learner):
     if episodes_completed % save_interval != 0:
+        return
+    dist_info = getattr(agent, "dist_info", None)
+    if dist_info is not None and not dist_info.is_rank0:
         return
     path = os.path.join(checkpoint_dir, f'ddqn_ep{episodes_completed}.pth')
     if learner is not None:
@@ -945,7 +961,8 @@ def _run_training_loop(
     reward_history = []
 
     loop_timer = _LoopTimer()
-    vec_env.step_wait = loop_timer.wrap_step_wait(vec_env.step_wait)
+    if hasattr(vec_env, 'step_wait'):
+        vec_env.step_wait = loop_timer.wrap_step_wait(vec_env.step_wait)
     agent.select_action_batch = loop_timer.wrap_inference(agent.select_action_batch)
 
     # Alternating halves: GPU inference on half A overlaps CPU stepping of half B.
@@ -958,13 +975,17 @@ def _run_training_loop(
     overlap_halves_list = [half_a, half_b] if use_overlap else [None]
     overlap_idx = 0
     if use_overlap:
-        print(
-            f"Overlap collection: half_a={len(half_a)} envs, "
-            f"half_b={len(half_b)} envs (worker-aligned)\n"
-        )
+        dist_info = getattr(agent, 'dist_info', None)
+        if dist_info is None or dist_info.is_rank0:
+            print(
+                f"Overlap collection: half_a={len(half_a)} envs, "
+                f"half_b={len(half_b)} envs (worker-aligned)\n"
+            )
 
     obs = vec_env.reset()
-    print("Collecting experience...\n")
+    dist_info = getattr(agent, 'dist_info', None)
+    if dist_info is None or dist_info.is_rank0:
+        print("Collecting experience...\n")
 
     current_obs = obs.copy()
     current_actions = agent.select_action_batch(current_obs)
@@ -1059,14 +1080,47 @@ def main(cfg):
     os.environ['OMP_NUM_THREADS'] = '1'
     torch.set_num_threads(1)
     cfg_dict = _make_cfg_dict(cfg)
+    dist_info = init_distributed(requested_device=str(cfg_dict.get("device", "cpu")))
+    try:
+        _run_ddqn_main(cfg_dict, dist_info)
+    finally:
+        cleanup_distributed()
+
+
+def _run_ddqn_main(cfg_dict, dist_info):
 
     from examples.drl_collision_avoidance.scenario_utils import apply_scenario_path_defaults
 
     cfg_dict = apply_scenario_path_defaults(cfg_dict, default_split='train')
+    cfg_dict['seed'] = rank_offset_seed(int(cfg_dict.get('seed', 42)), dist_info.rank)
+    if dist_info.is_distributed:
+        cfg_dict['device'] = str(dist_info.device)
     drl_cfg = cfg_dict['drl']
     num_workers, num_envs_per_worker, num_envs = _resolve_parallel_env_config(drl_cfg)
     vec_env_mode = str(drl_cfg['vec_env_mode']).lower()
-    train_in_bg = drl_cfg['train_in_background']
+    train_in_bg = bool(drl_cfg['train_in_background'])
+    if dist_info.is_distributed:
+        allow_distributed_async = bool(drl_cfg.get('allow_distributed_async', False))
+        if vec_env_mode == 'async' and allow_distributed_async:
+            if not bool(drl_cfg.get('overlap_halves', True)):
+                raise ValueError(
+                    'Distributed async DDQN requires drl.overlap_halves=true '
+                    'so every rank submits equal-size batches.'
+                )
+            if dist_info.is_rank0:
+                print(
+                    '[DDQN] Distributed async collection enabled; '
+                    'worker-aligned halves keep DDP update counts synchronized.'
+                )
+        else:
+            # Async collection can return different ready batches on each rank.
+            # DDP requires identical collective counts, so use the deterministic
+            # synchronous vector environment unless explicitly configured for
+            # worker-aligned asynchronous collection.
+            vec_env_mode = 'sync'
+        if train_in_bg and dist_info.is_rank0:
+            print('[DDQN] Disabling ProcessLearner under torchrun; each rank trains in-process.')
+        train_in_bg = False
 
     # Set spawn start method before any subprocess or Ray initialization.
     # Must happen here (not in vec_env.py at import time) so it runs before
@@ -1107,17 +1161,26 @@ def main(cfg):
     vec_env, vec_env_cls = _build_vec_env(cfg_dict, num_envs, num_envs_per_worker, vec_env_mode)
     obs_dim = vec_env.observation_space.shape[0]
     n_actions = vec_env.action_space.n
-    _print_training_header(
-        num_workers,
-        num_envs_per_worker,
-        num_envs,
-        vec_env_cls,
-        train_in_bg,
-        obs_dim,
-        n_actions,
-    )
+    if dist_info.is_rank0:
+        _print_training_header(
+            num_workers,
+            num_envs_per_worker,
+            num_envs,
+            vec_env_cls,
+            train_in_bg,
+            obs_dim,
+            n_actions,
+        )
 
-    agent = _build_agent(cfg_dict, drl_cfg, obs_dim, n_actions, num_envs=num_envs)
+    agent = _build_agent(
+        cfg_dict, drl_cfg, obs_dim, n_actions, num_envs=num_envs,
+        dist_info=dist_info,
+    )
+    resume_checkpoint = drl_cfg.get('resume_checkpoint')
+    if resume_checkpoint:
+        agent.load(resume_checkpoint)
+        if dist_info.is_rank0:
+            print(f'  Resumed DDQN checkpoint: {resume_checkpoint}')
 
     num_episodes = drl_cfg['num_episodes']
     max_env_steps = int(drl_cfg.get('max_env_steps', 0))
@@ -1137,7 +1200,7 @@ def main(cfg):
     checkpoint_dir = os.path.join(_original_cwd, drl_cfg['checkpoint_dir'])
     os.makedirs(checkpoint_dir, exist_ok=True)
 
-    writer = _make_writer(checkpoint_dir)
+    writer = _make_writer(checkpoint_dir) if dist_info.is_rank0 else None
     running_state = {'running': True}
 
     def _signal_handler(sig, frame):
@@ -1181,30 +1244,33 @@ def main(cfg):
         # Best-effort emergency checkpoint so a worker crash still leaves weights.
         emergency_path = os.path.join(checkpoint_dir, 'ddqn_emergency.pth')
         try:
-            if learner is not None:
-                learner.poll(agent)
-                learner.save(emergency_path)
-            else:
-                agent.save(emergency_path)
-            print(f'  Emergency checkpoint: {emergency_path}')
+            if dist_info.is_rank0:
+                if learner is not None:
+                    learner.poll(agent)
+                    learner.save(emergency_path)
+                else:
+                    agent.save(emergency_path)
+                print(f'  Emergency checkpoint: {emergency_path}')
         except Exception as save_exc:
             print(f'  Emergency checkpoint failed: {save_exc}')
         raise
     finally:
         elapsed = time.time() - start_time
-        print(f'\nTraining finished after {elapsed:.1f}s. Cleaning up...')
+        if dist_info.is_rank0:
+            print(f'\nTraining finished after {elapsed:.1f}s. Cleaning up...')
 
         if learner is not None:
             try:
                 learner.poll(agent)
             except Exception:
                 pass
-            print(
-                f'  Learner: {learner.train_steps} gradient steps, '
-                f'{learner.buffer_size} transitions in buffer, '
-                f'dropped_batches={learner.dropped_batches}, '
-                f'train_step_lag={learner.train_step_lag}'
-            )
+            if dist_info.is_rank0:
+                print(
+                    f'  Learner: {learner.train_steps} gradient steps, '
+                    f'{learner.buffer_size} transitions in buffer, '
+                    f'dropped_batches={learner.dropped_batches}, '
+                    f'train_step_lag={learner.train_step_lag}'
+                )
 
         try:
             vec_env.close()
@@ -1231,12 +1297,18 @@ def main(cfg):
                 except Exception:
                     pass
         else:
-            agent.finalize_profiling()
-            agent.save(final_path)
-            print(f'  Final checkpoint: {final_path}')
+            if dist_info.is_rank0:
+                agent.finalize_profiling()
+                agent.save(final_path)
+                print(f'  Final checkpoint: {final_path}')
 
-        print(f'  Total episodes: {episodes_completed}, env_steps: {global_step}, '
-              f'avg fps: {int(global_step / max(elapsed, 1e-3))}')
+        if dist_info.is_rank0:
+            world_size = dist_info.world_size
+            print(
+                f'  Total episodes: {episodes_completed}, '
+                f'env_steps: {global_step * world_size}, '
+                f'avg fps: {int(global_step * world_size / max(elapsed, 1e-3))}'
+            )
 
         if writer is not None:
             writer.close()

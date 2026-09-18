@@ -1,0 +1,182 @@
+{
+  "evaluation_date": "2026-09-17",
+  "protocol": {
+    "purpose": "Interim checkpoint audit, not an apples-to-apples benchmark",
+    "deterministic_inference": true,
+    "episode_horizon_steps": 80,
+    "simulation_dt_seconds": 0.1,
+    "primary_metrics": [
+      "goal_rate",
+      "collision_rate",
+      "timeout_rate",
+      "average_episode_length",
+      "ADE",
+      "FDE"
+    ],
+    "common_full_validation_directory": "/home/anchal/anchal/nocturne/dataset/full_valid/formatted_json_v2_no_tl_valid",
+    "caveats": [
+      "Existing BC, DDQN, CRL, and R-MAPPO artifacts use the mini validation split unless otherwise noted.",
+      "The framework-native evaluators aggregate episodes differently, so rates are not pooled across methods.",
+      "Several located checkpoints are smoke or validation checkpoints rather than completed training runs."
+    ]
+  },
+  "results": [
+    {
+      "method": "Archived DDQN result",
+      "family": "DDQN",
+      "evaluation_artifact": "paper/runs data/eval_baseline_fixed.json",
+      "checkpoint": "/home/ubuntu/checkpoints/drl_collision_avoidance/ddqn_ep400000.pth",
+      "checkpoint_available_locally": false,
+      "dataset": "not recorded in artifact",
+      "n": 1500,
+      "goal_rate": 0.9533333333333334,
+      "collision_rate": 0.051333333333333335,
+      "ade": 2.2415796941669894,
+      "fde": 6.3975715658089936,
+      "training_status": "historical result artifact; checkpoint unavailable locally",
+      "comparability": "reported for provenance only"
+    },
+    {
+      "method": "DDQN validation",
+      "family": "DDQN",
+      "evaluation_artifact": "/home/anchal/tmp/eval_results/ddqn_ddp.json",
+      "checkpoint": "/home/anchal/tmp/ddqn_ddp_validation/ddqn_final.pth",
+      "checkpoint_available_locally": true,
+      "dataset": "dataset/formatted_json_v2_no_tl_valid",
+      "n": 1500,
+      "goal_rate": 0.08266666666666667,
+      "collision_rate": 0.15133333333333332,
+      "timeout_rate": 0.766,
+      "average_episode_length": 66.63666666666667,
+      "ade": 735.9191436090937,
+      "fde": 4237.123939618995,
+      "goal_rate_wilson_95": [
+        0.06977397936285945,
+        0.09769145214491871
+      ],
+      "collision_rate_wilson_95": [
+        0.13408940459053802,
+        0.1703585517650018
+      ],
+      "training_status": "validation smoke checkpoint; train_steps=3",
+      "comparability": "mini-split family-native evaluation"
+    },
+    {
+      "method": "BC",
+      "family": "behavior cloning",
+      "evaluation_artifact": "/home/anchal/tmp/eval_results/bc_ddp.json",
+      "checkpoint": "/home/anchal/tmp/bc_ddp_validation.pth",
+      "checkpoint_available_locally": true,
+      "dataset": "dataset/formatted_json_v2_no_tl_valid",
+      "n": 1500,
+      "goal_rate": 0.12866666666666668,
+      "collision_rate": 0.05466666666666667,
+      "timeout_rate": 0.8166666666666667,
+      "average_episode_length": 71.76733333333334,
+      "ade": 402.22791371937706,
+      "fde": 2467.9615947358843,
+      "goal_rate_wilson_95": [
+        0.11266584947869745,
+        0.14656457459382398
+      ],
+      "collision_rate_wilson_95": [
+        0.0442585604777409,
+        0.06734991047774742
+      ],
+      "training_status": "validation smoke checkpoint; train_steps=1",
+      "comparability": "mini-split family-native evaluation"
+    },
+    {
+      "method": "CRL",
+      "family": "contrastive RL",
+      "evaluation_artifact": "/home/anchal/tmp/eval_results/crl_large.json",
+      "checkpoint": "/home/anchal/tmp/crl_large/checkpoints/crl_final.pth",
+      "checkpoint_available_locally": true,
+      "dataset": "dataset/formatted_json_v2_no_tl_valid",
+      "n": 1500,
+      "goal_rate": 0.47733333333333333,
+      "collision_rate": 0.16866666666666666,
+      "timeout_rate": 0.354,
+      "average_episode_length": 50.626,
+      "goal_rate_wilson_95": [
+        0.4521464595955274,
+        0.5026360079304541
+      ],
+      "collision_rate_wilson_95": [
+        0.15056853489058108,
+        0.1884575345269858
+      ],
+      "training_status": "full checkpoint; episodes_completed=400001; train_steps=648241",
+      "comparability": "mini-split family-native evaluation"
+    },
+    {
+      "method": "Waymo BC",
+      "family": "Waymo imitation learning",
+      "evaluation_artifact": "/home/anchal/tmp/eval_results/waymo_bc_model_100.json",
+      "checkpoint": "/home/anchal/tmp/imitation_resume/train_logs/2026_09_05_19_41_29/model_100.pth",
+      "checkpoint_available_locally": true,
+      "dataset": "/home/anchal/anchal/nocturne/dataset/full_valid/formatted_json_v2_no_tl_valid",
+      "n": 1000,
+      "goal_rate": 0.23925794869385872,
+      "collision_rate": 0.4081966788407115,
+      "ade": 5.2431921079138535,
+      "ade_std": 2.3426462831962933,
+      "fde": 8.657692365469437,
+      "fde_std": 4.647653224624179,
+      "training_status": "completed epoch-100 checkpoint",
+      "comparability": "full-split scenario evaluation; scenario-level aggregate"
+    },
+    {
+      "method": "R-MAPPO",
+      "family": "PPO",
+      "evaluation_artifact": "/home/anchal/tmp/eval_results/ppo_long_v2_run1.json",
+      "checkpoint": "/home/anchal/tmp/ppo_multi_gpu_long_v2/run1/models",
+      "checkpoint_available_locally": true,
+      "dataset": "dataset/formatted_json_v2_no_tl_valid",
+      "n": 1000,
+      "goal_rate": 0.11599877728480669,
+      "collision_rate": 0.22299973229384995,
+      "timeout_like_rate": 0.358,
+      "average_episode_length": 80.0,
+      "training_status": "checkpoint present; training progress not encoded in result artifact",
+      "aggregation": "mean per-agent rates across completed rollouts",
+      "comparability": "mini-split framework-native evaluation"
+    },
+    {
+      "method": "RLlib PPO",
+      "family": "RLlib",
+      "evaluation_artifact": "paper/runs data/framework_rollout_results.json",
+      "checkpoint": "/home/anchal/tmp/rllib_ddp_results/PPO/PPO_nocturne_a424a_00000_0_2026-09-01_18-19-16/checkpoint_000001/checkpoint-1",
+      "checkpoint_available_locally": true,
+      "dataset": "/home/anchal/anchal/nocturne/dataset/full_valid/formatted_json_v2_no_tl_valid",
+      "n": 100,
+      "goal_rate": 0.08,
+      "collision_rate": 0.73,
+      "timeout_rate": 0.19,
+      "average_episode_length": 34.63,
+      "average_reward": 1.876000790341236,
+      "training_status": "smoke checkpoint; training_iteration=1; timesteps_total=512",
+      "aggregation": "single controlled agent per episode",
+      "comparability": "common full validation split; framework-native rollout"
+    },
+    {
+      "method": "Sample Factory APPO",
+      "family": "Sample Factory/APPO",
+      "evaluation_artifact": "paper/runs data/framework_rollout_results.json; raw NumPy arrays in /home/anchal/tmp/eval_results/sf_ddp_smoke2_valid",
+      "checkpoint": "/home/anchal/tmp/sf_results/sf_ddp_smoke2/checkpoint_p0/checkpoint_000000012_480.pth",
+      "checkpoint_available_locally": true,
+      "dataset": "/home/anchal/anchal/nocturne/dataset/full_valid/formatted_json_v2_no_tl_valid",
+      "n": 100,
+      "goal_rate": 0.04,
+      "collision_rate": 0.81,
+      "average_reward": null,
+      "ade": 3.8716152600601648,
+      "fde": 10.154330124679484,
+      "vehicle_vehicle_collision_rate": 0.22,
+      "vehicle_edge_collision_rate": 0.59,
+      "training_status": "smoke checkpoint; checkpoint suffix indicates 480 environment steps",
+      "aggregation": "single controlled agent per scenario",
+      "comparability": "common full validation split; framework-native rollout"
+    }
+  ]
+}

@@ -5,7 +5,7 @@
 """Default environment for Nocturne."""
 from typing import Any, Dict, Sequence, Union
 
-from collections import defaultdict, deque
+from collections import OrderedDict, defaultdict, deque
 from itertools import islice
 import json
 import os
@@ -17,7 +17,10 @@ import torch
 
 from cfgs.config import ERR_VAL as INVALID_POSITION, get_scenario_dict
 from nocturne import Action, Simulation
-from nocturne.utils.occlusion_features import compute_occlusion_features
+from nocturne.utils.occlusion_features import (
+    compute_occlusion_features,
+    compute_occlusion_features_from_objects,
+)
 
 
 class BaseEnv(Env):
@@ -71,24 +74,30 @@ class BaseEnv(Env):
         self.rank = rank
         self.seed(cfg['seed'])
 
-        # Scenario pool: limit working set so OS page cache keeps files hot
-        self._pool_size = cfg.get('scenario_pool_size', 0)
-        self._resample_interval = cfg.get('resample_pool_interval', 5000)
+        # Scenario pool: limit working set so OS page cache keeps files hot.
+        self._pool_size = int(cfg.get('scenario_pool_size', 0) or 0)
+        self._resample_interval = int(
+            cfg.get('resample_pool_interval', 5000) or 0)
         self._pool_files = []
         self._pool_reset_count = 0
-        if self._pool_size > 0:
-            self._pool_files = [self.files[np.random.randint(len(self.files))]
-                                for _ in range(self._pool_size)]
+        if self._pool_size > 0 and self.files:
+            self._pool_files = [
+                self.files[np.random.randint(len(self.files))]
+                for _ in range(self._pool_size)
+            ]
 
         # Lazy blacklist of scenario files that yielded zero controllable
         # vehicles, so the `while not enough_vehicles` retry loop in reset()
         # never retries a known-bad file (removes a straggler source).
         self._bad_files: set = set()
 
-        # Simulation+snapshot cache: reuse a single Simulation per file and
-        # restore its post-warmup state instead of re-parsing JSON and running
-        # 10 physics steps on every reset. Keyed by filename.
-        self._sim_cache: Dict[str, Any] = {}
+        # Bounded LRU of Simulation objects. Without a cap this grows with
+        # every unique scenario and can swap the host to death.
+        cache_size = int(cfg.get('scenario_cache_size', 32) or 0)
+        if self._pool_size > 0:
+            cache_size = max(cache_size, self._pool_size)
+        self._cache_size = cache_size
+        self._sim_cache: OrderedDict = OrderedDict()
         # pybind11 Simulation instances do not allow arbitrary Python
         # attributes, so cache state belongs to the Python environment.
         self._simulation_from_cache = False
@@ -181,6 +190,21 @@ class BaseEnv(Env):
         self.t += self.cfg['dt']
         self.step_num += 1
         objs_to_remove = []
+        near_miss_threshold = rew_cfg.get('near_miss_threshold', None)
+        near_miss_ids = None
+        near_miss_positions = None
+        if near_miss_threshold is not None:
+            vehicles = self.scenario.getVehicles()
+            near_miss_ids = np.fromiter(
+                (vehicle.getID() for vehicle in vehicles),
+                dtype=np.int64,
+                count=len(vehicles),
+            )
+            near_miss_positions = np.asarray(
+                [(vehicle.position.x, vehicle.position.y)
+                 for vehicle in vehicles],
+                dtype=np.float32,
+            )
         for veh_obj in self.controlled_vehicles:
             veh_id = veh_obj.getID()
             if veh_id in self.done_ids:
@@ -204,6 +228,7 @@ class BaseEnv(Env):
             info_dict[veh_id]['veh_edge_collision'] = False
             info_dict[veh_id]['cost'] = 0.0
             info_dict[veh_id]['near_miss'] = 0.0
+            info_dict[veh_id]['inactive'] = False
             obj_pos = veh_obj.position
             goal_pos = veh_obj.target_position
             '''############################################
@@ -297,15 +322,16 @@ class BaseEnv(Env):
                     rew_cfg['collision_penalty']) / rew_cfg['reward_scaling']
                 if self.cfg.get('remove_at_collide', True):
                     done_dict[veh_id] = True
-            near_miss_threshold = rew_cfg.get('near_miss_threshold', None)
             if near_miss_threshold is not None and not info_dict[veh_id][
                     'collided']:
-                min_distance = np.inf
-                for other_obj in self.scenario.getVehicles():
-                    if other_obj.getID() == veh_id:
-                        continue
-                    min_distance = min(
-                        min_distance, (other_obj.position - obj_pos).norm())
+                other_positions = near_miss_positions[near_miss_ids != veh_id]
+                if len(other_positions):
+                    position = np.asarray(
+                        [obj_pos.x, obj_pos.y], dtype=np.float32)
+                    min_distance = np.linalg.norm(
+                        other_positions - position, axis=1).min()
+                else:
+                    min_distance = np.inf
                 info_dict[veh_id]['near_miss'] = float(
                     min_distance < near_miss_threshold)
             # remove the vehicle so that its trajectory doesn't continue. This is important
@@ -327,7 +353,9 @@ class BaseEnv(Env):
 
         # fill in the missing observations if we should be doing so
         if self.cfg['subscriber']['keep_inactive_agents']:
-            # force all vehicles done to be false since they should persist through the episode
+            # Keep per-agent done False mid-episode so a finished vehicle
+            # does not reset the whole scene. Time-limit truncation still
+            # ends the episode (see truncated_dict below).
             done_dict = {key: False for key in self.all_vehicle_ids}
             for key in self.all_vehicle_ids:
                 if key not in obs_dict.keys():
@@ -339,6 +367,7 @@ class BaseEnv(Env):
                     info_dict[key]['veh_edge_collision'] = False
                     info_dict[key]['cost'] = 0.0
                     info_dict[key]['near_miss'] = 0.0
+                    info_dict[key]['inactive'] = True
 
         truncated_dict = {key: False for key in done_dict.keys()}
         if self.step_num >= self.episode_length:
@@ -347,10 +376,61 @@ class BaseEnv(Env):
         all_done = True
         for value in done_dict.values():
             all_done *= value
-        done_dict['__all__'] = all_done
-        truncated_dict['__all__'] = any(truncated_dict.values())
+        timed_out = self.step_num >= self.episode_length
+        done_dict['__all__'] = bool(all_done) or timed_out
+        truncated_dict['__all__'] = timed_out
 
         return obs_dict, rew_dict, done_dict, truncated_dict, info_dict
+
+    def _pick_scenario_file(self):
+        """Choose the next scenario, using the pool when it is enabled."""
+        if not self.files:
+            raise RuntimeError("no scenario files remain")
+        if self._pool_size <= 0:
+            return self.files[np.random.randint(len(self.files))]
+        self._pool_reset_count += 1
+        self._refill_pool()
+        if not self._pool_files:
+            return self.files[np.random.randint(len(self.files))]
+        if (self._resample_interval > 0
+                and self._pool_reset_count % self._resample_interval == 0):
+            idx = np.random.randint(len(self._pool_files))
+            self._pool_files[idx] = self.files[np.random.randint(
+                len(self.files))]
+        return self._pool_files[np.random.randint(len(self._pool_files))]
+
+    def _refill_pool(self):
+        """Grow the pool back to ``_pool_size`` from remaining files."""
+        if self._pool_size <= 0 or not self.files:
+            return
+        while len(self._pool_files) < self._pool_size:
+            self._pool_files.append(
+                self.files[np.random.randint(len(self.files))])
+
+    def _drop_cached(self, filename):
+        self._sim_cache.pop(filename, None)
+
+    def _store_simulation(self, filename, sim):
+        """Insert ``sim`` into the LRU cache, evicting the oldest if needed."""
+        if self._cache_size <= 0:
+            return
+        if filename in self._sim_cache:
+            self._sim_cache.pop(filename)
+        while len(self._sim_cache) >= self._cache_size:
+            self._sim_cache.popitem(last=False)
+        self._sim_cache[filename] = sim
+
+    def _blacklist_file(self, filename):
+        """Forget a scenario that produced no controllable vehicles."""
+        self._bad_files.add(filename)
+        if filename in self.files:
+            self.files.remove(filename)
+        if self._pool_size > 0:
+            self._pool_files = [
+                name for name in self._pool_files if name != filename
+            ]
+            self._refill_pool()
+        self._drop_cached(filename)
 
     def _get_simulation(self):
         """Return (file, Simulation) — from pool working set if enabled.
@@ -360,22 +440,16 @@ class BaseEnv(Env):
         (reset()) checks ``self._simulation_from_cache`` to decide whether to
         run the 10-step warmup.
         """
-        if self._pool_size > 0:
-            self._pool_reset_count += 1
-            if self._resample_interval > 0 and self._pool_reset_count % self._resample_interval == 0:
-                # Replace one random pool entry to maintain diversity
-                idx = np.random.randint(self._pool_size)
-                self._pool_files[idx] = self.files[np.random.randint(len(self.files))]
-            f = self._pool_files[np.random.randint(self._pool_size)]
-        else:
-            f = self.files[np.random.randint(len(self.files))]
-        # Cache hit: restore snapshot on the cached Simulation (avoids JSON
-        # parse + 10 physics steps). Cache miss: create a fresh Simulation.
+        f = self._pick_scenario_file()
         if f in self._sim_cache:
             sim = self._sim_cache[f]
-            sim.getScenario().restore_snapshot()
-            self._simulation_from_cache = True
-            return f, sim
+            scenario = sim.getScenario()
+            if hasattr(scenario, "restore_snapshot"):
+                scenario.restore_snapshot()
+                self._sim_cache.move_to_end(f)
+                self._simulation_from_cache = True
+                return f, sim
+            self._drop_cached(f)
         path = os.path.join(self.cfg['scenario_path'], f)
         sim = Simulation(path, config=self._scenario_config)
         self._simulation_from_cache = False
@@ -390,6 +464,7 @@ class BaseEnv(Env):
         """
         sc = self.scenario
         sub = self.cfg['subscriber']
+        scenario_cfg = self.cfg['scenario']
         use_ego = sub.get('use_ego_state', True)
         use_obs = sub.get('use_observations', True)
         dim = 0
@@ -397,15 +472,41 @@ class BaseEnv(Env):
             dim += sc.getEgoFeatureSize()
         if use_obs:
             dim += (
-                sc.getMaxNumVisibleObjects() * sc.getObjectFeatureSize()
-                + sc.getMaxNumVisibleRoadPoints() * sc.getRoadPointFeatureSize()
-                + sc.getMaxNumVisibleTrafficLights() * sc.getTrafficLightFeatureSize()
-                + sc.getMaxNumVisibleStopSigns() * sc.getStopSignsFeatureSize()
+                int(scenario_cfg['max_visible_objects'])
+                * sc.getObjectFeatureSize()
+                + int(scenario_cfg['max_visible_road_points'])
+                * sc.getRoadPointFeatureSize()
+                + int(scenario_cfg['max_visible_traffic_lights'])
+                * sc.getTrafficLightFeatureSize()
+                + int(scenario_cfg['max_visible_stop_signs'])
+                * sc.getStopSignsFeatureSize()
             )
         if sub.get('use_occlusion_features', False):
             from nocturne.utils.occlusion_features import OCCLUSION_FEATURE_SIZE
             dim += OCCLUSION_FEATURE_SIZE
         return dim
+
+    def _pad_visible_state(self, visible: Dict[str, np.ndarray]) -> Dict[str, np.ndarray]:
+        """Normalize visible-state row counts across scenario files."""
+        scenario_cfg = self.cfg['scenario']
+        row_limits = {
+            'objects': int(scenario_cfg['max_visible_objects']),
+            'road_points': int(scenario_cfg['max_visible_road_points']),
+            'traffic_lights': int(scenario_cfg['max_visible_traffic_lights']),
+            'stop_signs': int(scenario_cfg['max_visible_stop_signs']),
+        }
+        normalized = {}
+        for key, value in visible.items():
+            array = np.asarray(value)
+            limit = row_limits[key]
+            if array.shape[0] == limit:
+                normalized[key] = array
+                continue
+            padded = np.zeros((limit, *array.shape[1:]), dtype=array.dtype)
+            rows = min(limit, array.shape[0])
+            padded[:rows] = array[:rows]
+            normalized[key] = padded
+        return normalized
 
     def reset(self, build_obs: bool = True):
         """See superclass.
@@ -434,13 +535,8 @@ class BaseEnv(Env):
                 Construct context dictionary of observations that can be used to
                 warm up policies by stepping all vehicles as experts.
             #####################################################################'''
-            if build_obs:
-                dead_obs = self.get_observation(self.scenario.getVehicles()[0])
-                self.dead_feat = -np.ones(
-                    dead_obs.shape[0] * self.n_frames_stacked)
-            else:
-                obs_dim = self._compute_obs_dim()
-                self.dead_feat = -np.ones(obs_dim * self.n_frames_stacked)
+            obs_dim = self._compute_obs_dim()
+            self.dead_feat = -np.ones(obs_dim * self.n_frames_stacked)
             # step all the vehicles forward by one second and record their observations as context
             context_len = max(10, self.n_frames_stacked)
             self.context_dict = {
@@ -461,8 +557,9 @@ class BaseEnv(Env):
                     self.simulation.step(self.cfg['dt'])
                 # Save the post-warmup state so the next reset of this file is a
                 # snapshot restore instead of a JSON parse + 10 physics steps.
-                self.scenario.save_snapshot()
-                self._sim_cache[self.file] = self.simulation
+                if hasattr(self.scenario, "save_snapshot"):
+                    self.scenario.save_snapshot()
+                self._store_simulation(self.file, self.simulation)
             # now hand back control to our actual controllers
             for veh in self.scenario.getObjectsThatMoved():
                 veh.expert_control = False
@@ -536,22 +633,14 @@ class BaseEnv(Env):
             else:
                 # Blacklist this file so we never retry it; remove from the
                 # working set so the next pick is guaranteed different.
-                self._bad_files.add(self.file)
-                if self.file in self.files:
-                    self.files.remove(self.file)
-                if self._pool_size > 0:
-                    self._pool_files = [
-                        f for f in self._pool_files if f != self.file
-                    ]
-                    if self.files:
-                        self._pool_files.append(
-                            self.files[np.random.randint(len(self.files))])
+                self._blacklist_file(self.file)
                 if not self.files:
                     # Exhausted all known files; fall back to the original list
                     # rather than crashing.
                     self.files = [f for f in self.valid_veh_dict
                                   if f not in self._bad_files] or list(
                                       self.valid_veh_dict.keys())
+                    self._refill_pool()
                     if not self.files:
                         enough_vehicles = True
 
@@ -646,6 +735,7 @@ class BaseEnv(Env):
                 head_angle=head_angle,
                 padding=True,
             )
+            visible = self._pad_visible_state(visible)
             occ_obs = compute_occlusion_features_from_objects(
                 visible.get("objects", np.zeros((0, 13), dtype=np.float32)),
                 view_dist, view_angle,
@@ -662,25 +752,24 @@ class BaseEnv(Env):
                 ])
             obs_parts.append(occ_obs)
         else:
-            if use_ego and use_obs:
-                obs_parts = [
-                    ego_obs,
-                    self.scenario.flattened_visible_state(
-                        veh_obj,
-                        view_dist=view_dist,
-                        view_angle=view_angle,
-                        head_angle=head_angle)
-                ]
-            elif use_ego and not use_obs:
-                obs_parts = [ego_obs]
-            else:
-                obs_parts = [
-                    self.scenario.flattened_visible_state(
-                        veh_obj,
-                        view_dist=view_dist,
-                        view_angle=view_angle,
-                        head_angle=head_angle)
-                ]
+            obs_parts = []
+            if use_ego:
+                obs_parts.append(ego_obs)
+            if use_obs:
+                visible = self.scenario.visible_state(
+                    veh_obj,
+                    view_dist=view_dist,
+                    view_angle=view_angle,
+                    head_angle=head_angle,
+                    padding=True,
+                )
+                visible = self._pad_visible_state(visible)
+                obs_parts.extend([
+                    visible["objects"].reshape(-1),
+                    visible["road_points"].reshape(-1),
+                    visible["traffic_lights"].reshape(-1),
+                    visible["stop_signs"].reshape(-1),
+                ])
         obs = np.concatenate(obs_parts)
         return obs
 
@@ -745,7 +834,12 @@ class BaseEnv(Env):
         else:
             np.random.seed(seed)
             torch.manual_seed(seed)
-            torch.cuda.manual_seed_all(seed)
+
+    def close(self):
+        """Drop cached Simulations so C++ state can be freed."""
+        self._sim_cache.clear()
+        self.simulation = None
+        self.scenario = None
 
     def angle_sub(self, current_angle, target_angle) -> int:
         """Subtract two angles to find the minimum angle between them."""

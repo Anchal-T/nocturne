@@ -83,6 +83,11 @@ render_episodes: 1
 ifi: 0.1 # the play interval of each rendered image in saved video
 model_dir: null
 
+# Multi-GPU. torchrun sets WORLD_SIZE/RANK/LOCAL_RANK; these flags only
+# control whether this process wraps models with DDP when that happens.
+distributed: False
+find_unused_parameters: True
+
 # goal env wrapper stuff
 density_buffer_size: 100000
 density_optim_samples: 1000

@@ -88,19 +88,23 @@ crl:
   critic_lr: 3.0e-4
   actor_lr: 3.0e-4
   alpha_lr: 3.0e-4
-  batch_size: 512
+  batch_size: 256                  # InfoNCE is O(B^2); 256 is ~4x cheaper than 512
   gamma: 0.99
   target_entropy_factor: 0.5       # target_entropy = -0.5 * action_dim
   logsumexp_penalty_coeff: 0.1     # from paper
-  gradient_steps_per_episode: 10   # gradient updates after each episode
+  log_alpha_min: -2.5              # α floor ≈ 0.082; stops entropy collapse
+  log_alpha_max: 2.0
+  gradient_steps_per_episode: 1    # keep GPU work light so workers stay busy
+  max_grad_steps_per_iter: 2       # hard cap per vec-step (workers idle while GPU trains)
+  vec_env: subproc                 # parallel C++ simulation workers
 
   # --- HER buffer ---
   her_max_episodes: 50000
-  min_replay_episodes: 200         # wait for this many episodes before training
+  min_replay_episodes: 2000        # wait for this many episodes before training
 
   # --- Training loop ---
   total_episodes: 1000000
-  num_envs: 8                      # number of environments (run sequentially)
+  num_envs: 32                     # parallel simulation workers per rank
   max_episode_steps: 80
 
   # --- Logging / checkpointing ---
@@ -110,3 +114,9 @@ crl:
 
   # --- Optional: resume from checkpoint ---
   resume_checkpoint: null
+  reset_critic_optimizer_on_load: true   # HER buffer wiped; drop stale Adam moments
+  reinit_critic_on_load: true            # re-learn SA/G; keep actor (buffer wipe)
+  reinit_critic_on_collapsed_alpha: false
+  lse_penalty_warmup_steps: 5000         # λ=0 until InfoNCE forms after re-init
+  resume_random_action_prob: 0.5         # diversify HER during post-resume fill
+  critic_burst_steps_on_resume: 2000     # consecutive steps once buf is ready

@@ -248,9 +248,13 @@ def main():
     parser.add_argument('--num_episodes', type=int, default=10)
     parser.add_argument('--num_files', type=int, default=-1)
     parser.add_argument('--render', action='store_true')
-    parser.add_argument('--use_occlusion', action=argparse.BooleanOptionalAction,
-                        default=None,
-                        help='Override occupancy_grid.use_occlusion; defaults to checkpoint inference')
+    # Python 3.8 has no BooleanOptionalAction; emulate --use_occlusion/--no_use_occlusion
+    parser.add_argument('--use_occlusion', action='store_true',
+                        help='Override occupancy_grid.use_occlusion to True')
+    parser.add_argument('--no_use_occlusion', dest='use_occlusion',
+                        action='store_false',
+                        help='Override occupancy_grid.use_occlusion to False')
+    parser.set_defaults(use_occlusion=None)
     parser.add_argument('--output_json', type=str, default=None,
                         help='Save results to JSON file for downstream analysis')
     parser.add_argument('--method', type=str, default='ddqn',

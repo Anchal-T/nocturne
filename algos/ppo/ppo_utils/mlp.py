@@ -3,6 +3,7 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 # Code modified from https://github.com/marlbenchmark/on-policy
+import torch
 import torch.nn as nn
 from .util import init, get_clones
 """MLP modules."""
@@ -28,9 +29,9 @@ class MLPLayer(nn.Module):
 
         self.fc1 = nn.Sequential(init_(nn.Linear(input_dim, hidden_size)),
                                  active_func, nn.LayerNorm(hidden_size))
-        self.fc_h = nn.Sequential(init_(nn.Linear(hidden_size, hidden_size)),
-                                  active_func, nn.LayerNorm(hidden_size))
-        self.fc2 = get_clones(self.fc_h, self._layer_N)
+        fc_h = nn.Sequential(init_(nn.Linear(hidden_size, hidden_size)),
+                             active_func, nn.LayerNorm(hidden_size))
+        self.fc2 = get_clones(fc_h, self._layer_N)
 
     def forward(self, x):
         x = self.fc1(x)
@@ -60,6 +61,7 @@ class MLPBase(nn.Module):
                             self._use_orthogonal, self._use_ReLU)
 
     def forward(self, x):
+        x = torch.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
         if self._use_feature_normalization:
             x = self.feature_norm(x)
 

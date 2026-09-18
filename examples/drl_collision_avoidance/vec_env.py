@@ -70,13 +70,24 @@ class DummyVecEnv:
         self.observation_space = self.envs[0].observation_space
         self.action_space = self.envs[0].action_space
 
+    def step_async(self, actions):
+        self._async_actions = actions
+
+    def step_wait(self):
+        return self._step_sync(self._async_actions)
+
     def step(self, actions):
+        return self._step_sync(actions)
+
+    def _step_sync(self, actions):
         obs_list, rew_list, done_list, info_list = [], [], [], []
         for env, action in zip(self.envs, actions):
             obs, reward, terminated, truncated, info = env.step(action)
             done = terminated or truncated
             if done:
-                obs, _ = env.reset()
+                obs, reset_info = env.reset()
+                info = dict(info)
+                info["_reset_info"] = reset_info
             obs_list.append(obs)
             rew_list.append(reward)
             done_list.append(done)
@@ -89,11 +100,38 @@ class DummyVecEnv:
         )
 
     def reset(self):
-        return np.stack([env.reset()[0] for env in self.envs])
+        obs_list = []
+        info_list = []
+        for env in self.envs:
+            obs, info = env.reset()
+            obs_list.append(obs)
+            info_list.append(info)
+        self.last_reset_infos = info_list
+        return np.stack(obs_list)
 
     def close(self):
         for env in self.envs:
             env.close()
+
+
+def _rebuild_env(env_fn_wrapper, old_env=None):
+    """Close a dead env if needed and construct a replacement."""
+    if old_env is not None:
+        try:
+            old_env.close()
+        except Exception:
+            pass
+    return env_fn_wrapper()
+
+
+def _worker_reset(env, env_fn_wrapper):
+    """Reset, rebuilding the env if the C++ sim throws."""
+    try:
+        return env.reset(), env
+    except Exception:
+        logger.exception("[SubprocVecEnv worker] reset failed; rebuilding env")
+        env = _rebuild_env(env_fn_wrapper, env)
+        return env.reset(), env
 
 
 # Worker functions
@@ -102,25 +140,48 @@ def _worker(remote, parent_remote, env_fn_wrapper):
     parent_remote.close()
     env = env_fn_wrapper()
 
-    while True:
-        cmd, data = remote.recv()
-        if cmd == "step":
-            obs, reward, terminated, truncated, info = env.step(data)
-            done = terminated or truncated
-            if done:
-                obs, _ = env.reset()
-            remote.send((obs, reward, done, info))
-        elif cmd == "reset":
-            obs, _ = env.reset()
-            remote.send(obs)
-        elif cmd == "get_spaces":
-            remote.send((env.observation_space, env.action_space))
-        elif cmd == "close":
+    try:
+        while True:
+            try:
+                cmd, data = remote.recv()
+            except EOFError:
+                break
+            if cmd == "step":
+                try:
+                    obs, reward, terminated, truncated, info = env.step(data)
+                    done = terminated or truncated
+                    if done:
+                        obs, reset_info = env.reset()
+                        info = dict(info)
+                        info["_reset_info"] = reset_info
+                    remote.send((obs, reward, done, info))
+                except Exception:
+                    logger.exception("[SubprocVecEnv worker] step failed; rebuilding env")
+                    env = _rebuild_env(env_fn_wrapper, env)
+                    obs, reset_info = env.reset()
+                    info = dict(reset_info)
+                    info["_reset_info"] = reset_info
+                    remote.send((obs, 0.0, True, info))
+            elif cmd == "reset":
+                (obs, info), env = _worker_reset(env, env_fn_wrapper)
+                remote.send((obs, info))
+            elif cmd == "get_spaces":
+                remote.send((env.observation_space, env.action_space))
+            elif cmd == "close":
+                try:
+                    env.close()
+                except Exception:
+                    pass
+                remote.close()
+                break
+            else:
+                raise NotImplementedError(f"Unknown command: {cmd}")
+    except Exception:
+        logger.exception("[SubprocVecEnv worker] fatal error")
+        try:
             env.close()
-            remote.close()
-            break
-        else:
-            raise NotImplementedError(f"Unknown command: {cmd}")
+        except Exception:
+            pass
 
 
 def _setup_worker_env(worker_id, cpu_cores):
@@ -238,31 +299,83 @@ class SubprocVecEnv:
 
     All envs are stepped together in lock-step. Modeled directly on the PPO
     ``SubprocVecEnv`` from ``algos/ppo/env_wrappers.py``.
+
+    A worker that dies (C++ segfault, OOM killer, pipe EOF) is restarted
+    in place so one bad scenario cannot kill the whole training job.
     """
 
     def __init__(self, env_fns):
         self.n_envs = len(env_fns)
         self.closed = False
-
-        self.remotes, self.work_remotes = zip(*[mp.Pipe() for _ in range(self.n_envs)])
-
+        self._env_fns = list(env_fns)
+        self._ctx = mp.get_context("spawn")
+        self.remotes = []
         self.processes = []
-        for wr, r, fn in zip(self.work_remotes, self.remotes, env_fns):
-            p = mp.Process(
-                target=_worker, args=(wr, r, CloudpickleWrapper(fn)), daemon=True
-            )
-            p.start()
-            self.processes.append(p)
-        for wr in self.work_remotes:
-            wr.close()
-
+        for fn in self._env_fns:
+            self._spawn_worker(fn)
         self.remotes[0].send(("get_spaces", None))
-        self.observation_space, self.action_space = self.remotes[0].recv()
+        try:
+            self.observation_space, self.action_space = self.remotes[0].recv()
+        except (EOFError, OSError, BrokenPipeError):
+            self._restart_worker(0)
+            self.remotes[0].send(("get_spaces", None))
+            self.observation_space, self.action_space = self.remotes[0].recv()
 
-    def step(self, actions):
-        for remote, action in zip(self.remotes, actions):
-            remote.send(("step", action))
-        results = [remote.recv() for remote in self.remotes]
+    def _spawn_worker(self, env_fn, index=None):
+        remote, work_remote = self._ctx.Pipe()
+        proc = self._ctx.Process(
+            target=_worker,
+            args=(work_remote, remote, CloudpickleWrapper(env_fn)),
+            daemon=True,
+        )
+        proc.start()
+        work_remote.close()
+        if index is None:
+            self.remotes.append(remote)
+            self.processes.append(proc)
+        else:
+            self.remotes[index] = remote
+            self.processes[index] = proc
+
+    def _restart_worker(self, index):
+        logger.warning("[SubprocVecEnv] worker %s died; restarting", index)
+        try:
+            self.remotes[index].close()
+        except Exception:
+            pass
+        proc = self.processes[index]
+        if proc.is_alive():
+            proc.terminate()
+            proc.join(timeout=5)
+        if proc.is_alive():
+            proc.kill()
+            proc.join(timeout=2)
+        self._spawn_worker(self._env_fns[index], index=index)
+
+    def _recv_step(self, index):
+        try:
+            result = self.remotes[index].recv()
+        except (EOFError, OSError, BrokenPipeError):
+            self._restart_worker(index)
+            self.remotes[index].send(("reset", None))
+            result = self.remotes[index].recv()
+        if isinstance(result, tuple) and len(result) == 2:
+            obs, info = result
+            info = dict(info or {})
+            info["_reset_info"] = dict(info)
+            return obs, 0.0, True, info
+        return result
+
+    def step_async(self, actions):
+        for index, (remote, action) in enumerate(zip(self.remotes, actions)):
+            try:
+                remote.send(("step", action))
+            except (BrokenPipeError, OSError, EOFError):
+                self._restart_worker(index)
+                self.remotes[index].send(("reset", None))
+
+    def step_wait(self):
+        results = [self._recv_step(i) for i in range(self.n_envs)]
         obs, rewards, dones, infos = zip(*results)
         return (
             np.stack(obs),
@@ -271,21 +384,50 @@ class SubprocVecEnv:
             list(infos),
         )
 
+    def step(self, actions):
+        self.step_async(actions)
+        return self.step_wait()
+
     def reset(self):
-        for remote in self.remotes:
-            remote.send(("reset", None))
-        return np.stack([remote.recv() for remote in self.remotes])
+        for index, remote in enumerate(self.remotes):
+            try:
+                remote.send(("reset", None))
+            except (BrokenPipeError, OSError, EOFError):
+                self._restart_worker(index)
+                self.remotes[index].send(("reset", None))
+        results = []
+        for index in range(self.n_envs):
+            try:
+                results.append(self.remotes[index].recv())
+            except (EOFError, OSError, BrokenPipeError):
+                self._restart_worker(index)
+                self.remotes[index].send(("reset", None))
+                results.append(self.remotes[index].recv())
+        if results and isinstance(results[0], tuple):
+            obs, infos = zip(*results)
+            self.last_reset_infos = list(infos)
+            return np.stack(obs)
+        return np.stack(results)
 
     def close(self):
         if self.closed:
             return
-        for remote in self.remotes:
-            remote.send(("close", None))
-        for p in self.processes:
-            p.join(timeout=5)
-            if p.is_alive():
-                p.terminate()
         self.closed = True
+        for remote in self.remotes:
+            try:
+                remote.send(("close", None))
+            except (BrokenPipeError, OSError, EOFError):
+                pass
+        for proc in self.processes:
+            proc.join(timeout=5)
+            if proc.is_alive():
+                proc.terminate()
+                proc.join(timeout=2)
+        for remote in self.remotes:
+            try:
+                remote.close()
+            except Exception:
+                pass
 
 
 # ---------------------------------------------------------------------------

@@ -149,6 +149,10 @@ learner_main_loop_num_cores: 1
 actor_worker_gpus: []  
                        # [ACTOR_WORKER_GPUS [ACTOR_WORKER_GPUS ...]]
                        # By default, actor workers only use CPUs. Changes this if e.g. you need GPU-based rendering on the actors (default: [])
+                       # Sample Factory 1.123 trains one learner. Extra visible GPUs can host actor-side
+                       # policy inference; they are not additional SGD learners. Same-policy multi-learner
+                       # training is not supported in this version — do not label actor-GPU inference as
+                       # multi-GPU learning.
 with_pbt: False        # Enables population-based training basic features (default: False)
 pbt_mix_policies_in_one_env: True
                         # For multi-agent envs, whether we mix different policies in one env. (default: True)

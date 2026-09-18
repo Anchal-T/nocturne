@@ -15,6 +15,13 @@ from .optimizers import build_optimizer, get_optimizer_lr
 from .profiling import CudaTrainProfiler
 from .q_network import QNetwork
 from .replay_buffer import ReplayBuffer
+from nocturne.utils.distributed import (
+    DistInfo,
+    all_reduce_scalar,
+    dummy_loss,
+    unwrap_module,
+    wrap_ddp,
+)
 
 
 @dataclass
@@ -126,11 +133,13 @@ class DDQNAgentConfig:
 
 
 class DDQNAgent:
-    def __init__(self, obs_dim: int, n_actions: int, config: DDQNAgentConfig):
+    def __init__(self, obs_dim: int, n_actions: int, config: DDQNAgentConfig,
+                 dist_info=None):
         self.config = config
         self.obs_dim = obs_dim
         self.n_actions = n_actions
         self.device = torch.device(config.device)
+        self.dist_info = dist_info or DistInfo(device=self.device)
         self.gamma = config.gamma
         self.batch_size = config.batch_size
         self.target_update_freq = config.target_update_freq
@@ -176,6 +185,11 @@ class DDQNAgent:
         ):
             print("[DDQNAgent] torch.compile unavailable; continuing without compile.")
 
+        if self.dist_info.is_distributed:
+            # CUDA graphs and compile do not mix cleanly with DDP on this torch.
+            self._use_cuda_graph = False
+            self._compile_enabled = False
+
         self._profiler = CudaTrainProfiler(
             device=self.device,
             enabled=config.profile_cuda and config.profile_first_train_step,
@@ -188,6 +202,12 @@ class DDQNAgent:
 
         self.online_net, self.target_net, self.inference_net = self._build_networks(
             config
+        )
+        self.online_net = wrap_ddp(
+            self.online_net,
+            self.dist_info,
+            find_unused_parameters=True,
+            broadcast_buffers=False,
         )
         self.inference_lock = threading.Lock()
         self.sync_target()
@@ -345,7 +365,25 @@ class DDQNAgent:
         else:
             self._amp_dtype = torch.float16
             self._use_scaler = self._use_amp and not self.use_muon
-        self._scaler = torch.amp.GradScaler(enabled=self._use_scaler)
+        if hasattr(torch, "amp") and hasattr(torch.amp, "GradScaler"):
+            self._scaler = torch.amp.GradScaler(enabled=self._use_scaler)
+        else:
+            self._scaler = torch.cuda.amp.GradScaler(
+                enabled=self._use_scaler
+            )
+
+    def _autocast_context(self):
+        """Return an AMP context compatible with torch 1.12 and newer."""
+        if hasattr(torch, "amp") and hasattr(torch.amp, "autocast"):
+            return torch.amp.autocast(
+                device_type=self.device.type,
+                dtype=self._amp_dtype,
+                enabled=self._use_amp,
+            )
+        return torch.cuda.amp.autocast(
+            dtype=self._amp_dtype,
+            enabled=self._use_amp,
+        )
 
     def _set_eval_network_modes(self, target: nn.Module, inference: nn.Module) -> None:
         target.eval()
@@ -550,11 +588,7 @@ class DDQNAgent:
         )
 
     def _compute_loss(self, obs_t, acts_t, next_obs_t, rews_t, dones_t, weights_t):
-        with torch.amp.autocast(
-            device_type=self.device.type,
-            dtype=self._amp_dtype,
-            enabled=self._use_amp,
-        ):
+        with self._autocast_context():
             current_q = self.online_net(obs_t).gather(1, acts_t.unsqueeze(1)).squeeze(1)
             with torch.no_grad():
                 best_acts = self.online_net(next_obs_t).argmax(dim=1)
@@ -595,7 +629,18 @@ class DDQNAgent:
         self._grad_accum_counter = 0
 
     def train_step(self, env_steps: int = 0) -> Optional[float]:
-        if len(self.replay_buffer) < self.batch_size:
+        ready = len(self.replay_buffer) >= self.batch_size
+        if self.dist_info.is_distributed:
+            global_ready = all_reduce_scalar(
+                1.0 if ready else 0.0, self.device, op="min"
+            )
+            if global_ready < 1.0:
+                loss = dummy_loss(self.online_net)
+                self.optimizer.zero_grad(set_to_none=True)
+                loss.backward()
+                self.optimizer.zero_grad(set_to_none=True)
+                return None
+        elif not ready:
             return None
 
         self._profiler.maybe_start()
@@ -880,12 +925,13 @@ class DDQNAgent:
                 "noisy": online_base.noisy,
                 "mlp_depth": int(online_base.mlp_depth),
                 "use_muon": self.use_muon,
+                "world_size": self.dist_info.world_size,
             },
             path,
         )
 
     def load(self, path: str):
-        checkpoint = torch.load(path, map_location=self.device, weights_only=False)
+        checkpoint = torch.load(path, map_location=self.device)
 
         if "use_muon" in checkpoint:
             ckpt_use_muon = bool(checkpoint["use_muon"])
@@ -915,8 +961,8 @@ class DDQNAgent:
                 f"Failed to load optimizer state from checkpoint: {exc}. "
                 "Continuing with freshly initialized optimizer."
             )
-        self.train_steps = checkpoint["train_steps"]
-        self.epsilon = checkpoint["epsilon"]
+        self.train_steps = int(checkpoint.get("train_steps", 0))
+        self.epsilon = float(checkpoint.get("epsilon", self.epsilon))
 
     def _load_checkpoint_architecture(self, checkpoint: Dict[str, Any]) -> None:
         online_base = self._unwrap_module(self.online_net)
@@ -1019,6 +1065,12 @@ class DDQNAgent:
         self.online_net, self.target_net, self.inference_net = (
             self._instantiate_networks(_make)
         )
+        self.online_net = wrap_ddp(
+            self.online_net,
+            self.dist_info,
+            find_unused_parameters=True,
+            broadcast_buffers=False,
+        )
         lr = get_optimizer_lr(self.optimizer)
         self.optimizer = build_optimizer(
             self.online_net, lr, self.device.type, self.use_muon
@@ -1028,12 +1080,7 @@ class DDQNAgent:
 
     @staticmethod
     def _unwrap_module(module: nn.Module) -> nn.Module:
-        if isinstance(module, nn.DataParallel):
-            module = module.module
-        orig_mod = getattr(module, "_orig_mod", None)
-        if orig_mod is not None:
-            module = orig_mod
-        return module
+        return unwrap_module(module)
 
     @staticmethod
     def _strip_known_prefixes(
@@ -1084,6 +1131,34 @@ class DDQNAgent:
     ) -> Dict[str, torch.Tensor]:
         return {key: value.detach().cpu().clone() for key, value in state_dict.items()}
 
+    @staticmethod
+    def _legacy_head_key_variants(
+        state_dict: Dict[str, torch.Tensor],
+    ) -> Dict[str, torch.Tensor]:
+        """Translate pre-ResidualMLP dueling-head keys.
+
+        Older checkpoints stored each stream as ``Sequential`` modules with
+        parameters at indices ``0`` and ``2``.  The current equivalent uses
+        named ``initial_layer`` and ``final_layer`` modules.  The tensor
+        layouts are unchanged, so translating only the parameter names keeps
+        those checkpoints loadable without weakening strict validation.
+        """
+        translated = {}
+        for key, value in state_dict.items():
+            parts = key.split(".")
+            if len(parts) >= 3 and parts[0] in {
+                "advantage_head",
+                "value_head",
+                "head",
+            }:
+                if parts[1] == "0":
+                    parts = [parts[0], "initial_layer", "0", *parts[2:]]
+                elif parts[1] == "2":
+                    parts = [parts[0], "final_layer", *parts[2:]]
+                key = ".".join(parts)
+            translated[key] = value
+        return translated
+
     def _load_state_dict_flexible(
         self, module: nn.Module, state_dict: Dict[str, torch.Tensor], name: str
     ) -> None:
@@ -1092,6 +1167,16 @@ class DDQNAgent:
         try:
             base_module.load_state_dict(normalized_state, strict=True)
         except RuntimeError as exc:
-            raise RuntimeError(
-                f"Failed to load {name} state dict across known key formats: {exc}"
-            )
+            legacy_state = self._legacy_head_key_variants(normalized_state)
+            if legacy_state == normalized_state:
+                raise RuntimeError(
+                    f"Failed to load {name} state dict across known key formats: "
+                    f"{exc}"
+                )
+            try:
+                base_module.load_state_dict(legacy_state, strict=True)
+            except RuntimeError as legacy_exc:
+                raise RuntimeError(
+                    f"Failed to load {name} state dict across known key formats: "
+                    f"{legacy_exc}"
+                ) from legacy_exc

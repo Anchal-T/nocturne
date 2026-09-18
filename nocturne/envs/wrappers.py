@@ -24,10 +24,12 @@ class OnPolicyPPOWrapper(object):
         self.use_images = use_images
 
         self.n = self.cfg.max_num_vehicles
-        obs_dict, _ = self.reset()
+        self.feature_shape = tuple(self._env.observation_space.shape)
+        obs_reset = self.reset()
+        # Handle both single and tuple return for compatibility
+        obs_dict = obs_reset[0] if isinstance(obs_reset, tuple) else obs_reset
         # tracker used to match observations to actions
         self.agent_ids = []
-        self.feature_shape = obs_dict[0].shape
         if self.cfg.algorithm.use_centralized_V:
             share_feature_shape = (self.n * self.feature_shape[0], )
         else:
@@ -54,22 +56,37 @@ class OnPolicyPPOWrapper(object):
         agent_actions = {}
         for action_vec, agent_id in zip(actions, self.agent_ids):
             agent_actions[agent_id] = action_vec
-        next_obses, rew, done, _truncated, info = self._env.step(agent_actions)
+        next_obses, rew, done, truncated, info = self._env.step(agent_actions)
         obs_n = []
         rew_n = []
         done_n = []
         info_n = []
         for key in self.agent_ids:
-            if isinstance(next_obses[key], dict):
-                obs_n.append(next_obses[key]['features'])
-            else:
-                obs_n.append(next_obses[key])
-            rew_n.append([rew[key]])
-            done_n.append(done[key])
-            agent_info = info[key]
-            agent_info['individual_reward'] = rew[key]
+            observation = next_obses.get(key, self._env.dead_feat)
+            obs_n.append(self._fit_feature(observation))
+            rew_n.append([rew.get(key, 0.0)])
+            # DummyVecEnv / SubprocVecEnv reset when every agent is done.
+            # Time-limit must count as done, otherwise keep_inactive_agents
+            # leaves dones False and the same finished scene is reused.
+            agent_done = bool(done.get(key, False)) or bool(
+                truncated.get(key, False))
+            done_n.append(agent_done)
+            agent_info = info.get(key, {})
+            agent_info['individual_reward'] = rew.get(key, 0.0)
             info_n.append(agent_info)
         return obs_n, rew_n, done_n, info_n
+
+    def _fit_feature(self, observation):
+        """Return one observation with the fixed dimension exposed to PPO."""
+        if isinstance(observation, dict):
+            observation = observation['features']
+        array = np.asarray(observation).reshape(-1)
+        expected = self.feature_shape[0]
+        if array.size == expected:
+            return array
+        fitted = np.zeros(expected, dtype=array.dtype)
+        fitted[:min(array.size, expected)] = array[:expected]
+        return fitted
 
     def reset(self):
         """Convert observation dict to list."""
@@ -80,10 +97,7 @@ class OnPolicyPPOWrapper(object):
             self.agent_ids.append(key)
             if not hasattr(self, 'agent_key'):
                 self.agent_key = key
-            if isinstance(obses[key], dict):
-                obs_n.append(obses[key]['features'])
-            else:
-                obs_n.append(obses[key])
+            obs_n.append(self._fit_feature(obses[key]))
         return obs_n
 
     def render(self, mode=None):

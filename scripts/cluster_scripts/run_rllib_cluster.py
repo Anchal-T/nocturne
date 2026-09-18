@@ -62,6 +62,7 @@ def main():
         '--code_path',
         default=f'/checkpoint/{username}/nocturne/sample_factory_runs')
     parser.add_argument('--dry', action='store_true')
+    parser.add_argument('--num_gpus', type=int, default=2)
     args = parser.parse_args()
 
     now = datetime.now()
@@ -70,10 +71,12 @@ def main():
     overrides = Overrides()
     overrides.add('hydra/launcher', ['ray'])
     overrides.add('hydra.launcher.partition', ['learnlab'])
+    overrides.add('rllib.num_gpus', [args.num_gpus])
 
     cmd = [
         'python',
-        str(snap_dir / 'code' / 'examples' / 'run_rllib.py'), '-m'
+        str(snap_dir / 'code' / 'examples' / 'rllib_files' / 'run_rllib.py'),
+        '-m'
     ]
     cmd += overrides.cmd()
     print(cmd)

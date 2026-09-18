@@ -132,7 +132,7 @@ class CRLCollisionAvoidanceEnv(CollisionAvoidanceEnv):
                 self._ego_id = ego_id
                 self._step_count = 0
                 self._prev_goal_dist = self._get_goal_dist()
-                return self._build_crl_obs(), {}
+                return self._build_crl_obs(), self._ego_info_dict()
 
         # Fallback: use any reachable vehicle id.
         ego_id = self._find_any_ego_id(obs_dict or {})
@@ -144,7 +144,7 @@ class CRLCollisionAvoidanceEnv(CollisionAvoidanceEnv):
         self._ego_id = ego_id
         self._step_count = 0
         self._prev_goal_dist = self._get_goal_dist()
-        return self._build_crl_obs(), {}
+        return self._build_crl_obs(), self._ego_info_dict()
 
     def step(self, action: np.ndarray) -> Tuple[np.ndarray, float, bool, bool, Dict]:
         """Accept a tanh-squashed continuous action in [-1, 1]^2.
@@ -219,15 +219,29 @@ class CRLCollisionAvoidanceEnv(CollisionAvoidanceEnv):
         Safe to call at any point; returns identity pose if the ego vehicle
         is not currently present in the scene.
         """
+        info = self._ego_info_dict()
+        return (
+            info["ego_x"],
+            info["ego_y"],
+            info["ego_cos_h"],
+            info["ego_sin_h"],
+        )
+
+    def _ego_info_dict(self) -> Dict[str, float]:
         ego_veh = self._get_ego_vehicle()
         if ego_veh is None:
-            return 0.0, 0.0, 1.0, 0.0
-        return (
-            float(ego_veh.position.x),
-            float(ego_veh.position.y),
-            float(math.cos(ego_veh.heading)),
-            float(math.sin(ego_veh.heading)),
-        )
+            return {
+                "ego_x": 0.0,
+                "ego_y": 0.0,
+                "ego_cos_h": 1.0,
+                "ego_sin_h": 0.0,
+            }
+        return {
+            "ego_x": float(ego_veh.position.x),
+            "ego_y": float(ego_veh.position.y),
+            "ego_cos_h": float(math.cos(ego_veh.heading)),
+            "ego_sin_h": float(math.sin(ego_veh.heading)),
+        }
 
     # ------------------------------------------------------------------
     # Observation construction

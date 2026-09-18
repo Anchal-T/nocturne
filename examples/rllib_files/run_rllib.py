@@ -8,63 +8,41 @@ import os
 import hydra
 from omegaconf import OmegaConf
 from cfgs.config import set_display_window
+from nocturne.utils.ray_compat import patch_legacy_gym_monitor
+
+patch_legacy_gym_monitor()
+
 import ray
 from ray import tune
 from ray.tune.registry import register_env
-from ray.rllib.env.multi_agent_env import MultiAgentEnv
 
-from nocturne.envs.wrappers import create_env
+from ray.rllib.policy.policy import PolicySpec
 
-
-class RLlibWrapperEnv(MultiAgentEnv):
-    """Thin wrapper making our env look like a MultiAgentEnv."""
-
-    metadata = {
-        "render.modes": ["rgb_array"],
-    }
-
-    def __init__(self, env):
-        """See wrapped env class."""
-        self._skip_env_checking = True  # temporary fix for rllib env checking issue
-        super().__init__()
-        self._env = env
-
-    def step(self, actions):
-        """See wrapped env class."""
-        next_obs, rew, done, info = self._env.step(actions)
-        return next_obs, rew, done, info
-
-    def reset(self):
-        """See wrapped env class."""
-        obses = self._env.reset()
-        return obses
-
-    @property
-    def observation_space(self):
-        """See wrapped env class."""
-        return self._env.observation_space
-
-    @property
-    def action_space(self):
-        """See wrapped env class."""
-        return self._env.action_space
-
-    def render(self, mode=None):
-        """See wrapped env class."""
-        return self._env.render()
-
-    def seed(self, seed=None):
-        """Set seed on the wrapped env."""
-        self._env.seed(seed)
-
-    def __getattr__(self, name):
-        """Return attributes from the wrapped env."""
-        return getattr(self._env, name)
+from examples.rllib_files.rllib_env import create_rllib_env
 
 
-def create_rllib_env(cfg):
-    """Return an MultiAgentEnv wrapped environment."""
-    return RLlibWrapperEnv(create_env(cfg))
+def _ray_version_tuple():
+    parts = ray.__version__.split(".")
+    try:
+        return tuple(int(part) for part in parts[:2])
+    except ValueError:
+        return (0, 0)
+
+
+def _rllib_gpu_config(num_gpus):
+    """Use Ray 1.11's num_gpus learner API; never invent num_learners."""
+    major, minor = _ray_version_tuple()
+    if major > 2 or (major == 2 and minor >= 4):
+        print(
+            f"[rllib] Ray {ray.__version__} supports newer learner APIs; "
+            "this integration still uses legacy num_gpus until retested."
+        )
+    elif (major, minor) != (1, 11):
+        print(
+            f"[rllib] Ray {ray.__version__} detected; configuring legacy "
+            f"num_gpus={num_gpus} (validated against 1.11)."
+        )
+    return {"num_gpus": int(num_gpus)}
 
 
 @hydra.main(config_path="../../cfgs/", config_name="config")
@@ -72,7 +50,7 @@ def main(cfg):
     """Run RLlib example."""
     set_display_window()
     cfg = OmegaConf.to_container(cfg, resolve=True)
-    # TODO(eugenevinitsky) move these into a config
+    rllib_cfg = cfg.get("rllib") or {}
     if cfg['debug']:
         ray.init(local_mode=True)
         num_workers = 0
@@ -80,93 +58,76 @@ def main(cfg):
         num_gpus = 0
         use_lstm = False
     else:
-        num_workers = 15
-        num_envs_per_worker = 5
-        num_gpus = 1
-        use_lstm = True
+        num_workers = int(rllib_cfg.get("num_workers", 15))
+        num_envs_per_worker = int(rllib_cfg.get("num_envs_per_worker", 5))
+        num_gpus = int(rllib_cfg.get("num_gpus", 1))
+        use_lstm = bool(rllib_cfg.get("use_lstm", True))
 
-    register_env("nocturne", lambda cfg: create_rllib_env(cfg))
+    register_env("nocturne", lambda env_cfg: create_rllib_env(env_cfg))
+    probe_env = create_rllib_env(cfg)
+    try:
+        observation_space = probe_env.observation_space
+        action_space = probe_env.action_space
+    finally:
+        probe_env.close()
 
     username = os.environ["USER"]
-    tune.run(
-        "PPO",
-        # TODO(eugenevinitsky) move into config
-        local_dir=f"/checkpoint/{username}/nocturne/ray_results",
-        stop={"episodes_total": 60000},
-        checkpoint_freq=1000,
-        config={
-            # Enviroment specific.
-            "env":
-            "nocturne",
-            "env_config":
-            cfg,
-            # General
-            "framework":
-            "torch",
-            "num_gpus":
-            num_gpus,
-            "num_workers":
-            num_workers,
-            "num_envs_per_worker":
-            num_envs_per_worker,
-            "observation_filter":
-            "MeanStdFilter",
-            # Method specific.
-            "entropy_coeff":
-            0.0,
-            "num_sgd_iter":
-            5,
-            "train_batch_size":
-            max(100 * num_workers * num_envs_per_worker, 512),
-            "rollout_fragment_length":
-            20,
-            "sgd_minibatch_size":
-            max(int(100 * num_workers * num_envs_per_worker / 4), 512),
-            "multiagent": {
-                # We only have one policy (calling it "shared").
-                # Class, obs/act-spaces, and config will be derived
-                # automatically.
-                "policies": {"shared_policy"},
-                # Always use "shared" policy.
-                "policy_mapping_fn":
-                (lambda agent_id, episode, **kwargs: "shared_policy"),
-                # each agent step is counted towards train_batch_size
-                # rather than environment steps
-                "count_steps_by":
-                "agent_steps",
+    local_dir = rllib_cfg.get("local_dir") or (
+        f"/checkpoint/{username}/nocturne/ray_results")
+    trainer_config = {
+        "env": "nocturne",
+        "env_config": cfg,
+        "framework": "torch",
+        "num_workers": num_workers,
+        "num_envs_per_worker": num_envs_per_worker,
+        "observation_filter": "MeanStdFilter",
+        "entropy_coeff": float(rllib_cfg.get("entropy_coeff", 0.0)),
+        "num_sgd_iter": int(rllib_cfg.get("num_sgd_iter", 5)),
+        "train_batch_size":
+        max(100 * max(num_workers, 1) * num_envs_per_worker, 512),
+        "rollout_fragment_length":
+        int(rllib_cfg.get("rollout_fragment_length", 20)),
+        "sgd_minibatch_size":
+        max(int(100 * max(num_workers, 1) * num_envs_per_worker / 4), 512),
+        "multiagent": {
+            "policies": {
+                "shared_policy": PolicySpec(
+                    policy_class=None,
+                    observation_space=observation_space,
+                    action_space=action_space,
+                    config={},
+                )
             },
-            "model": {
-                "use_lstm": use_lstm
-            },
-            # Evaluation stuff
-            "evaluation_interval":
-            50,
-            # Run evaluation on (at least) one episodes
-            "evaluation_duration":
-            1,
-            # ... using one evaluation worker (setting this to 0 will cause
-            # evaluation to run on the local evaluation worker, blocking
-            # training until evaluation is done).
-            # TODO: if this is not 0, it seems to error out
-            "evaluation_num_workers":
-            0,
-            # Special evaluation config. Keys specified here will override
-            # the same keys in the main config, but only for evaluation.
-            "evaluation_config": {
-                # Store videos in this relative directory here inside
-                # the default output dir (~/ray_results/...).
-                # Alternatively, you can specify an absolute path.
-                # Set to True for using the default output dir (~/ray_results/...).
-                # Set to False for not recording anything.
-                "record_env": "videos_test",
-                # "record_env": "/Users/xyz/my_videos/",
-                # Render the env while evaluating.
-                # Note that this will always only render the 1st RolloutWorker's
-                # env and only the 1st sub-env in a vectorized env.
-                "render_env": True,
-            },
+            "policy_mapping_fn":
+            (lambda agent_id, episode, **kwargs: "shared_policy"),
+            "count_steps_by": "agent_steps",
         },
-    )
+        "model": {
+            "use_lstm": use_lstm
+        },
+        "evaluation_interval": int(rllib_cfg.get("evaluation_interval", 50)),
+        "evaluation_duration": int(rllib_cfg.get("evaluation_duration", 1)),
+        "evaluation_num_workers":
+        int(rllib_cfg.get("evaluation_num_workers", 0)),
+        "evaluation_config": {
+            "record_env": rllib_cfg.get("record_env", "videos_test"),
+            "render_env": bool(rllib_cfg.get("render_env", True)),
+        },
+    }
+    trainer_config.update(_rllib_gpu_config(num_gpus))
+    tune_kwargs = {
+        "local_dir": local_dir,
+        "stop": {
+            "episodes_total": int(rllib_cfg.get("stop_episodes", 60000))
+        },
+        "checkpoint_freq": int(rllib_cfg.get("checkpoint_freq", 1000)),
+        "checkpoint_at_end": True,
+        "config": trainer_config,
+    }
+    resume_checkpoint = rllib_cfg.get("resume_checkpoint")
+    if resume_checkpoint:
+        tune_kwargs["restore"] = resume_checkpoint
+    tune.run("PPO", **tune_kwargs)
 
 
 if __name__ == "__main__":

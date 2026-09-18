@@ -6,6 +6,7 @@
 import torch
 from algos.ppo.r_mappo.algorithm.r_actor_critic import R_Actor, R_Critic, R_CostCritic
 from algos.ppo.utils.util import update_linear_schedule
+from nocturne.utils.distributed import DistInfo, unwrap_module, wrap_ddp
 
 
 class R_MAPPOPolicy:
@@ -24,8 +25,10 @@ class R_MAPPOPolicy:
                  obs_space,
                  cent_obs_space,
                  act_space,
-                 device=torch.device("cpu")):
+                 device=torch.device("cpu"),
+                 dist_info=None):
         self.device = device
+        self.dist_info = dist_info or DistInfo(device=device)
         self.lr = args.lr
         self.critic_lr = args.critic_lr
         self.opti_eps = args.opti_eps
@@ -35,12 +38,24 @@ class R_MAPPOPolicy:
         self.share_obs_space = cent_obs_space
         self.act_space = act_space
 
-        self.actor = R_Actor(args, self.obs_space, self.act_space, self.device)
-        self.critic = R_Critic(args, self.share_obs_space, self.device)
+        find_unused = bool(getattr(args, "find_unused_parameters", True))
+        self.actor = wrap_ddp(
+            R_Actor(args, self.obs_space, self.act_space, self.device),
+            self.dist_info,
+            find_unused_parameters=find_unused,
+        )
+        self.critic = wrap_ddp(
+            R_Critic(args, self.share_obs_space, self.device),
+            self.dist_info,
+            find_unused_parameters=find_unused,
+        )
         self.use_lagrangian = getattr(args, 'use_lagrangian', False)
         if self.use_lagrangian:
-            self.cost_critic = R_CostCritic(args, self.share_obs_space,
-                                            self.device)
+            self.cost_critic = wrap_ddp(
+                R_CostCritic(args, self.share_obs_space, self.device),
+                self.dist_info,
+                find_unused_parameters=find_unused,
+            )
 
         self.actor_optimizer = torch.optim.Adam(self.actor.parameters(),
                                                 lr=self.lr,
@@ -148,9 +163,15 @@ class R_MAPPOPolicy:
         :return action_log_probs: (torch.Tensor) log probabilities of the input actions.
         :return dist_entropy: (torch.Tensor) action distribution entropy for the given inputs.
         """
-        action_log_probs, dist_entropy = self.actor.evaluate_actions(
-            obs, rnn_states_actor, action, masks, available_actions,
-            active_masks)
+        action_log_probs, dist_entropy = self.actor(
+            obs,
+            rnn_states_actor,
+            masks,
+            available_actions=available_actions,
+            action=action,
+            active_masks=active_masks,
+            evaluate=True,
+        )
 
         values, _ = self.critic(cent_obs, rnn_states_critic, masks)
         return values, action_log_probs, dist_entropy
@@ -174,3 +195,14 @@ class R_MAPPOPolicy:
                                                   available_actions,
                                                   deterministic)
         return actions, rnn_states_actor
+
+    def actor_module(self):
+        return unwrap_module(self.actor)
+
+    def critic_module(self):
+        return unwrap_module(self.critic)
+
+    def cost_critic_module(self):
+        if not self.use_lagrangian:
+            return None
+        return unwrap_module(self.cost_critic)
