@@ -6,6 +6,7 @@ from typing import Any, Dict, Optional
 from omegaconf import OmegaConf
 
 from cfgs.config import PROCESSED_TRAIN_NO_TL, PROCESSED_VALID_NO_TL
+from examples.drl_collision_avoidance.observation_config import heldout_bucket
 
 _SUPPORTED_SPLITS = ('train', 'valid')
 _CONFIG_PATH = os.path.join(
@@ -92,6 +93,40 @@ def resolve_scenario_path(
         )
 
     return resolved_path
+
+
+def restrict_scenario_files(base_env, split: str, val_fraction: float = 0.5, seed: int = 42) -> int:
+    """Keep only the val or test filenames already loaded by BaseEnv.
+
+    ``valid_veh_dict`` is filtered too, because BaseEnv rebuilds ``files`` from
+    that dict after it exhausts a bad file.
+    """
+    if split not in ("val", "test"):
+        raise ValueError(f"split must be 'val' or 'test', got {split!r}")
+    allowed = [
+        name for name in base_env.files
+        if heldout_bucket(name, val_fraction, seed) == split
+    ]
+    if not allowed:
+        raise RuntimeError(
+            f"No scenario files fell into heldout split {split!r}. "
+            "Check val_fraction and split_seed."
+        )
+    allowed_set = set(allowed)
+    base_env.files = allowed
+    base_env.valid_veh_dict = {
+        name: vehicles
+        for name, vehicles in base_env.valid_veh_dict.items()
+        if name in allowed_set
+    }
+    pool = getattr(base_env, "_pool_files", None)
+    if pool is not None:
+        kept = [name for name in pool if name in allowed_set]
+        pool_size = int(getattr(base_env, "_pool_size", 0) or 0)
+        if not kept and pool_size > 0:
+            kept = allowed[:pool_size]
+        base_env._pool_files = kept
+    return len(allowed)
 
 
 def apply_scenario_path_defaults(

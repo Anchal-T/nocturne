@@ -1,0 +1,3 @@
+The archived checkpoint \texttt{ddqn\_ep400000.pth} remains the fully trained DDQN reported in the main held-out table: 1430 goals and 77 collisions in 1500 episodes (goal Wilson interval 94.15--96.29\%, collision Wilson interval 4.13--6.37\%). Episodes that are neither a goal nor a collision and last 80 steps: 0 (0.00\%). That file records \texttt{num\_vehicles}=50 on every episode, so it cannot support a traffic-density curve, and it does not record occlusion fraction, hidden contact, or a maneuver label. Those cuts come from the revised evaluator.
+
+The 2$\times$2 evaluation JSONs are not in this draft yet. After the training machine finishes \texttt{scripts/launch\_reviewer\_ablation.sh}, re-run \texttt{python paper/analysis/make\_tables.py} to fill the tables below.

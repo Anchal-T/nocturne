@@ -159,6 +159,12 @@ occupancy_grid:
     vehicle_weight: 1.0
     road_edge_weight: 3.0
     use_occlusion: false
+    # null follows use_occlusion. Set true/false to separate the visibility
+    # filter from the four occlusion summaries. An explicit value also makes
+    # the occupancy grid respect the visibility filter (the legacy coupled
+    # flag leaves the C++ grid unfiltered).
+    visibility_filter: null
+    occlusion_features: null
     occlusion_view_angle: 3.14159
 
 reward:
@@ -170,7 +176,23 @@ reward:
     ttz_reward_scale: 0.5
     offroad_penalty: 50.0
     heading_scale: 0.3
+    # visible: penalty uses the same objects as the observation (legacy).
+    # ground_truth: penalty sees every object, including those the sensor hid,
+    # so ablation arms differ only in the observation.
+    reward_ttz_source: visible
 
 action_map:
     throttle_levels: [-1.0, 0.0, 2.0]
     steer_levels: [-0.7, -0.2, 0.0, 0.2, 0.7]
+
+# null keeps the whole held-out directory. val and test hash-split that directory.
+heldout_split: null
+val_fraction: 0.5
+split_seed: 42
+# Eval turns this on so occlusion and ground-truth TTZ are logged even when
+# they are not part of the observation.
+log_privileged: false
+
+robustness:
+    occlusion_dropout_p: 0.0
+    obs_noise_std: 0.0

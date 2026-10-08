@@ -863,26 +863,25 @@ class DDQNAgent:
     def save(self, path: str):
         online_base = self._unwrap_module(self.online_net)
         target_base = self._unwrap_module(self.target_net)
-        torch.save(
-            {
-                "online_net": online_base.state_dict(),
-                "target_net": target_base.state_dict(),
-                "optimizer": self.optimizer.state_dict(),
-                "train_steps": self.train_steps,
-                "epsilon": self.epsilon,
-                "obs_dim": self.obs_dim,
-                "hidden_layers": online_base.hidden_layers,
-                "grid_size": online_base.grid_size,
-                "grid_channels": self.grid_channels,
-                "grid_rows": self.grid_rows,
-                "grid_cols": self.grid_cols,
-                "dueling": online_base.dueling,
-                "noisy": online_base.noisy,
-                "mlp_depth": int(online_base.mlp_depth),
-                "use_muon": self.use_muon,
-            },
-            path,
-        )
+        payload = {
+            "online_net": online_base.state_dict(),
+            "target_net": target_base.state_dict(),
+            "optimizer": self.optimizer.state_dict(),
+            "train_steps": self.train_steps,
+            "epsilon": self.epsilon,
+            "obs_dim": self.obs_dim,
+            "hidden_layers": online_base.hidden_layers,
+            "grid_size": online_base.grid_size,
+            "grid_channels": self.grid_channels,
+            "grid_rows": self.grid_rows,
+            "grid_cols": self.grid_cols,
+            "dueling": online_base.dueling,
+            "noisy": online_base.noisy,
+            "mlp_depth": int(online_base.mlp_depth),
+            "use_muon": self.use_muon,
+        }
+        payload.update(getattr(self, "checkpoint_metadata", None) or {})
+        torch.save(payload, path)
 
     def load(self, path: str):
         checkpoint = torch.load(path, map_location=self.device, weights_only=False)

@@ -8,6 +8,9 @@ from gymnasium.spaces import Box, Discrete
 import nocturne
 from nocturne.envs.base_env import BaseEnv
 
+from examples.drl_collision_avoidance.observation_config import resolve_observation_flags
+from examples.drl_collision_avoidance.scenario_utils import restrict_scenario_files
+
 # Sentinel for "no imminent conflict" — keeps reward logic simple while
 # still exposing finite values when interaction exists.
 NO_CONFLICT_TTZ = 999.0
@@ -21,6 +24,12 @@ TTZ_CONTACT_DIST = 0.5
 
 # Maximum TTZ value exposed to the network (clips the sentinel).
 TTZ_OBS_CLIP = 20.0
+
+# Steps of visibility history kept so a collision can be labeled hidden
+# when the nearest object was outside the ray-cast set one second earlier.
+VISIBILITY_HISTORY = 30
+HIDDEN_LOOKBACK_STEPS = 10
+PARTNER_DIST_M = 5.0
 
 # Occupancy grid channels: occupancy strength, relative longitudinal velocity,
 # and relative lateral velocity in the ego frame.
@@ -61,6 +70,56 @@ def _scatter_max_const(out: np.ndarray, idx: np.ndarray, weight: float) -> None:
     out[unique_idx] = np.maximum(out[unique_idx], weight)
 
 
+def _ids_within(data, ex: float, ey: float, radius: float):
+    if data is None or len(data["px"]) == 0:
+        return set()
+    dx = data["px"] - ex
+    dy = data["py"] - ey
+    mask = dx * dx + dy * dy <= radius * radius
+    return {int(item) for item in data["ids"][mask]}
+
+
+def _nearest_object(ex, ey, veh_data, ped_data, cyc_data):
+    best_dist = None
+    best_id = None
+    best_type = None
+    for data, type_name in (
+        (veh_data, "vehicle"),
+        (ped_data, "pedestrian"),
+        (cyc_data, "cyclist"),
+    ):
+        if data is None or len(data["px"]) == 0:
+            continue
+        dx = data["px"] - ex
+        dy = data["py"] - ey
+        index = int(np.argmin(dx * dx + dy * dy))
+        dist = float(math.hypot(dx[index], dy[index]))
+        if best_dist is None or dist < best_dist:
+            best_dist = dist
+            best_id = int(data["ids"][index])
+            best_type = type_name
+    return best_id, best_dist, best_type
+
+
+def _ids_or_empty(visible_set, key: str):
+    if not visible_set:
+        return set()
+    return visible_set.get(key) or set()
+
+
+def _mask_objects(data, visible_ids):
+    """Keep rows whose id is in ``visible_ids``. ``None`` data stays ``None``."""
+    if data is None:
+        return None
+    if len(visible_ids) == 0:
+        return None
+    vis = np.fromiter(visible_ids, dtype=np.float64)
+    mask = np.isin(data["ids"].astype(np.float64), vis)
+    if not np.any(mask):
+        return None
+    return {key: value[mask] for key, value in data.items()}
+
+
 class CollisionAvoidanceEnv(gym.Env):
     def __init__(self, cfg: Dict[str, Any]):
         super().__init__()
@@ -87,6 +146,15 @@ class CollisionAvoidanceEnv(gym.Env):
         self.ttz_reward_scale = rew_cfg["ttz_reward_scale"]
         self.offroad_penalty = rew_cfg["offroad_penalty"]
         self.heading_scale = rew_cfg["heading_scale"]
+        # "visible" keeps the legacy reward, which only sees objects that
+        # entered the observation. "ground_truth" uses every object so that
+        # ablation arms differ in the observation and not in the penalty.
+        self.reward_ttz_source = str(rew_cfg.get("reward_ttz_source") or "visible")
+        if self.reward_ttz_source not in ("visible", "ground_truth"):
+            raise ValueError(
+                "reward.reward_ttz_source must be 'visible' or 'ground_truth', "
+                f"got {self.reward_ttz_source!r}"
+            )
 
         act_cfg = cfg["action_map"]
         throttle_levels = act_cfg["throttle_levels"]
@@ -95,14 +163,32 @@ class CollisionAvoidanceEnv(gym.Env):
             (float(t), float(s)) for t in throttle_levels for s in steer_levels
         ]
 
-        self.use_occlusion = grid_cfg.get("use_occlusion", False)
+        flags = resolve_observation_flags(grid_cfg)
+        self.visibility_filter = flags.visibility_filter
+        self.occlusion_features = flags.occlusion_features
+        self.legacy_unfiltered_grid = flags.legacy_unfiltered_grid
+        # Retained so older scripts can read the coupled switch. Explicit
+        # visibility_filter / occlusion_features keys are what the env uses.
+        self.use_occlusion = bool(grid_cfg.get("use_occlusion", False))
         self.occlusion_view_angle = grid_cfg.get("occlusion_view_angle", math.pi)
+        robust_cfg = cfg.get("robustness") or {}
+        self.occlusion_dropout_p = float(robust_cfg.get("occlusion_dropout_p", 0.0))
+        self.obs_noise_std = float(robust_cfg.get("obs_noise_std", 0.0))
+        self.log_privileged = bool(cfg.get("log_privileged", False))
 
         self.base_env = BaseEnv(cfg)
         self.cfg = cfg
+        heldout_split = cfg.get("heldout_split")
+        if heldout_split in ("val", "test"):
+            restrict_scenario_files(
+                self.base_env,
+                split=str(heldout_split),
+                val_fraction=float(cfg.get("val_fraction", 0.5)),
+                seed=int(cfg.get("split_seed", 42)),
+            )
 
         obs_dim = self.grid_channels * self.grid_rows * self.grid_cols + 4 + 2 + 3
-        if self.use_occlusion:
+        if self.occlusion_features:
             obs_dim += 4  # occlusion features
         self.observation_space = Box(
             low=-np.inf, high=np.inf, shape=(obs_dim,), dtype=np.float32
@@ -115,8 +201,12 @@ class CollisionAvoidanceEnv(gym.Env):
         self._max_steps = cfg["drl"]["max_episode_steps"]
         self._ttz_vehicle: float = NO_CONFLICT_TTZ
         self._ttz_pedestrian: float = NO_CONFLICT_TTZ
+        self._ttz_vehicle_gt: float = NO_CONFLICT_TTZ
+        self._ttz_pedestrian_gt: float = NO_CONFLICT_TTZ
         self._road_edge_pts = np.empty((0, 2), dtype=np.float32)
         self._visible_set = None
+        self._visible_id_history = []
+        self._clear_step_stats()
         # Use the C++ occupancy_grid method when available; falls back to
         # the Python implementation on first AttributeError/TypeError.
         self._use_cpp_grid: bool = True
@@ -133,6 +223,7 @@ class CollisionAvoidanceEnv(gym.Env):
                 self._ego_id = ego_id
                 self._step_count = 0
                 self._prev_goal_dist = self._get_goal_dist()
+                self._visible_id_history = []
                 self._cache_road_edges()
                 return self._build_observation(), {}
 
@@ -144,6 +235,7 @@ class CollisionAvoidanceEnv(gym.Env):
         self._ego_id = ego_id
         self._step_count = 0
         self._prev_goal_dist = self._get_goal_dist()
+        self._visible_id_history = []
         self._cache_road_edges()
         return self._build_observation(), {}
 
@@ -178,8 +270,22 @@ class CollisionAvoidanceEnv(gym.Env):
         info = dict(info_dict.get(self._ego_id, {}))
         info["ttz_vehicle"] = self._ttz_vehicle
         info["ttz_pedestrian"] = self._ttz_pedestrian
+        info["ttz_vehicle_gt"] = self._ttz_vehicle_gt
+        info["ttz_pedestrian_gt"] = self._ttz_pedestrian_gt
         info["step_count"] = self._step_count
         info["goal_dist"] = self._get_goal_dist()
+        info["ego_speed"] = self._ego_speed
+        info["occ_frac"] = self._occ_frac
+        info["nearest_blocker_norm"] = self._nearest_blocker_norm
+        info["blocker_density"] = self._blocker_density
+        info["occ_pressure"] = self._occ_pressure
+        info["occlusion_measured"] = self._occlusion_measured
+        info["vehicles_in_range"] = self._vehicles_in_range
+        info["vehicles_visible_in_range"] = self._vehicles_visible_in_range
+        info["nearest_dist"] = self._nearest_dist
+        info["nearest_type"] = self._nearest_type
+        info["hidden_contact"] = self._hidden_contact
+        info["scenario_file"] = getattr(self.base_env, "file", None)
 
         return obs, reward, terminated, truncated, info
 
@@ -241,6 +347,7 @@ class CollisionAvoidanceEnv(gym.Env):
             if not mask.any():
                 return None
             return {
+                "ids": ids[mask],
                 "px": px[mask],
                 "py": py[mask],
                 "speeds": speeds[mask],
@@ -290,40 +397,135 @@ class CollisionAvoidanceEnv(gym.Env):
 
     # --- Observation Building ---
 
+    def _clear_step_stats(self) -> None:
+        self._ttz_vehicle = NO_CONFLICT_TTZ
+        self._ttz_pedestrian = NO_CONFLICT_TTZ
+        self._ttz_vehicle_gt = NO_CONFLICT_TTZ
+        self._ttz_pedestrian_gt = NO_CONFLICT_TTZ
+        self._ego_speed = 0.0
+        self._occ_frac = 0.0
+        self._nearest_blocker_norm = 0.0
+        self._blocker_density = 0.0
+        self._occ_pressure = 0.0
+        self._occlusion_measured = False
+        self._vehicles_in_range = 0
+        self._vehicles_visible_in_range = None
+        self._nearest_dist = None
+        self._nearest_type = None
+        self._nearest_id = None
+        self._hidden_contact = False
+
     def _build_observation(self) -> np.ndarray:
         ego_veh = self._get_ego_vehicle()
         if ego_veh is None:
-            self._ttz_vehicle = NO_CONFLICT_TTZ
-            self._ttz_pedestrian = NO_CONFLICT_TTZ
+            self._clear_step_stats()
             return np.zeros(self.observation_space.shape, dtype=np.float32)
 
-        visible_set = None
+        need_raycast = (
+            self.visibility_filter or self.occlusion_features or self.log_privileged
+        )
         visible_objects = None
-        if self.use_occlusion:
+        visible_set = None
+        if need_raycast:
             visible_objects = self._query_visible_objects(ego_veh)
             visible_set = self._match_visible_to_vehicles(ego_veh, visible_objects)
+        self._visible_set = visible_set if self.visibility_filter else None
 
-        self._visible_set = visible_set
-
-        # Single C++ call to fetch all object states (id, x, y, speed,
-        # heading, type) as a batched (N, 6) array, then split by type and
-        # apply visibility / ego-exclusion filters in vectorized numpy.
-        # Replaces 3 separate Python loops over C++ object lists (each doing
-        # 4 pybind property reads per object).
-        veh_data, ped_data, cyc_data = self._extract_all_objects(
-            ego_id=self._ego_id, visible_set=visible_set,
+        # One C++ call for every object. The visibility filter is applied in
+        # numpy so ground-truth TTZ and the visible observation stay paired.
+        gt_veh, gt_ped, gt_cyc = self._extract_all_objects(
+            ego_id=self._ego_id, visible_set=None,
         )
+        if self.visibility_filter:
+            veh_data = _mask_objects(gt_veh, _ids_or_empty(visible_set, "vehicles"))
+            ped_data = _mask_objects(gt_ped, _ids_or_empty(visible_set, "peds"))
+            cyc_data = _mask_objects(gt_cyc, _ids_or_empty(visible_set, "cyclists"))
+        else:
+            veh_data, ped_data, cyc_data = gt_veh, gt_ped, gt_cyc
 
-        grid = self._build_occupancy_grid(ego_veh, veh_data, ped_data, cyc_data)
+        if self.visibility_filter and not self.legacy_unfiltered_grid:
+            grid = self._build_occupancy_grid_py(ego_veh, veh_data, ped_data, cyc_data)
+        else:
+            grid = self._build_occupancy_grid(ego_veh, veh_data, ped_data, cyc_data)
         ego_state = self._get_ego_state(ego_veh)
         target_info = self._get_target_info(ego_veh)
         ttz_info = self._get_ttz_info(ego_veh, veh_data, ped_data, cyc_data)
+        gt_veh_ttz, gt_ped_ttz = self._min_ttz(ego_veh, gt_veh, gt_ped, gt_cyc)
+        self._ttz_vehicle_gt = gt_veh_ttz
+        self._ttz_pedestrian_gt = gt_ped_ttz
+
+        occ = np.zeros(4, dtype=np.float32)
+        if visible_objects is not None:
+            occ = self._compute_occlusion_features(visible_objects)
+            self._occlusion_measured = True
+        self._occ_frac = float(occ[0])
+        self._nearest_blocker_norm = float(occ[1])
+        self._blocker_density = float(occ[2])
+        self._occ_pressure = float(occ[3])
+        self._record_scene_stats(ego_veh, gt_veh, gt_ped, gt_cyc, visible_set)
 
         parts = [grid.flatten(), ego_state, target_info, ttz_info]
-        if self.use_occlusion:
-            parts.append(self._compute_occlusion_features(visible_objects))
+        if self.occlusion_features:
+            parts.append(occ)
 
-        return np.concatenate(parts).astype(np.float32)
+        obs = np.concatenate(parts).astype(np.float32)
+        return self._apply_eval_perturbation(obs)
+
+    def _apply_eval_perturbation(self, obs: np.ndarray) -> np.ndarray:
+        """Dropout and noise are eval probes. Both default to off in training."""
+        if self.occlusion_features and self.occlusion_dropout_p > 0.0:
+            rng = self.np_random
+            if float(rng.random()) < self.occlusion_dropout_p:
+                obs = obs.copy()
+                obs[-4:] = 0.0
+        if self.obs_noise_std > 0.0:
+            noise = self.np_random.normal(0.0, self.obs_noise_std, size=obs.shape)
+            obs = obs + noise.astype(np.float32)
+        return obs
+
+    def _record_scene_stats(self, ego_veh, veh_data, ped_data, cyc_data, visible_set) -> None:
+        self._ego_speed = float(getattr(ego_veh, "speed", 0.0))
+        ex, ey = ego_veh.position.x, ego_veh.position.y
+        in_range_ids = _ids_within(veh_data, ex, ey, self.forward_dist)
+        self._vehicles_in_range = len(in_range_ids)
+        if not self._occlusion_measured:
+            self._vehicles_visible_in_range = None
+            self._hidden_contact = False
+            nearest_id, nearest_dist, nearest_type = _nearest_object(
+                ex, ey, veh_data, ped_data, cyc_data
+            )
+            self._nearest_id = nearest_id
+            self._nearest_dist = nearest_dist
+            self._nearest_type = nearest_type
+            return
+
+        visible_vehicles = {int(item) for item in (visible_set or {}).get("vehicles") or ()}
+        self._vehicles_visible_in_range = len(in_range_ids & visible_vehicles)
+
+        nearest_id, nearest_dist, nearest_type = _nearest_object(
+            ex, ey, veh_data, ped_data, cyc_data
+        )
+        self._nearest_id = nearest_id
+        self._nearest_dist = nearest_dist
+        self._nearest_type = nearest_type
+
+        visible_now = set()
+        if visible_set:
+            for key in ("vehicles", "peds", "cyclists"):
+                visible_now.update(int(item) for item in visible_set.get(key) or ())
+        self._visible_id_history.append(visible_now)
+        if len(self._visible_id_history) > VISIBILITY_HISTORY:
+            del self._visible_id_history[: len(self._visible_id_history) - VISIBILITY_HISTORY]
+
+        past = visible_now
+        if len(self._visible_id_history) > HIDDEN_LOOKBACK_STEPS:
+            past = self._visible_id_history[-1 - HIDDEN_LOOKBACK_STEPS]
+        self._hidden_contact = (
+            nearest_id is not None
+            and nearest_dist is not None
+            and nearest_dist <= PARTNER_DIST_M
+            and int(nearest_id) not in past
+        )
 
     # --- Visibility / Occlusion ---
 
@@ -606,47 +808,34 @@ class CollisionAvoidanceEnv(gym.Env):
 
     # --- Vectorized TTZ ---
 
-    def _get_ttz_info(self, ego_veh, veh_data=None, ped_data=None,
-                      cyc_data=None) -> np.ndarray:
+    def _min_ttz(self, ego_veh, veh_data=None, ped_data=None, cyc_data=None):
+        """Minimum line-of-sight time-to-zero for vehicles and for VRUs."""
         ego_pos = ego_veh.position
         ego_speed = max(ego_veh.speed, 0.1)
-
         min_ttz_veh = NO_CONFLICT_TTZ
         min_ttz_ped = NO_CONFLICT_TTZ
 
-        # Vehicles
-        if veh_data is not None:
+        def _consume(data, current):
+            if data is None or len(data["px"]) == 0:
+                return current
             ttz = self._compute_ttz_batch(
-                veh_data["px"], veh_data["py"],
-                veh_data["speeds"], veh_data["headings"],
+                data["px"], data["py"], data["speeds"], data["headings"],
                 ego_pos, ego_speed, ego_veh.heading,
             )
-            if len(ttz) > 0:
-                min_ttz_veh = float(np.min(ttz))
+            if len(ttz) == 0:
+                return current
+            return min(current, float(np.min(ttz)))
 
-        # Pedestrians
-        if ped_data is not None:
-            ttz = self._compute_ttz_batch(
-                ped_data["px"], ped_data["py"],
-                ped_data["speeds"], ped_data["headings"],
-                ego_pos, ego_speed, ego_veh.heading,
-            )
-            if len(ttz) > 0:
-                min_ttz_ped = min(min_ttz_ped, float(np.min(ttz)))
+        min_ttz_veh = _consume(veh_data, min_ttz_veh)
+        min_ttz_ped = _consume(ped_data, min_ttz_ped)
+        min_ttz_ped = _consume(cyc_data, min_ttz_ped)
+        return min_ttz_veh, min_ttz_ped
 
-        # Cyclists
-        if cyc_data is not None:
-            ttz = self._compute_ttz_batch(
-                cyc_data["px"], cyc_data["py"],
-                cyc_data["speeds"], cyc_data["headings"],
-                ego_pos, ego_speed, ego_veh.heading,
-            )
-            if len(ttz) > 0:
-                min_ttz_ped = min(min_ttz_ped, float(np.min(ttz)))
-
+    def _get_ttz_info(self, ego_veh, veh_data=None, ped_data=None,
+                      cyc_data=None) -> np.ndarray:
+        min_ttz_veh, min_ttz_ped = self._min_ttz(ego_veh, veh_data, ped_data, cyc_data)
         self._ttz_vehicle = min_ttz_veh
         self._ttz_pedestrian = min_ttz_ped
-
         return np.array(
             [
                 min(min_ttz_veh, TTZ_OBS_CLIP),
@@ -758,8 +947,11 @@ class CollisionAvoidanceEnv(gym.Env):
                 heading_err = abs(self._get_heading_error(ego_veh))
                 reward += self.heading_scale * (1.0 - heading_err / math.pi)
 
-            min_ttz = min(self._ttz_vehicle, self._ttz_pedestrian)
-            if min_ttz < self.ttz_safe_threshold and min_ttz > 0:
+            if self.reward_ttz_source == "ground_truth":
+                min_ttz = min(self._ttz_vehicle_gt, self._ttz_pedestrian_gt)
+            else:
+                min_ttz = min(self._ttz_vehicle, self._ttz_pedestrian)
+            if min_ttz < self.ttz_safe_threshold and min_ttz > 0 and self.ttz_reward_scale != 0:
                 reward -= self.ttz_reward_scale * (self.ttz_safe_threshold - min_ttz)
 
         return reward

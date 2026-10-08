@@ -616,7 +616,11 @@ def _build_agent(cfg_dict, drl_cfg, obs_dim, n_actions, num_envs: int = 1):
         grid_cols=grid_cols,
         device=device,
     )
-    return DDQNAgent(obs_dim=obs_dim, n_actions=n_actions, config=agent_cfg)
+    agent = DDQNAgent(obs_dim=obs_dim, n_actions=n_actions, config=agent_cfg)
+    from examples.drl_collision_avoidance.observation_config import observation_metadata
+
+    agent.checkpoint_metadata = observation_metadata(cfg_dict)
+    return agent
 
 
 def _print_training_header(num_workers, num_envs_per_worker, num_envs, vec_env_cls, train_in_bg, obs_dim, n_actions):
