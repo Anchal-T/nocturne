@@ -1,0 +1,78 @@
+{
+  "supported": [
+    {
+      "claim": "parrow$ & ADE (m) $\\downarrow$ & FDE (m) $\\downarrow$ & Jerk (m/s$^3$) $\\downarrow$ \\\\ \\midrule DDQN (ep.\\ 400k ckpt) & \\textbf{95.33} & 5.13 & 0.43 & $2.24 \\pm 2.13$ & $6.40 \\pm 6.20$ & $10.27 \\pm 4.",
+      "value": "95.33",
+      "context": "parrow$ & ADE (m) $\\downarrow$ & FDE (m) $\\downarrow$ & Jerk (m/s$^3$) $\\downarrow$ \\\\ \\midrule DDQN (ep.\\ 400k ckpt) & \\textbf{95.33} & 5.13 & 0.43 & $2.24 \\pm 2.13$ & $6.40 \\pm 6.20$ & $10.27 \\pm 4.08$ \\\\ \\bottomrule  }    The evaluated checkpoint reac",
+      "evidence_snippet": "ation; the deterministic held-out eval at the 400k checkpoint is much stronger (95.33% goal rate) than raw training reward suggests. * Collision risk concentrates in"
+    },
+    {
+      "claim": "xist only for DDQN.}    {lccc} \\toprule Method & Window(s) & Mean reward & Held-out eval \\\\ \\midrule DDQN & ep.\\ 400k & 55.94 & Yes (Table~ ) \\\\ PPO & ep.\\ 400--430k & $153.40$ & No \\\\ R-MAPPO (run A)",
+      "value": "55.94",
+      "context": "xist only for DDQN.}    {lccc} \\toprule Method & Window(s) & Mean reward & Held-out eval \\\\ \\midrule DDQN & ep.\\ 400k & 55.94 & Yes (Table~ ) \\\\ PPO & ep.\\ 400--430k & $153.40$ & No \\\\ R-MAPPO (run A) & ep.\\ 420k / 430k & 135.78 / 13.90 & No \\\\ R-",
+      "evidence_snippet": "| 76.23 ± 22.89 | includes 4.22 outlier at 331k | | Checkpoint region | 400k | 55.94 | env_steps=13,043,492; fps=439 | | After checkpoint | 405k | 46.94 | fps=282 |"
+    },
+    {
+      "claim": "\\ 400k & 55.94 & Yes (Table~ ) \\\\ PPO & ep.\\ 400--430k & $153.40$ & No \\\\ R-MAPPO (run A) & ep.\\ 420k / 430k & 135.78 / 13.90 & No \\\\ R-MAPPO (run B) & ep.\\ 420k / 430k & 168.85 / 16.10 & No \\\\ \\botto",
+      "value": "13.90",
+      "context": "\\ 400k & 55.94 & Yes (Table~ ) \\\\ PPO & ep.\\ 400--430k & $153.40$ & No \\\\ R-MAPPO (run A) & ep.\\ 420k / 430k & 135.78 / 13.90 & No \\\\ R-MAPPO (run B) & ep.\\ 420k / 430k & 168.85 / 16.10 & No \\\\ \\bottomrule       [t]   \\centering   \\includegraphics",
+      "evidence_snippet": "0.135 | 1336320 | 255 | | 420000 | 135.78 | 0.147 | 1336320 | 255 | | 430000 | 13.90 | 0.190 | 1336320 | 255 |  ### R-MAPPO training windows — run B (user-supplied;"
+    },
+    {
+      "claim": "3.40$ & No \\\\ R-MAPPO (run A) & ep.\\ 420k / 430k & 135.78 / 13.90 & No \\\\ R-MAPPO (run B) & ep.\\ 420k / 430k & 168.85 / 16.10 & No \\\\ \\bottomrule       [t]   \\centering   \\includegraphics[width=0.92\\l",
+      "value": "16.10",
+      "context": "3.40$ & No \\\\ R-MAPPO (run A) & ep.\\ 420k / 430k & 135.78 / 13.90 & No \\\\ R-MAPPO (run B) & ep.\\ 420k / 430k & 168.85 / 16.10 & No \\\\ \\bottomrule       [t]   \\centering   \\includegraphics[width=0.92\\linewidth]{figures/algo_training_compare.png}",
+      "evidence_snippet": "0.135 | 1336320 | 255 | | 420000 | 168.85 | 0.147 | 1336320 | 255 | | 430000 | 16.10 | 0.145 | 1336320 | 255 |  R-MAPPO shows stable high returns at 400k--420k then"
+    },
+    {
+      "claim": "e TTZ.}    {lrrr} \\toprule Stratum & $n$ & Goal (\\ \\midrule \\multicolumn{4}{l}{\\emph{Episode length}} \\\\ 1-step & 411 & 100.0 & 0.0 \\\\ 2--10 & 2 & 0.0 & 100.0 \\\\ 11--30 & 741 & 95.8 & 5.1 \\\\ 31--50 & ",
+      "value": "100.0",
+      "context": "e TTZ.}    {lrrr} \\toprule Stratum & $n$ & Goal (\\ \\midrule \\multicolumn{4}{l}{\\emph{Episode length}} \\\\ 1-step & 411 & 100.0 & 0.0 \\\\ 2--10 & 2 & 0.0 & 100.0 \\\\ 11--30 & 741 & 95.8 & 5.1 \\\\ 31--50 & 126 & 70.6 & 29.4 \\\\ 51--80 & 220 & 100.0 & 0.0",
+      "evidence_snippet": "Bare numeric forms for claim grounding 411, 2, 741, 126, 220, 412, 312, 3, 362, 100.0, 95.8, 70.6, 29.4, 85.0, 15.3, 97.4, 4.5, 0.0, 153.40, 135.78, 168.85, 13.90, 1"
+    },
+    {
+      "claim": "le \\multicolumn{4}{l}{\\emph{Episode length}} \\\\ 1-step & 411 & 100.0 & 0.0 \\\\ 2--10 & 2 & 0.0 & 100.0 \\\\ 11--30 & 741 & 95.8 & 5.1 \\\\ 31--50 & 126 & 70.6 & 29.4 \\\\ 51--80 & 220 & 100.0 & 0.0 \\\\ \\midru",
+      "value": "95.8",
+      "context": "le \\multicolumn{4}{l}{\\emph{Episode length}} \\\\ 1-step & 411 & 100.0 & 0.0 \\\\ 2--10 & 2 & 0.0 & 100.0 \\\\ 11--30 & 741 & 95.8 & 5.1 \\\\ 31--50 & 126 & 70.6 & 29.4 \\\\ 51--80 & 220 & 100.0 & 0.0 \\\\ \\midrule \\multicolumn{4}{l}{\\emph{Vehicle TTZ}} \\\\ $",
+      "evidence_snippet": "meric forms for claim grounding 411, 2, 741, 126, 220, 412, 312, 3, 362, 100.0, 95.8, 70.6, 29.4, 85.0, 15.3, 97.4, 4.5, 0.0, 153.40, 135.78, 168.85, 13.90, 16.10,"
+    },
+    {
+      "claim": "pisode length}} \\\\ 1-step & 411 & 100.0 & 0.0 \\\\ 2--10 & 2 & 0.0 & 100.0 \\\\ 11--30 & 741 & 95.8 & 5.1 \\\\ 31--50 & 126 & 70.6 & 29.4 \\\\ 51--80 & 220 & 100.0 & 0.0 \\\\ \\midrule \\multicolumn{4}{l}{\\emph{V",
+      "value": "70.6",
+      "context": "pisode length}} \\\\ 1-step & 411 & 100.0 & 0.0 \\\\ 2--10 & 2 & 0.0 & 100.0 \\\\ 11--30 & 741 & 95.8 & 5.1 \\\\ 31--50 & 126 & 70.6 & 29.4 \\\\ 51--80 & 220 & 100.0 & 0.0 \\\\ \\midrule \\multicolumn{4}{l}{\\emph{Vehicle TTZ}} \\\\ $<1$\\,s & 412 & 85.0 & 15.3 \\\\",
+      "evidence_snippet": "TTZ ≥ 3s. * Mid-length episodes (31--50 steps) are the hardest length stratum (70.6% goal, 29.4% collision); 1-step episodes are all goal successes with missing tr"
+    },
+    {
+      "claim": "length}} \\\\ 1-step & 411 & 100.0 & 0.0 \\\\ 2--10 & 2 & 0.0 & 100.0 \\\\ 11--30 & 741 & 95.8 & 5.1 \\\\ 31--50 & 126 & 70.6 & 29.4 \\\\ 51--80 & 220 & 100.0 & 0.0 \\\\ \\midrule \\multicolumn{4}{l}{\\emph{Vehicle ",
+      "value": "29.4",
+      "context": "length}} \\\\ 1-step & 411 & 100.0 & 0.0 \\\\ 2--10 & 2 & 0.0 & 100.0 \\\\ 11--30 & 741 & 95.8 & 5.1 \\\\ 31--50 & 126 & 70.6 & 29.4 \\\\ 51--80 & 220 & 100.0 & 0.0 \\\\ \\midrule \\multicolumn{4}{l}{\\emph{Vehicle TTZ}} \\\\ $<1$\\,s & 412 & 85.0 & 15.3 \\\\ 1--2\\,s",
+      "evidence_snippet": "Mid-length episodes (31--50 steps) are the hardest length stratum (70.6% goal, 29.4% collision); 1-step episodes are all goal successes with missing trajectory met"
+    },
+    {
+      "claim": "& 126 & 70.6 & 29.4 \\\\ 51--80 & 220 & 100.0 & 0.0 \\\\ \\midrule \\multicolumn{4}{l}{\\emph{Vehicle TTZ}} \\\\ $<1$\\,s & 412 & 85.0 & 15.3 \\\\ 1--2\\,s & 312 & 97.4 & 4.5 \\\\ 2--3\\,s & 3 & 100.0 & 0.0 \\\\ $\\ge 3",
+      "value": "85.0",
+      "context": "& 126 & 70.6 & 29.4 \\\\ 51--80 & 220 & 100.0 & 0.0 \\\\ \\midrule \\multicolumn{4}{l}{\\emph{Vehicle TTZ}} \\\\ $<1$\\,s & 412 & 85.0 & 15.3 \\\\ 1--2\\,s & 312 & 97.4 & 4.5 \\\\ 2--3\\,s & 3 & 100.0 & 0.0 \\\\ $\\ge 3$\\,s & 362 & 100.0 & 0.0 \\\\ missing & 411 & 10",
+      "evidence_snippet": "aim grounding 411, 2, 741, 126, 220, 412, 312, 3, 362, 100.0, 95.8, 70.6, 29.4, 85.0, 15.3, 97.4, 4.5, 0.0, 153.40, 135.78, 168.85, 13.90, 16.10, 55.94, 46.94"
+    },
+    {
+      "claim": "70.6 & 29.4 \\\\ 51--80 & 220 & 100.0 & 0.0 \\\\ \\midrule \\multicolumn{4}{l}{\\emph{Vehicle TTZ}} \\\\ $<1$\\,s & 412 & 85.0 & 15.3 \\\\ 1--2\\,s & 312 & 97.4 & 4.5 \\\\ 2--3\\,s & 3 & 100.0 & 0.0 \\\\ $\\ge 3$\\,s & 3",
+      "value": "15.3",
+      "context": "70.6 & 29.4 \\\\ 51--80 & 220 & 100.0 & 0.0 \\\\ \\midrule \\multicolumn{4}{l}{\\emph{Vehicle TTZ}} \\\\ $<1$\\,s & 412 & 85.0 & 15.3 \\\\ 1--2\\,s & 312 & 97.4 & 4.5 \\\\ 2--3\\,s & 3 & 100.0 & 0.0 \\\\ $\\ge 3$\\,s & 362 & 100.0 & 0.0 \\\\ missing & 411 & 100.0 & 0.",
+      "evidence_snippet": "rizon conflict regimes: among episodes with vehicle TTZ < 1s, collision rate is 15.3% versus 0% when TTZ ≥ 3s. * Mid-length episodes (31--50 steps) are the hardest"
+    },
+    {
+      "claim": "220 & 100.0 & 0.0 \\\\ \\midrule \\multicolumn{4}{l}{\\emph{Vehicle TTZ}} \\\\ $<1$\\,s & 412 & 85.0 & 15.3 \\\\ 1--2\\,s & 312 & 97.4 & 4.5 \\\\ 2--3\\,s & 3 & 100.0 & 0.0 \\\\ $\\ge 3$\\,s & 362 & 100.0 & 0.0 \\\\ miss",
+      "value": "97.4",
+      "context": "220 & 100.0 & 0.0 \\\\ \\midrule \\multicolumn{4}{l}{\\emph{Vehicle TTZ}} \\\\ $<1$\\,s & 412 & 85.0 & 15.3 \\\\ 1--2\\,s & 312 & 97.4 & 4.5 \\\\ 2--3\\,s & 3 & 100.0 & 0.0 \\\\ $\\ge 3$\\,s & 362 & 100.0 & 0.0 \\\\ missing & 411 & 100.0 & 0.0 \\\\ \\bottomrule",
+      "evidence_snippet": "g 411, 2, 741, 126, 220, 412, 312, 3, 362, 100.0, 95.8, 70.6, 29.4, 85.0, 15.3, 97.4, 4.5, 0.0, 153.40, 135.78, 168.85, 13.90, 16.10, 55.94, 46.94"
+    }
+  ],
+  "unsupported": [],
+  "uncertain": [],
+  "summary": {
+    "total": 11,
+    "supported": 11,
+    "unsupported": 0,
+    "uncertain": 0
+  }
+}

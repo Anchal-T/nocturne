@@ -1,0 +1,48 @@
+{
+  "created_at": "2026-07-29T09:38:54.052400+00:00",
+  "inputs": {
+    "idea.md": {
+      "sha256": "bb9825bf6dcb6d3e027cc0b32ff308481d2d9a04e4a1c6ad06030bac6d71b57f",
+      "bytes": 2521
+    },
+    "experimental_log.md": {
+      "sha256": "324bee23b6ce75ec1e57eb8ad90d4a27e78c5fab24f183362617cff6fc50b8a1",
+      "bytes": 6215
+    },
+    "conference_guidelines.md": {
+      "sha256": "cdc29a1a9b2965d7f3e63baf84ea2b166acc22e879b1ceb0560594ec2d1d0f62",
+      "bytes": 868
+    }
+  },
+  "figures": {
+    "algo_training_compare.png": {
+      "sha256": "ec55f88424307ab2ba991c03266520a91343c516579b84b65c4c45a6a0ac8cd1",
+      "bytes": 14755
+    },
+    "evaluation_summary.png": {
+      "sha256": "5720de00c9477c4b9a15642fb13fb8c9fe7ca37213b9a57016e6b5a0219f7b19",
+      "bytes": 14717
+    },
+    "stratified_rates.png": {
+      "sha256": "1cc28e7b2b843bf58213b7b1c72c76f37f68cb5c684ca776e4556cb1e84f729f",
+      "bytes": 12544
+    },
+    "system_overview.png": {
+      "sha256": "79b0a658ad775bd9642ab08decc06bd78e936f856a6ac2d07032635c75eff37d",
+      "bytes": 32897
+    },
+    "training_curves.png": {
+      "sha256": "b9d9e4f3acba5732dac9083179c50e86868d2bdde9aed34ac300aff8318838ad",
+      "bytes": 12571
+    }
+  },
+  "final": {
+    "paper.tex": {
+      "sha256": "e82e3d2c4780bd43e040c60a2082a28aa2810511e5cd2b5f0e9ab113d613d5e4",
+      "bytes": 44501
+    }
+  },
+  "skill_versions": {
+    "paper-orchestra": "0.1.0-adapted"
+  }
+}

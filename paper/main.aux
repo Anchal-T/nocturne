@@ -1,0 +1,155 @@
+\relax 
+\providecommand\hyper@newdestlabel[2]{}
+\providecommand\HyField@AuxAddToFields[1]{}
+\providecommand\HyField@AuxAddToCoFields[2]{}
+\citation{orzechowski2018tackling,bouton2018scalable}
+\citation{ettinger2021waymo}
+\citation{vinitsky2022nocturne}
+\citation{bansal2018chauffeurnet,codevilla2019exploring}
+\@writefile{toc}{\contentsline {section}{\numberline {1}Introduction}{1}{section.1}\protected@file@percent }
+\newlabel{sec:introduction}{{1}{1}{Introduction}{section.1}{}}
+\citation{jordan2024muon}
+\citation{petrenko2020sample}
+\citation{moritz2018ray}
+\citation{dosovitskiy2017carla}
+\citation{lopez2018sumo}
+\citation{vinitsky2022nocturne}
+\citation{ettinger2021waymo}
+\citation{kiran2021deep,isele2018navigating}
+\citation{fridman2018deeptraffic}
+\citation{minderhoud2001extended}
+\citation{altman1999constrained,achiam2017constrained}
+\citation{garcia2015comprehensive}
+\citation{alshiekh2018safe}
+\citation{orzechowski2018tackling}
+\citation{bouton2018scalable}
+\@writefile{toc}{\contentsline {section}{\numberline {2}Related Work}{2}{section.2}\protected@file@percent }
+\newlabel{sec:related}{{2}{2}{Related Work}{section.2}{}}
+\@writefile{toc}{\contentsline {paragraph}{Driving simulators from real-world logs.}{2}{section*.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{RL for collision avoidance.}{2}{section*.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Safety-critical and risk-aware RL.}{2}{section*.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Driving under occlusion.}{2}{section*.4}\protected@file@percent }
+\citation{bansal2018chauffeurnet,codevilla2019exploring}
+\citation{ross2011reduction}
+\citation{van2016deep}
+\citation{wang2016dueling}
+\citation{schaul2015prioritized}
+\citation{fortunato2017noisy}
+\citation{hessel2018rainbow}
+\citation{jordan2024muon}
+\citation{horgan2018distributed}
+\citation{espeholt2018impala}
+\citation{petrenko2020sample}
+\citation{moritz2018ray}
+\@writefile{toc}{\contentsline {paragraph}{Imitation learning baselines.}{3}{section*.5}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Value-based deep RL.}{3}{section*.6}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Scalable RL systems.}{3}{section*.7}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {3}Problem Formulation}{3}{section.3}\protected@file@percent }
+\newlabel{sec:problem}{{3}{3}{Problem Formulation}{section.3}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {4}Method}{3}{section.4}\protected@file@percent }
+\newlabel{sec:method}{{4}{3}{Method}{section.4}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.1}Observation Design}{3}{subsection.4.1}\protected@file@percent }
+\newlabel{sec:observation}{{4.1}{3}{Observation Design}{subsection.4.1}{}}
+\@writefile{toc}{\contentsline {paragraph}{Ego-centric occupancy grid.}{3}{section*.8}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Ego and goal features.}{3}{section*.9}\protected@file@percent }
+\citation{van2016deep,wang2016dueling}
+\citation{fortunato2017noisy}
+\@writefile{lof}{\contentsline {figure}{\numberline {1}{\ignorespaces Overview of the implemented observation and learning pipeline. Ray-cast visible actors and map context form occupancy, TTZ, and occlusion-risk features; the 613-D observation is processed by a dueling noisy DDQN, and experience from 48 synchronous environments is replayed with prioritized sampling and multi-step targets.}}{4}{figure.caption.12}\protected@file@percent }
+\providecommand*\caption@xref[2]{\@setref\relax\@undefined{#1}}
+\newlabel{fig:architecture}{{1}{4}{Overview of the implemented observation and learning pipeline. Ray-cast visible actors and map context form occupancy, TTZ, and occlusion-risk features; the 613-D observation is processed by a dueling noisy DDQN, and experience from 48 synchronous environments is replayed with prioritized sampling and multi-step targets}{figure.caption.12}{}}
+\@writefile{toc}{\contentsline {paragraph}{Time-to-zero (TTZ) conflict features.}{4}{section*.10}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Occlusion-risk features.}{4}{section*.11}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.2}Reward}{4}{subsection.4.2}\protected@file@percent }
+\newlabel{sec:reward}{{4.2}{4}{Reward}{subsection.4.2}{}}
+\newlabel{eq:reward}{{2}{4}{Reward}{equation.4.2}{}}
+\citation{schaul2015prioritized}
+\citation{jordan2024muon}
+\citation{petrenko2020sample}
+\citation{moritz2018ray}
+\citation{espeholt2018impala}
+\citation{ettinger2021waymo}
+\@writefile{loa}{\contentsline {algorithm}{\numberline {1}{\ignorespaces Asynchronous training loop (main process)}}{5}{algorithm.1}\protected@file@percent }
+\newlabel{alg:async}{{1}{5}{Asynchronous training loop (main process)}{algorithm.1}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.3}Agent}{5}{subsection.4.3}\protected@file@percent }
+\newlabel{sec:agent}{{4.3}{5}{Agent}{subsection.4.3}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.4}Asynchronous Training System}{5}{subsection.4.4}\protected@file@percent }
+\newlabel{sec:system}{{4.4}{5}{Asynchronous Training System}{subsection.4.4}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {5}Experimental Setup}{6}{section.5}\protected@file@percent }
+\newlabel{sec:setup}{{5}{6}{Experimental Setup}{section.5}{}}
+\@writefile{toc}{\contentsline {paragraph}{Data.}{6}{section*.13}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Metrics.}{6}{section*.14}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Statistical protocol.}{6}{section*.15}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Stratified evaluation.}{6}{section*.16}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Algorithm comparison.}{6}{section*.17}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Training details.}{6}{section*.18}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {6}Results}{6}{section.6}\protected@file@percent }
+\newlabel{sec:results}{{6}{6}{Results}{section.6}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {6.1}Training Dynamics}{6}{subsection.6.1}\protected@file@percent }
+\newlabel{sec:training-results}{{6.1}{6}{Training Dynamics}{subsection.6.1}{}}
+\@writefile{lot}{\contentsline {table}{\numberline {1}{\ignorespaces Held-out collision-avoidance performance for the evaluated DDQN checkpoint (1{,}500 episodes). Continuous metrics are episode-level mean $\pm $ standard deviation over 1{,}089 valid multi-step traces. Rate intervals are reported in the text.}}{7}{table.caption.19}\protected@file@percent }
+\newlabel{tab:main}{{1}{7}{Held-out collision-avoidance performance for the evaluated DDQN checkpoint (1{,}500 episodes). Continuous metrics are episode-level mean $\pm $ standard deviation over 1{,}089 valid multi-step traces. Rate intervals are reported in the text}{table.caption.19}{}}
+\@writefile{lof}{\contentsline {figure}{\numberline {2}{\ignorespaces Held-out results for the evaluated DDQN checkpoint. Left: goal and collision event rates across 1{,}500 episodes; seven episodes contain both event labels. Center and right: episode-level ADE and mean absolute jerk distributions over the 1{,}089 valid multi-step traces. Dashed lines mark means; missing one-step traces are not imputed.}}{7}{figure.caption.20}\protected@file@percent }
+\newlabel{fig:evaluation-summary}{{2}{7}{Held-out results for the evaluated DDQN checkpoint. Left: goal and collision event rates across 1{,}500 episodes; seven episodes contain both event labels. Center and right: episode-level ADE and mean absolute jerk distributions over the 1{,}089 valid multi-step traces. Dashed lines mark means; missing one-step traces are not imputed}{figure.caption.20}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {6.2}Held-out DDQN Evaluation}{7}{subsection.6.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {6.3}Algorithm Comparison: DDQN, PPO, and R-MAPPO}{7}{subsection.6.3}\protected@file@percent }
+\newlabel{sec:algo-compare}{{6.3}{7}{Algorithm Comparison: DDQN, PPO, and R-MAPPO}{subsection.6.3}{}}
+\@writefile{lot}{\contentsline {table}{\numberline {2}{\ignorespaces Late training windows at episodes 400k--430k. DDQN held-out eval is separate (Table~\ref {tab:main}).}}{8}{table.caption.21}\protected@file@percent }
+\newlabel{tab:train-compare}{{2}{8}{Late training windows at episodes 400k--430k. DDQN held-out eval is separate (Table~\ref {tab:main})}{table.caption.21}{}}
+\@writefile{lot}{\contentsline {table}{\numberline {3}{\ignorespaces Held-out DDQN rates stratified by episode length and vehicle TTZ.}}{8}{table.caption.23}\protected@file@percent }
+\newlabel{tab:stratified}{{3}{8}{Held-out DDQN rates stratified by episode length and vehicle TTZ}{table.caption.23}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {6.4}Conflict Imminence and Episode Length}{8}{subsection.6.4}\protected@file@percent }
+\newlabel{sec:density}{{6.4}{8}{Conflict Imminence and Episode Length}{subsection.6.4}{}}
+\@writefile{lof}{\contentsline {figure}{\numberline {3}{\ignorespaces Late training-window mean reward at episode 400k (PPO mean over 400--430k windows). R-MAPPO bars use the 420k pre-collapse windows; both runs fall to $\sim $14--16 reward at 430k.}}{9}{figure.caption.22}\protected@file@percent }
+\newlabel{fig:algo-compare}{{3}{9}{Late training-window mean reward at episode 400k (PPO mean over 400--430k windows). R-MAPPO bars use the 420k pre-collapse windows; both runs fall to $\sim $14--16 reward at 430k}{figure.caption.22}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {6.5}Safety--Efficiency Operating Point}{9}{subsection.6.5}\protected@file@percent }
+\newlabel{sec:tradeoff}{{6.5}{9}{Safety--Efficiency Operating Point}{subsection.6.5}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {6.6}Scaling and Throughput}{9}{subsection.6.6}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {6.7}Scope of Reported Experiments}{9}{subsection.6.7}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {7}Limitations}{9}{section.7}\protected@file@percent }
+\newlabel{sec:limitations}{{7}{9}{Limitations}{section.7}{}}
+\@writefile{toc}{\contentsline {paragraph}{Discrete vs.\ continuous control.}{9}{section*.26}\protected@file@percent }
+\bibstyle{plainnat}
+\bibdata{references}
+\bibcite{achiam2017constrained}{{1}{2017}{{Achiam et~al.}}{{Achiam, Held, Tamar, and Abbeel}}}
+\@writefile{lof}{\contentsline {figure}{\numberline {4}{\ignorespaces Held-out goal and collision rates stratified by episode length (left) and vehicle TTZ imminence (right). Collision mass concentrates in low-TTZ and mid-horizon episodes.}}{10}{figure.caption.24}\protected@file@percent }
+\newlabel{fig:stratified}{{4}{10}{Held-out goal and collision rates stratified by episode length (left) and vehicle TTZ imminence (right). Collision mass concentrates in low-TTZ and mid-horizon episodes}{figure.caption.24}{}}
+\@writefile{toc}{\contentsline {paragraph}{Safety guarantees.}{10}{section*.27}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Evaluation scope.}{10}{section*.28}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Other limitations.}{10}{section*.29}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {8}Conclusion}{10}{section.8}\protected@file@percent }
+\newlabel{sec:conclusion}{{8}{10}{Conclusion}{section.8}{}}
+\bibcite{alshiekh2018safe}{{2}{2018}{{Alshiekh et~al.}}{{Alshiekh, Bloem, Ehlers, K{\"o}nighofer, Niekum, and Topcu}}}
+\bibcite{altman1999constrained}{{3}{1999}{{Altman}}{{}}}
+\bibcite{bansal2018chauffeurnet}{{4}{2018}{{Bansal et~al.}}{{Bansal, Krizhevsky, and Ogale}}}
+\bibcite{bouton2018scalable}{{5}{2018}{{Bouton et~al.}}{{Bouton, Nakhaei, Fujimura, and Kochenderfer}}}
+\bibcite{codevilla2019exploring}{{6}{2019}{{Codevilla et~al.}}{{Codevilla, Santana, L{\'o}pez, and Gaidon}}}
+\bibcite{dosovitskiy2017carla}{{7}{2017}{{Dosovitskiy et~al.}}{{Dosovitskiy, Ros, Codevilla, Lopez, and Koltun}}}
+\bibcite{espeholt2018impala}{{8}{2018}{{Espeholt et~al.}}{{Espeholt, Soyer, Munos, Simonyan, Mnih, Ward, Doron, Firoiu, Harley, Dunning, et~al.}}}
+\bibcite{ettinger2021waymo}{{9}{2021}{{Ettinger et~al.}}{{Ettinger, Cheng, Caine, Liu, Zhao, Pradhan, Chai, Sapp, Qi, Zhou, et~al.}}}
+\@writefile{lof}{\contentsline {figure}{\numberline {5}{\ignorespaces Logged DDQN training dynamics. Each blue point is a reported 1{,}000-episode mean return and the dashed red curve is the epsilon-greedy exploration schedule. Disconnected segments indicate intervals absent from the supplied transcript and are intentionally not interpolated.}}{11}{figure.caption.25}\protected@file@percent }
+\newlabel{fig:curves}{{5}{11}{Logged DDQN training dynamics. Each blue point is a reported 1{,}000-episode mean return and the dashed red curve is the epsilon-greedy exploration schedule. Disconnected segments indicate intervals absent from the supplied transcript and are intentionally not interpolated}{figure.caption.25}{}}
+\bibcite{fortunato2017noisy}{{10}{2018}{{Fortunato et~al.}}{{Fortunato, Azar, Piot, Menick, Osband, Graves, Mnih, Munos, Hassabis, Pietquin, et~al.}}}
+\bibcite{fridman2018deeptraffic}{{11}{2018}{{Fridman et~al.}}{{Fridman, Terwilliger, and Jenik}}}
+\bibcite{garcia2015comprehensive}{{12}{2015}{{Garc{\'\i }a and Fern{\'a}ndez}}{{}}}
+\bibcite{hessel2018rainbow}{{13}{2018}{{Hessel et~al.}}{{Hessel, Modayil, Van~Hasselt, Schaul, Ostrovski, Dabney, Horgan, Piot, Azar, and Silver}}}
+\bibcite{horgan2018distributed}{{14}{2018}{{Horgan et~al.}}{{Horgan, Quan, Budden, Barth-Maron, Hessel, Van~Hasselt, and Silver}}}
+\bibcite{isele2018navigating}{{15}{2018}{{Isele et~al.}}{{Isele, Rahimi, Cosgun, Subramanian, and Fujimura}}}
+\bibcite{jordan2024muon}{{16}{2024}{{Jordan et~al.}}{{Jordan, Jin, Boza, You, Cesista, Newhouse, and Bernstein}}}
+\bibcite{kiran2021deep}{{17}{2021}{{Kiran et~al.}}{{Kiran, Sobh, Talpaert, Mannion, Al~Sallab, Yogamani, and P{\'e}rez}}}
+\bibcite{lopez2018sumo}{{18}{2018}{{Lopez et~al.}}{{Lopez, Behrisch, Bieker-Walz, Erdmann, Fl{\"o}tter{\"o}d, Hilbrich, L{\"u}cken, Rummel, Wagner, and Wie{\ss }ner}}}
+\bibcite{minderhoud2001extended}{{19}{2001}{{Minderhoud and Bovy}}{{}}}
+\bibcite{moritz2018ray}{{20}{2018}{{Moritz et~al.}}{{Moritz, Nishihara, Wang, Tumanov, Liaw, Liang, Elibol, Yang, Paul, Jordan, et~al.}}}
+\bibcite{orzechowski2018tackling}{{21}{2018}{{Orzechowski et~al.}}{{Orzechowski, Meyer, and Lauer}}}
+\bibcite{petrenko2020sample}{{22}{2020}{{Petrenko et~al.}}{{Petrenko, Huang, Kumar, Sukhatme, and Koltun}}}
+\bibcite{ross2011reduction}{{23}{2011}{{Ross et~al.}}{{Ross, Gordon, and Bagnell}}}
+\bibcite{schaul2015prioritized}{{24}{2016}{{Schaul et~al.}}{{Schaul, Quan, Antonoglou, and Silver}}}
+\bibcite{van2016deep}{{25}{2016}{{Van~Hasselt et~al.}}{{Van~Hasselt, Guez, and Silver}}}
+\bibcite{vinitsky2022nocturne}{{26}{2022}{{Vinitsky et~al.}}{{Vinitsky, Lichtl{\'e}, Yang, Amos, and Foerster}}}
+\bibcite{wang2016dueling}{{27}{2016}{{Wang et~al.}}{{Wang, Schaul, Hessel, Hasselt, Lanctot, and Freitas}}}
+\@writefile{toc}{\contentsline {section}{\numberline {A}Hyperparameters}{13}{appendix.A}\protected@file@percent }
+\newlabel{app:hyper}{{A}{13}{Hyperparameters}{appendix.A}{}}
+\@writefile{lot}{\contentsline {table}{\numberline {4}{\ignorespaces Full training configuration.}}{13}{table.caption.31}\protected@file@percent }
+\newlabel{tab:hyper}{{4}{13}{Full training configuration}{table.caption.31}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {B}Additional Results}{13}{appendix.B}\protected@file@percent }
+\newlabel{app:additional}{{B}{13}{Additional Results}{appendix.B}{}}
+\gdef \@abspage@last{13}
