@@ -20,11 +20,28 @@ from algos.ppo.base_runner import Runner
 from algos.ppo.env_wrappers import SubprocVecEnv, DummyVecEnv
 
 from nocturne.envs.wrappers import create_ppo_env
+from nocturne.utils.distributed import (
+    all_reduce_scalar,
+    broadcast_object,
+    cleanup_distributed,
+    control_barrier,
+    init_distributed,
+    rank_offset_seed,
+    reduce_metrics,
+)
 
 
 def _t2n(x):
     """Convert torch tensor to a numpy array."""
     return x.detach().cpu().numpy()
+
+
+def _env_seed(cfg, env_rank):
+    """Rank-offset seed so no two processes collect the same scenarios."""
+    dist_rank = int(
+        os.environ.get("RANK", getattr(cfg, "dist_rank", 0))
+    )
+    return rank_offset_seed(cfg.seed, dist_rank) + env_rank * 1000
 
 
 def make_train_env(cfg):
@@ -34,8 +51,7 @@ def make_train_env(cfg):
 
         def init_env():
             env = create_ppo_env(cfg, rank)
-            # TODO(eugenevinitsky) implement this
-            env.seed(cfg.seed + rank * 1000)
+            env.seed(_env_seed(cfg, rank))
             return env
 
         return init_env
@@ -54,8 +70,7 @@ def make_eval_env(cfg):
 
         def init_env():
             env = create_ppo_env(cfg)
-            # TODO(eugenevinitsky) implement this
-            env.seed(cfg.seed + rank * 1000)
+            env.seed(_env_seed(cfg, rank) + 10000)
             return env
 
         return init_env
@@ -121,13 +136,15 @@ class NocturneSharedRunner(Runner):
         self.warmup()
 
         start = time.time()
-        episodes = int(self.num_env_steps
-                       ) // self.episode_length // self.n_rollout_threads
+        world_size = max(1, int(self.dist_info.world_size))
+        episodes = (int(self.num_env_steps) // self.episode_length //
+                    self.n_rollout_threads // world_size)
 
         for episode in range(episodes):
             if self.use_linear_lr_decay:
                 self.trainer.policy.lr_decay(episode, episodes)
 
+            rollout_start = time.time()
             for step in range(self.episode_length):
                 # Sample actions
                 values, actions, action_log_probs, rnn_states, rnn_states_critic, actions_env, cost_value_preds = self.collect(
@@ -142,75 +159,103 @@ class NocturneSharedRunner(Runner):
                 self.insert(data)
 
             # compute return and update network
+            control_barrier(self.dist_info)
+            rollout_seconds = time.time() - rollout_start
+            train_start = time.time()
             self.compute()
             train_infos = self.train()
             if getattr(self.trainer, 'use_lagrangian', False):
                 # Per-episode cost: sum costs over the time dimension,
-                # then average over rollout threads and agents.
+                # then average over rollout threads and agents, then ranks.
                 mean_episode_cost = float(
                     self.buffer.costs.sum(axis=0).mean())
+                mean_episode_cost = all_reduce_scalar(
+                    mean_episode_cost, self.device, op="mean")
                 train_infos['mean_episode_cost'] = mean_episode_cost
                 train_infos['lagrangian_multiplier'] = (
                     self.trainer.update_lagrangian(mean_episode_cost))
+            train_infos = reduce_metrics(train_infos, self.device)
+            train_seconds = time.time() - train_start
 
-            # post process
-            total_num_steps = (
-                episode + 1) * self.episode_length * self.n_rollout_threads
+            # post process: global env steps across all ranks
+            total_num_steps = ((episode + 1) * self.episode_length *
+                               self.n_rollout_threads * world_size)
 
             # save model
             if (episode % self.save_interval == 0 or episode == episodes - 1):
+                control_barrier(self.dist_info)
                 self.save()
+                control_barrier(self.dist_info)
 
             # log information
             if episode % self.log_interval == 0:
                 end = time.time()
-                print(
-                    "\n Algo {} Exp {} updates {}/{} episodes, total num timesteps {}/{}, FPS {}.\n"
-                    .format(self.algorithm_name, self.experiment_name,
-                            episode * self.n_rollout_threads,
-                            episodes * self.n_rollout_threads, total_num_steps,
-                            self.num_env_steps,
-                            int(total_num_steps / (end - start))))
+                fps = int(total_num_steps / max(end - start, 1e-8))
+                if self.dist_info.is_rank0:
+                    print(
+                        "\n Algo {} Exp {} updates {}/{} episodes, total num timesteps {}/{}, FPS {} "
+                        "(rollout {:.1f}s, train {:.1f}s).\n"
+                        .format(self.algorithm_name, self.experiment_name,
+                                episode + 1, episodes, total_num_steps,
+                                self.num_env_steps, fps, rollout_seconds,
+                                train_seconds))
 
-                if self.use_wandb:
-                    wandb.log({'fps': int(total_num_steps / (end - start))},
-                              step=total_num_steps)
+                if self.use_wandb and self.dist_info.is_rank0:
+                    wandb.log({'fps': fps}, step=total_num_steps)
                 env_infos = {}
                 for agent_id in range(self.num_agents):
                     idv_rews = []
                     idv_near_miss = []
                     for info in infos:
-                        if 'individual_reward' in info[agent_id].keys():
-                            idv_rews.append(
-                                info[agent_id]['individual_reward'])
-                        if 'near_miss' in info[agent_id].keys():
-                            idv_near_miss.append(
-                                info[agent_id]['near_miss'])
+                        agent_info = info[agent_id]
+                        if agent_info.get('inactive', False):
+                            continue
+                        if 'individual_reward' in agent_info:
+                            idv_rews.append(agent_info['individual_reward'])
+                        if 'near_miss' in agent_info:
+                            idv_near_miss.append(agent_info['near_miss'])
                     agent_k = 'agent%i/individual_rewards' % agent_id
                     env_infos[agent_k] = idv_rews
                     if idv_near_miss:
                         env_infos['agent%i/near_miss' % agent_id] = (
                             idv_near_miss)
 
-                # TODO(eugenevinitsky) this does not correctly account for the fact that there could be
-                # two episodes in the buffer
-                train_infos["average_episode_rewards"] = np.mean(
-                    self.buffer.rewards) * self.episode_length
-                print("average episode rewards is {}".format(
-                    train_infos["average_episode_rewards"]))
-                print(
-                    f"maximum per step reward is {np.max(self.buffer.rewards)}"
+                # active_masks is stored at t+1, aligned with rewards at t.
+                active = self.buffer.active_masks[1:]
+                rew = self.buffer.rewards
+                active_count = float(np.sum(active))
+                if active_count > 0:
+                    avg_step_reward = float(np.sum(rew * active) / active_count)
+                    max_step_reward = float(np.max(rew * active))
+                else:
+                    avg_step_reward = float(np.mean(rew))
+                    max_step_reward = float(np.max(rew))
+                train_infos["average_episode_rewards"] = (
+                    avg_step_reward * self.episode_length)
+                train_infos["maximum_step_reward"] = (
+                    all_reduce_scalar(max_step_reward, self.device, op="mean")
                 )
+                train_infos = reduce_metrics(train_infos, self.device)
+                if self.dist_info.is_rank0:
+                    print("average episode rewards is {}".format(
+                        train_infos["average_episode_rewards"]))
+                    print(f"maximum per step reward is {max_step_reward}")
                 self.log_train(train_infos, total_num_steps)
                 self.log_env(env_infos, total_num_steps)
 
             # eval
             if episode % self.eval_interval == 0 and self.use_eval:
-                self.eval(total_num_steps)
+                control_barrier(self.dist_info)
+                if self.dist_info.is_rank0:
+                    self.eval(total_num_steps)
+                control_barrier(self.dist_info)
 
-            # save videos
-            if episode % self.cfg.render_interval == 0:
-                self.render(total_num_steps)
+            # Save videos only when rendering is explicitly enabled.
+            if self.use_render and episode % self.cfg.render_interval == 0:
+                control_barrier(self.dist_info)
+                if self.dist_info.is_rank0:
+                    self.render(total_num_steps)
+                control_barrier(self.dist_info)
 
     def warmup(self):
         """Initialize the buffers."""
@@ -271,6 +316,10 @@ class NocturneSharedRunner(Runner):
                          dtype=np.float32)
 
         dones_env = np.all(dones, axis=1)
+        inactive = np.array([[[1.0 if agent_info.get('inactive', False) else 0.0]
+                              for agent_info in env_info]
+                             for env_info in infos],
+                            dtype=np.float32)
 
         rnn_states[dones_env] = np.zeros(((dones_env).sum(), self.num_agents,
                                           self.recurrent_N, self.hidden_size),
@@ -285,11 +334,14 @@ class NocturneSharedRunner(Runner):
         masks[dones_env] = np.zeros(((dones_env).sum(), self.num_agents, 1),
                                     dtype=np.float32)
 
+        # Padding / already-removed agents keep a dummy obs. Do not treat
+        # them as active, including on the env-timeout step.
         active_masks = np.ones((self.n_rollout_threads, self.num_agents, 1),
                                dtype=np.float32)
         active_masks[dones] = np.zeros(((dones).sum(), 1), dtype=np.float32)
-        active_masks[dones_env] = np.ones(
-            ((dones_env).sum(), self.num_agents, 1), dtype=np.float32)
+        active_masks[inactive.astype(bool)] = 0.0
+        if np.any(dones_env):
+            active_masks[dones_env] = 1.0 - inactive[dones_env]
 
         if self.use_centralized_V:
             share_obs = obs.reshape(self.n_rollout_threads, -1)
@@ -317,11 +369,22 @@ class NocturneSharedRunner(Runner):
         eval_episode = 0
 
         eval_episode_rewards = []
+        eval_goal_rates = []
+        eval_collision_rates = []
         one_episode_rewards = [[] for _ in range(self.n_eval_rollout_threads)]
-        num_achieved_goals = 0
-        num_collisions = 0
+        episode_goals = [
+            np.zeros(self.num_agents, dtype=bool)
+            for _ in range(self.n_eval_rollout_threads)
+        ]
+        episode_collisions = [
+            np.zeros(self.num_agents, dtype=bool)
+            for _ in range(self.n_eval_rollout_threads)
+        ]
+        episode_active = [
+            np.zeros(self.num_agents, dtype=bool)
+            for _ in range(self.n_eval_rollout_threads)
+        ]
 
-        i = 0
         eval_obs = self.eval_envs.reset()
 
         eval_rnn_states = np.zeros(
@@ -332,7 +395,6 @@ class NocturneSharedRunner(Runner):
                              dtype=np.float32)
 
         while eval_episode < self.cfg.eval_episodes:
-            i += 1
             self.trainer.prep_rollout()
             eval_actions, eval_rnn_states = \
                 self.trainer.policy.act(np.concatenate(eval_obs),
@@ -344,22 +406,22 @@ class NocturneSharedRunner(Runner):
             eval_rnn_states = np.array(
                 np.split(_t2n(eval_rnn_states), self.n_eval_rollout_threads))
 
-            # Observed reward and next obs
             eval_actions_env = self._format_actions_for_env(
                 eval_actions, self.eval_envs.action_space[0])
             eval_obs, eval_rewards, eval_dones, eval_infos = self.eval_envs.step(
                 eval_actions_env)
-            for info_arr in eval_infos:
-                for agent_info_arr in info_arr:
-                    if 'goal_achieved' in agent_info_arr and agent_info_arr[
-                            'goal_achieved']:
-                        num_achieved_goals += 1
-                    if 'collided' in agent_info_arr and agent_info_arr[
-                            'collided']:
-                        num_collisions += 1
 
-            for i in range(self.n_eval_rollout_threads):
-                one_episode_rewards[i].append(eval_rewards[i])
+            for env_i, info_arr in enumerate(eval_infos):
+                for agent_i, agent_info in enumerate(info_arr):
+                    if not agent_info.get('inactive', False):
+                        episode_active[env_i][agent_i] = True
+                    episode_goals[env_i][agent_i] |= bool(
+                        agent_info.get('goal_achieved', False))
+                    episode_collisions[env_i][agent_i] |= bool(
+                        agent_info.get('collided', False))
+
+            for env_i in range(self.n_eval_rollout_threads):
+                one_episode_rewards[env_i].append(eval_rewards[env_i])
 
             eval_dones_env = np.all(eval_dones, axis=1)
 
@@ -375,30 +437,48 @@ class NocturneSharedRunner(Runner):
                 ((eval_dones_env).sum(), self.num_agents, 1), dtype=np.float32)
 
             for eval_i in range(self.n_eval_rollout_threads):
-                if eval_dones_env[eval_i]:
-                    eval_episode += 1
+                if not eval_dones_env[eval_i]:
+                    continue
+                rewards = np.asarray(one_episode_rewards[eval_i])
+                active = episode_active[eval_i]
+                if np.any(active):
+                    agent_returns = rewards.sum(axis=0).reshape(-1)[:self.num_agents]
                     eval_episode_rewards.append(
-                        np.sum(one_episode_rewards[eval_i], axis=0).mean())
-                    one_episode_rewards[eval_i] = []
+                        float(agent_returns[active].mean()))
+                    eval_goal_rates.append(
+                        float(episode_goals[eval_i][active].mean()))
+                    eval_collision_rates.append(
+                        float(episode_collisions[eval_i][active].mean()))
+                else:
+                    eval_episode_rewards.append(
+                        float(np.sum(rewards, axis=0).mean()))
+                    eval_goal_rates.append(0.0)
+                    eval_collision_rates.append(0.0)
+                one_episode_rewards[eval_i] = []
+                episode_goals[eval_i].fill(False)
+                episode_collisions[eval_i].fill(False)
+                episode_active[eval_i].fill(False)
+                eval_episode += 1
 
-        eval_episode_rewards = np.array(eval_episode_rewards)
-        eval_episode_rewards = np.mean(eval_episode_rewards)
+        mean_reward = float(np.mean(eval_episode_rewards)) if eval_episode_rewards else 0.0
+        mean_goal = float(np.mean(eval_goal_rates)) if eval_goal_rates else 0.0
+        mean_collision = (
+            float(np.mean(eval_collision_rates)) if eval_collision_rates else 0.0
+        )
+        metrics = {
+            'eval_episode_rewards': mean_reward,
+            'avg_eval_goals_achieved': mean_goal,
+            'avg_eval_num_collisions': mean_collision,
+        }
+        print(
+            "eval @ {} steps: reward={:.4f} goal_rate={:.4f} collision_rate={:.4f}"
+            .format(total_num_steps, mean_reward, mean_goal, mean_collision))
         if self.use_wandb:
-            wandb.log({'eval_episode_rewards': eval_episode_rewards},
-                      step=total_num_steps)
-            wandb.log(
-                {
-                    'avg_eval_goals_achieved':
-                    num_achieved_goals / self.num_agents /
-                    self.cfg.eval_episodes
-                },
-                step=total_num_steps)
-            wandb.log(
-                {
-                    'avg_eval_num_collisions':
-                    num_collisions / self.num_agents / self.cfg.eval_episodes
-                },
-                step=total_num_steps)
+            wandb.log(metrics, step=total_num_steps)
+        elif self.writter is not None:
+            for key, value in metrics.items():
+                self.writter.add_scalars(key, {key: value}, total_num_steps)
+        return metrics
 
     @torch.no_grad()
     def render(self, total_num_steps):
@@ -482,39 +562,61 @@ class NocturneSharedRunner(Runner):
 def main(cfg):
     """Run the on-policy code."""
     set_display_window()
+    dist_info = init_distributed(requested_device=cfg.algorithm.device)
+    try:
+        _run_training(cfg, dist_info)
+    finally:
+        cleanup_distributed()
+
+
+def _run_training(cfg, dist_info):
+    """Rank-aware training body used by both single-process and torchrun."""
+    if dist_info.is_distributed:
+        cfg.algorithm.distributed = True
+        cfg.algorithm.device = str(dist_info.device)
+
     logdir = Path(os.getcwd())
     if cfg.wandb_id is not None:
         wandb_id = cfg.wandb_id
     else:
         wandb_id = wandb.util.generate_id()
-        # with open(os.path.join(logdir, 'wandb_id.txt'), 'w+') as f:
-        #     f.write(wandb_id)
+        wandb_id = broadcast_object(wandb_id, src=0)
     wandb_mode = "disabled" if (cfg.debug or not cfg.wandb) else "online"
 
     if cfg.wandb:
-        run = wandb.init(config=cfg,
-                         project=cfg.wandb_name,
-                         name=wandb_id,
-                         group='ppov2_' + cfg.experiment,
-                         resume="allow",
-                         settings=wandb.Settings(start_method="fork"),
-                         mode=wandb_mode)
-    else:
-        if not logdir.exists():
-            curr_run = 'run1'
+        if dist_info.is_rank0:
+            run = wandb.init(config=cfg,
+                             project=cfg.wandb_name,
+                             name=wandb_id,
+                             group='ppov2_' + cfg.experiment,
+                             resume="allow",
+                             settings=wandb.Settings(start_method="fork"),
+                             mode=wandb_mode)
+            logdir = Path(run.dir)
         else:
-            exst_run_nums = [
-                int(str(folder.name).split('run')[1])
-                for folder in logdir.iterdir()
-                if str(folder.name).startswith('run')
-            ]
-            if len(exst_run_nums) == 0:
+            run = None
+            cfg.algorithm.wandb = False
+        logdir = Path(broadcast_object(str(logdir), src=0))
+    else:
+        if dist_info.is_rank0:
+            if not logdir.exists():
                 curr_run = 'run1'
             else:
-                curr_run = 'run%i' % (max(exst_run_nums) + 1)
-        logdir = logdir / curr_run
-        if not logdir.exists():
-            os.makedirs(str(logdir))
+                exst_run_nums = [
+                    int(str(folder.name).split('run')[1])
+                    for folder in logdir.iterdir()
+                    if str(folder.name).startswith('run')
+                ]
+                if len(exst_run_nums) == 0:
+                    curr_run = 'run1'
+                else:
+                    curr_run = 'run%i' % (max(exst_run_nums) + 1)
+            logdir = logdir / curr_run
+            if not logdir.exists():
+                os.makedirs(str(logdir))
+            logdir = Path(broadcast_object(str(logdir), src=0))
+        else:
+            logdir = Path(broadcast_object(None, src=0))
 
     if cfg.algorithm.algorithm_name == "rmappo":
         assert (cfg.algorithm.use_recurrent_policy
@@ -527,36 +629,29 @@ def main(cfg):
     else:
         raise NotImplementedError
 
-    # cuda
-    if 'cpu' not in cfg.algorithm.device and torch.cuda.is_available():
-        print("choose to use gpu...")
-        device = torch.device(cfg.algorithm.device)
-        torch.set_num_threads(cfg.algorithm.n_training_threads)
-        # if cfg.algorithm.cuda_deterministic:
-        #     import torch.backends.cudnn as cudnn
-        #     cudnn.benchmark = False
-        #     cudnn.deterministic = True
-    else:
-        print("choose to use cpu...")
-        device = torch.device("cpu")
-        torch.set_num_threads(cfg.algorithm.n_training_threads)
+    device = dist_info.device
+    if dist_info.is_rank0:
+        if device.type == "cuda":
+            print("choose to use gpu...")
+        else:
+            print("choose to use cpu...")
+    torch.set_num_threads(cfg.algorithm.n_training_threads)
 
     setproctitle.setproctitle(
-        str(cfg.algorithm.algorithm_name) + "-" + str(cfg.experiment))
+        str(cfg.algorithm.algorithm_name) + "-" + str(cfg.experiment) +
+        f"-rank{dist_info.rank}")
 
-    # seed
-    torch.manual_seed(cfg.algorithm.seed)
-    torch.cuda.manual_seed_all(cfg.algorithm.seed)
-    np.random.seed(cfg.algorithm.seed)
+    seed = rank_offset_seed(cfg.algorithm.seed, dist_info.rank)
+    torch.manual_seed(seed)
+    if device.type == "cuda":
+        torch.cuda.manual_seed_all(seed)
+    np.random.seed(seed)
 
-    # env init
-    # TODO(eugenevinitsky) this code requires a fixed number of agents but this
-    # should be done by overriding in the hydra config rather than here
     cfg.subscriber.keep_inactive_agents = True
     envs = make_train_env(cfg)
-    eval_envs = make_eval_env(cfg)
-    render_envs = make_render_env(cfg)
-    # TODO(eugenevinitsky) hacky
+    eval_envs = make_eval_env(cfg) if cfg.algorithm.use_eval else envs
+    render_envs = (make_render_env(cfg)
+                   if cfg.algorithm.use_render else envs)
     num_agents = envs.reset().shape[1]
 
     config = {
@@ -566,21 +661,22 @@ def main(cfg):
         "render_envs": render_envs,
         "num_agents": num_agents,
         "device": device,
-        "logdir": logdir
+        "logdir": logdir,
+        "dist_info": dist_info,
     }
 
-    # run experiments
     runner = NocturneSharedRunner(config)
     runner.run()
 
-    # post process
     envs.close()
     if cfg.algorithm.use_eval and eval_envs is not envs:
         eval_envs.close()
+    if cfg.algorithm.use_render and render_envs is not envs:
+        render_envs.close()
 
-    if cfg.wandb:
+    if cfg.wandb and run is not None:
         run.finish()
-    else:
+    elif runner.writter is not None:
         runner.writter.export_scalars_to_json(
             str(runner.log_dir + '/summary.json'))
         runner.writter.close()

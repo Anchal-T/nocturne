@@ -77,6 +77,7 @@ class Categorical(nn.Module):
         x = self.linear(x)
         if available_actions is not None:
             x[available_actions == 0] = -1e10
+        x = torch.nan_to_num(x, nan=0.0, posinf=50.0, neginf=-50.0)
         return FixedCategorical(logits=x)
 
 

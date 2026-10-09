@@ -10,6 +10,8 @@ samples_per_epoch: 50000
 max_visible_road_points: 500
 batch_size: 512
 epochs: 700
+# Optional legacy model_N.pth or resumable checkpoint_N.pt.
+resume_from: null
 device: cuda
 n_stacked_states: 5
 view_dist: 80

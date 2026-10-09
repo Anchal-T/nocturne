@@ -103,6 +103,9 @@ drl:
     num_envs_per_worker: 2
     num_envs: 8
     vec_env_mode: async # async | sync | dummy | ray
+    # Permit worker-aligned async collection under DDP. Keep false unless
+    # overlap_halves is enabled so all ranks issue equal DDP update counts.
+    allow_distributed_async: false
     ray_address: null          # null = local cluster; "auto" = Anyscale cluster
     train_in_background: true
     # Large queues + high actor lag previously ballooned host RAM until a worker died.
@@ -146,6 +149,7 @@ drl:
     replay_obs_dtype: float16
     # Sync loss.item() / PER priority D2H only every N gradient steps.
     loss_sync_interval: 32
+    resume_checkpoint: null
     # Alternating-half collection: infer half A while half B steps (and vice versa).
     overlap_halves: true
 

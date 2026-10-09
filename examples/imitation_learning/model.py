@@ -77,11 +77,21 @@ class ImitationAgent(nn.Module):
         if self.discrete:
             return [Categorical(logits=head(x_out)) for head in self.heads]
         else:
+            mean_scalings = self.mean_scalings.to(state.device)
+            covariance_matrix = self.covariance_matrix.to(state.device)
             return MultivariateNormal(
-                self.head(x_out) * self.mean_scalings, self.covariance_matrix)
+                self.head(x_out) * mean_scalings, covariance_matrix)
 
-    def forward(self, state, deterministic=False, return_indexes=False):
-        """Generate an output from tensor input."""
+    def forward(self, state, deterministic=False, return_indexes=False,
+                expert_action=None):
+        """Generate an output from tensor input.
+
+        When ``expert_action`` is set, return log-prob of that action so DDP
+        can intercept the training path (it only wraps ``forward``).
+        """
+        if expert_action is not None:
+            return self.log_prob(state, expert_action,
+                                 return_indexes=return_indexes)
         dists = self.dist(state)
         if self.discrete:
             actions_idx = [
@@ -117,7 +127,7 @@ class ImitationAgent(nn.Module):
         # credits https://stackoverflow.com/a/46184652/16207351
         output = torch.zeros_like(action)
         for i, action_grid in enumerate(self.actions_grids):
-            actions = action[:, i]
+            actions = action[:, i].contiguous()
 
             # get indexes where actions would be inserted in action_grid to keep it sorted
             idxs = torch.searchsorted(action_grid, actions)

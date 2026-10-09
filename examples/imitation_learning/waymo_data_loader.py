@@ -10,6 +10,7 @@ import torch
 from pathlib import Path
 import numpy as np
 
+from nocturne.utils.distributed import shard_sequence
 from cfgs.config import ERR_VAL
 from nocturne import Simulation
 
@@ -154,10 +155,18 @@ class WaymoDataset(torch.utils.data.IterableDataset):
         # get paths of dataset files (up to file_limit paths)
         self.file_paths = list(
             Path(data_path).glob('tfrecord*.json'))[:file_limit]
-        print(f'WaymoDataset: loading {len(self.file_paths)} files.')
 
         # sort the paths for reproducibility if testing on a small set of files
         self.file_paths.sort()
+        self.file_paths = shard_sequence(
+            self.file_paths,
+            int(dataloader_config.get("dist_rank", 0)),
+            int(dataloader_config.get("dist_world_size", 1)),
+        )
+        print(
+            f'WaymoDataset rank {dataloader_config.get("dist_rank", 0)}: '
+            f'loading {len(self.file_paths)} files.'
+        )
 
     def __iter__(self):
         """Partition files for each worker and return an (state, expert_action) iterable."""

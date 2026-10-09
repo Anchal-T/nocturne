@@ -160,9 +160,8 @@ def _average_displacement_impl(arg):
     return avg_displacement, final_displacement, avg_collisions, avg_goals
 
 
-def compute_average_displacement(trajectories_dir, model, configs):
+def compute_average_displacement(trajectories_dir, model, configs, num_files=200):
     """Compute average displacement error between a model and the ground truth."""
-    NUM_FILES = 200
     # get trajectories paths
     with open(os.path.join(trajectories_dir, 'valid_files.json')) as file:
         valid_veh_dict = json.load(file)
@@ -171,7 +170,7 @@ def compute_average_displacement(trajectories_dir, model, configs):
         np.random.seed(0)
         np.random.shuffle(files)
     # compute average displacement over each individual trajectory file
-    trajectories_paths = files[:NUM_FILES]
+    trajectories_paths = files[:num_files]
     for i, trajectory in enumerate(trajectories_paths):
         trajectories_paths[i] = os.path.join(trajectories_dir, trajectory)
     with Pool(processes=14) as pool:

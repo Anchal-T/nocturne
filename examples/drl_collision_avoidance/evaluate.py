@@ -453,6 +453,17 @@ def _write_trace(
         json.dump(payload, handle)
 
 
+def _add_optional_bool(parser, name, help_text):
+    """Add --name / --no_name with a None default, meaning no override.
+
+    argparse.BooleanOptionalAction needs Python 3.9, and this repo supports 3.8.
+    """
+    parser.add_argument(f'--{name}', dest=name, action='store_true', help=help_text)
+    parser.add_argument(f'--no_{name}', dest=name, action='store_false',
+                        help=f'Override {name} to False')
+    parser.set_defaults(**{name: None})
+
+
 def _mean_or_none(values):
     usable = _valid_numbers(values)
     if not usable:
@@ -473,11 +484,12 @@ def main():
     parser.add_argument('--num_episodes', type=int, default=10)
     parser.add_argument('--num_files', type=int, default=-1)
     parser.add_argument('--render', action='store_true')
-    parser.add_argument('--use_occlusion', action=argparse.BooleanOptionalAction,
-                        default=None,
-                        help='Legacy coupled occlusion switch. Prefer the two flags below.')
-    parser.add_argument('--visibility_filter', action=argparse.BooleanOptionalAction, default=None)
-    parser.add_argument('--occlusion_features', action=argparse.BooleanOptionalAction, default=None)
+    _add_optional_bool(parser, 'use_occlusion',
+                       'Legacy coupled occlusion switch. Prefer the two flags below.')
+    _add_optional_bool(parser, 'visibility_filter',
+                       'Override occupancy_grid.visibility_filter')
+    _add_optional_bool(parser, 'occlusion_features',
+                       'Override occupancy_grid.occlusion_features')
     parser.add_argument('--reward_ttz_source', choices=['visible', 'ground_truth'], default=None)
     parser.add_argument('--occlusion_view_angle', type=float, default=None,
                         help='View-cone angle in radians. pi is 180 degrees; 2*pi/3 is 120 degrees.')

@@ -8,6 +8,25 @@ from collections import defaultdict
 _NS_COEFFICIENTS = (3.4445, -4.7750, 2.0315)
 
 
+def _newton_schulz_dtype(tensor: torch.Tensor) -> torch.dtype:
+    """Return a matmul dtype supported by the tensor's device."""
+    if tensor.device.type != "cuda":
+        return torch.float32
+
+    if hasattr(torch.cuda, "is_bf16_supported"):
+        try:
+            if torch.cuda.is_bf16_supported(tensor.device):
+                return torch.bfloat16
+        except (RuntimeError, TypeError):
+            pass
+
+    try:
+        major, _ = torch.cuda.get_device_capability(tensor.device)
+    except (RuntimeError, AssertionError):
+        return torch.float32
+    return torch.bfloat16 if major >= 8 else torch.float32
+
+
 def zeropower_via_newtonschulz5(G: torch.Tensor, steps: int = 5) -> torch.Tensor:
     """Compute the zero-power (orthogonal projection) of G via Newton-Schulz.
 
@@ -16,7 +35,7 @@ def zeropower_via_newtonschulz5(G: torch.Tensor, steps: int = 5) -> torch.Tensor
     """
     assert G.ndim >= 2
     a, b, c = _NS_COEFFICIENTS
-    X = G.bfloat16()
+    X = G.to(dtype=_newton_schulz_dtype(G))
     if G.size(-2) > G.size(-1):
         X = X.mT
     X = X / (X.norm(dim=(-2, -1), keepdim=True) + 1e-7)

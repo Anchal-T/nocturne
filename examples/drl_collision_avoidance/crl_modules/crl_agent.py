@@ -30,6 +30,27 @@ import torch.nn as nn
 from .actor import ContinuousActor
 from .encoders import GEncoder, SAEncoder
 from .her_buffer import HERReplayBuffer
+from nocturne.utils.distributed import (
+    DistInfo,
+    all_reduce_scalar,
+    dummy_loss,
+    unwrap_module,
+    wrap_ddp,
+)
+
+
+def _reset_module_params(module: nn.Module) -> None:
+    """Re-apply LeCun init for Linear leaves; identity for LayerNorm."""
+    if isinstance(module, nn.Linear):
+        from .encoders import lecun_init_
+
+        lecun_init_(module.weight)
+        if module.bias is not None:
+            nn.init.zeros_(module.bias)
+    elif isinstance(module, nn.LayerNorm):
+        nn.init.ones_(module.weight)
+        nn.init.zeros_(module.bias)
+
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -107,6 +128,32 @@ class CRLAgentConfig:
 
     # --- Runtime ---
     device: str = "cuda"
+    find_unused_parameters: bool = False
+    # Floor α≈0.08 (exp(-2.5)); prevents entropy collapse that freezes InfoNCE.
+    log_alpha_min: float = -2.5
+    log_alpha_max: float = 2.0
+    grad_clip_norm: float = 10.0
+    # HER buffer is never checkpointed; stale Adam moments on a fresh buffer
+    # immediately drive InfoNCE to ln(B). Reset critic/α optimisers on load.
+    reset_critic_optimizer_on_load: bool = True
+    # Also re-init SA/G weights on load. A good policy refill produces
+    # near-homogeneous HER goals; fine-tuning the old metric collapses to
+    # ln(B) within ~100 steps. Actor + α are kept. From-scratch critic
+    # re-learns (as in the original 0→30k run).
+    reinit_critic_on_load: bool = True
+    # Extra: if α was already collapsed in the checkpoint, same SA/G re-init.
+    reinit_critic_on_collapsed_alpha: bool = False
+    # After SA/G re-init, hold λ=0 for this many critic steps so InfoNCE can
+    # form a metric before logsumexp² pulls all logits toward 0 (→ ln(B) trap).
+    lse_penalty_warmup_steps: int = 5000
+    # During buffer refill after resume, mix uniform random actions so HER
+    # goals stay diverse (a strong actor alone yields near-homogeneous futures).
+    resume_random_action_prob: float = 0.5
+    # Once the HER buffer first hits min_replay after a resume+reinit, run this
+    # many consecutive train_steps before returning to the cheap 1-step/ep
+    # schedule. Empirically ~200 steps moves InfoNCE off ln(B); live 1/ep
+    # alone stayed pinned.
+    critic_burst_steps_on_resume: int = 2000
 
 
 # ---------------------------------------------------------------------------
@@ -152,8 +199,9 @@ class CRLAgent:
         print(agent.param_count())
     """
 
-    def __init__(self, config: CRLAgentConfig) -> None:
+    def __init__(self, config: CRLAgentConfig, dist_info=None) -> None:
         self.config = config
+        self.dist_info = dist_info or DistInfo(device=torch.device(config.device))
 
         # Resolve device: fall back to CPU if CUDA is requested but unavailable.
         if config.device != "cpu" and not torch.cuda.is_available():
@@ -187,6 +235,14 @@ class CRLAgent:
             width=config.network_width,
             depth=config.actor_depth,
         ).to(self.device)
+
+        find_unused = bool(getattr(config, "find_unused_parameters", True))
+        self.sa_encoder = wrap_ddp(
+            self.sa_encoder, self.dist_info, find_unused_parameters=find_unused)
+        self.g_encoder = wrap_ddp(
+            self.g_encoder, self.dist_info, find_unused_parameters=find_unused)
+        self.actor = wrap_ddp(
+            self.actor, self.dist_info, find_unused_parameters=find_unused)
 
         # ------------------------------------------------------------------ #
         # Entropy coefficient α (auto-tuned via dual ascent on log α)         #
@@ -244,6 +300,12 @@ class CRLAgent:
         # ------------------------------------------------------------------ #
 
         self.train_steps: int = 0
+        # When >0, logsumexp penalty is disabled (set on critic re-init).
+        self._lse_warmup_remaining: int = 0
+        # True after loading a resume checkpoint (enables random-action mix).
+        self._resume_buffer_warmup: bool = False
+        # Set on load; cleared after the one-shot critic burst.
+        self._pending_critic_burst: bool = False
 
     # ---------------------------------------------------------------------- #
     # Properties                                                               #
@@ -279,15 +341,29 @@ class CRLAgent:
         g = torch.FloatTensor(goal).unsqueeze(0).to(self.device)  # (1, goal_dim)
 
         self.actor.eval()
+        actor = unwrap_module(self.actor)
         if deterministic:
-            action = self.actor.deterministic_action(s, g)  # (1, action_dim)
+            action = actor.deterministic_action(s, g)  # (1, action_dim)
         else:
-            action, _ = self.actor.sample(s, g)  # (1, action_dim)
+            action, _ = actor.sample(s, g)  # (1, action_dim)
         self.actor.train()
 
         return action.squeeze(0).cpu().numpy()  # (action_dim,)
 
-    @torch.no_grad()
+    def _sample_actor(self, state, goal):
+        """Sample tanh-squashed actions using the DDP-wrapped actor forward."""
+        mean, log_std = self.actor(state, goal)
+        std = log_std.exp()
+        eps = torch.randn_like(mean)
+        x_t = mean + std * eps
+        action = torch.tanh(x_t)
+        log_prob = (
+            torch.distributions.Normal(mean, std).log_prob(x_t)
+            - torch.log(1.0 - action.pow(2) + 1e-5)
+        ).sum(dim=-1)
+        return action, log_prob
+
+    @torch.inference_mode()
     def select_action_batch(
         self,
         states: np.ndarray,
@@ -304,17 +380,14 @@ class CRLAgent:
         Returns:
             actions: (N, action_dim) numpy float32 array.
         """
-        s = torch.FloatTensor(states).to(self.device)  # (N, state_dim)
-        g = torch.FloatTensor(goals).to(self.device)  # (N, goal_dim)
-
-        self.actor.eval()
+        s = torch.as_tensor(states, dtype=torch.float32, device=self.device)
+        g = torch.as_tensor(goals, dtype=torch.float32, device=self.device)
+        actor = unwrap_module(self.actor)
         if deterministic:
-            actions = self.actor.deterministic_action(s, g)  # (N, action_dim)
+            actions = actor.deterministic_action(s, g)
         else:
-            actions, _ = self.actor.sample(s, g)  # (N, action_dim)
-        self.actor.train()
-
-        return actions.cpu().numpy()  # (N, action_dim)
+            actions, _ = actor.sample(s, g)
+        return actions.cpu().numpy()
 
     # ---------------------------------------------------------------------- #
     # Training step                                                            #
@@ -337,27 +410,36 @@ class CRLAgent:
             3. **Alpha** — Dual update on the temperature log α to enforce
                the target entropy constraint.
 
-        Returns:
-            Dict with keys:
-                - ``critic_loss``   : InfoNCE loss (+ penalty).
-                - ``actor_loss``    : Policy gradient loss.
-                - ``alpha_loss``    : Temperature dual loss.
-                - ``alpha``         : Current entropy coefficient value.
-                - ``log_prob_mean`` : Mean log-probability of sampled actions.
-                - ``logsumexp_mean``: Mean of logsumexp(logits) row — useful
-                  for diagnosing score collapse.
+        Under DDP, every rank participates in the same number of backwards
+        even when a local HER buffer is not ready (dummy loss). Negatives
+        are rank-local; gradients are averaged.
         """
-        if self.replay_buffer.num_episodes < self.config.min_replay_episodes:
-            return None
-
-        batch = self.replay_buffer.sample(self.config.batch_size)
-        if batch is None:
+        ready = (
+            self.replay_buffer.num_episodes >= self.config.min_replay_episodes
+        )
+        batch = self.replay_buffer.sample(self.config.batch_size) if ready else None
+        ready = ready and batch is not None
+        if self.dist_info.is_distributed:
+            global_ready = all_reduce_scalar(
+                1.0 if ready else 0.0, self.device, op="min"
+            )
+            if global_ready < 1.0:
+                loss = (
+                    dummy_loss(self.sa_encoder)
+                    + dummy_loss(self.g_encoder)
+                    + dummy_loss(self.actor)
+                )
+                loss.backward()
+                self.critic_optimizer.zero_grad(set_to_none=True)
+                self.actor_optimizer.zero_grad(set_to_none=True)
+                return None
+        elif not ready:
             return None
 
         # Move batch tensors to device.
-        obs_t = torch.FloatTensor(batch["obs"]).to(self.device)  # (B, state_dim)
-        act_t = torch.FloatTensor(batch["action"]).to(self.device)  # (B, action_dim)
-        goal_t = torch.FloatTensor(batch["goal"]).to(self.device)  # (B, goal_dim)
+        obs_t = torch.as_tensor(batch["obs"], dtype=torch.float32, device=self.device)
+        act_t = torch.as_tensor(batch["action"], dtype=torch.float32, device=self.device)
+        goal_t = torch.as_tensor(batch["goal"], dtype=torch.float32, device=self.device)
 
         # ------------------------------------------------------------------ #
         # 1. Critic loss (InfoNCE + logsumexp² regularisation)               #
@@ -381,12 +463,23 @@ class CRLAgent:
 
         # Logsumexp² regularisation — prevents the scores from collapsing to
         # uniformly large values which would satisfy InfoNCE trivially.
-        lse_penalty = self.config.logsumexp_penalty_coeff * torch.mean(logsumexp_val**2)
+        # Held at 0 for a few thousand steps after SA/G re-init so the metric
+        # can form before λ·lse² dominates and drives logits → −ln(B).
+        if self._lse_warmup_remaining > 0:
+            lse_coeff = 0.0
+            self._lse_warmup_remaining -= 1
+        else:
+            lse_coeff = self.config.logsumexp_penalty_coeff
+        lse_penalty = lse_coeff * torch.mean(logsumexp_val**2)
 
         critic_loss = nce_loss + lse_penalty
 
         self.critic_optimizer.zero_grad(set_to_none=True)
         critic_loss.backward()
+        torch.nn.utils.clip_grad_norm_(
+            list(self.sa_encoder.parameters()) + list(self.g_encoder.parameters()),
+            self.config.grad_clip_norm,
+        )
         self.critic_optimizer.step()
 
         # ------------------------------------------------------------------ #
@@ -394,7 +487,8 @@ class CRLAgent:
         # ------------------------------------------------------------------ #
 
         # Sample fresh actions from the current policy.
-        action_new, log_prob = self.actor.sample(obs_t, goal_t)  # (B, action_dim), (B,)
+        # Sample fresh actions from the current policy via DDP-wrapped forward.
+        action_new, log_prob = self._sample_actor(obs_t, goal_t)
 
         # Q-values for the freshly sampled actions.  Gradients flow through
         # the encoders so the actor can learn from the Q signal.  Any encoder
@@ -414,6 +508,9 @@ class CRLAgent:
 
         self.actor_optimizer.zero_grad(set_to_none=True)
         actor_loss.backward()
+        torch.nn.utils.clip_grad_norm_(
+            self.actor.parameters(), self.config.grad_clip_norm
+        )
         self.actor_optimizer.step()
 
         # ------------------------------------------------------------------ #
@@ -429,6 +526,13 @@ class CRLAgent:
         self.alpha_optimizer.zero_grad(set_to_none=True)
         alpha_loss.backward()
         self.alpha_optimizer.step()
+        with torch.no_grad():
+            self.log_alpha.clamp_(
+                self.config.log_alpha_min, self.config.log_alpha_max
+            )
+        if self.dist_info.is_distributed:
+            import torch.distributed as dist
+            dist.broadcast(self.log_alpha.data, src=0)
 
         # ------------------------------------------------------------------ #
         # Book-keeping                                                         #
@@ -449,31 +553,36 @@ class CRLAgent:
     # Persistence                                                              #
     # ---------------------------------------------------------------------- #
 
-    def save(self, path: str) -> None:
+    def save(self, path: str, episodes_completed: int = 0) -> None:
         """Serialise all learnable state to a single checkpoint file.
 
         Args:
             path: Destination file path (parent directories are created
                   automatically if they do not exist).
+            episodes_completed: Episode count to restore on resume.
         """
         parent = os.path.dirname(path)
         if parent:
             os.makedirs(parent, exist_ok=True)
 
-        torch.save(
-            {
-                "sa_encoder": self.sa_encoder.state_dict(),
-                "g_encoder": self.g_encoder.state_dict(),
-                "actor": self.actor.state_dict(),
-                "log_alpha": self.log_alpha.data,
-                "train_steps": self.train_steps,
-                "config": self.config,
-            },
-            path,
-        )
-        print(f"[CRLAgent] Saved checkpoint → {path}")
+        payload = {
+            "sa_encoder": unwrap_module(self.sa_encoder).state_dict(),
+            "g_encoder": unwrap_module(self.g_encoder).state_dict(),
+            "actor": unwrap_module(self.actor).state_dict(),
+            "log_alpha": self.log_alpha.data,
+            "train_steps": self.train_steps,
+            "episodes_completed": int(episodes_completed),
+            "config": self.config,
+            "world_size": self.dist_info.world_size,
+            "critic_optimizer": self.critic_optimizer.state_dict(),
+            "actor_optimizer": self.actor_optimizer.state_dict(),
+            "alpha_optimizer": self.alpha_optimizer.state_dict(),
+        }
+        torch.save(payload, path)
+        if self.dist_info.is_rank0:
+            print(f"[CRLAgent] Saved checkpoint → {path}")
 
-    def load(self, path: str) -> None:
+    def load(self, path: str) -> int:
         """Restore all learnable state from a checkpoint file.
 
         The checkpoint must have been produced by :meth:`save`.  Mismatched
@@ -481,16 +590,105 @@ class CRLAgent:
 
         Args:
             path: Path to the ``.pt`` checkpoint file.
+
+        Returns:
+            Episode count stored in the checkpoint, or parsed from
+            ``crl_epN.pth`` if the file predates that field.
         """
         ckpt = torch.load(path, map_location=self.device)
 
-        self.sa_encoder.load_state_dict(ckpt["sa_encoder"])
-        self.g_encoder.load_state_dict(ckpt["g_encoder"])
-        self.actor.load_state_dict(ckpt["actor"])
+        unwrap_module(self.sa_encoder).load_state_dict(ckpt["sa_encoder"])
+        unwrap_module(self.g_encoder).load_state_dict(ckpt["g_encoder"])
+        unwrap_module(self.actor).load_state_dict(ckpt["actor"])
         self.log_alpha.data.copy_(ckpt["log_alpha"])
         self.train_steps = int(ckpt.get("train_steps", 0))
 
-        print(f"[CRLAgent] Loaded checkpoint ← {path} (train_steps={self.train_steps})")
+        # Actor optimiser transfers fine; critic/α moments do not — the HER
+        # buffer is wiped on resume, so restoring Adam state drives InfoNCE
+        # to ln(B) within a few dozen steps (seen on every prior 30k resume).
+        if "actor_optimizer" in ckpt:
+            self.actor_optimizer.load_state_dict(ckpt["actor_optimizer"])
+        if (
+            not self.config.reset_critic_optimizer_on_load
+            and "critic_optimizer" in ckpt
+        ):
+            self.critic_optimizer.load_state_dict(ckpt["critic_optimizer"])
+        if (
+            not self.config.reset_critic_optimizer_on_load
+            and "alpha_optimizer" in ckpt
+        ):
+            self.alpha_optimizer.load_state_dict(ckpt["alpha_optimizer"])
+        if self.config.reset_critic_optimizer_on_load and self.dist_info.is_rank0:
+            print(
+                "[CRLAgent] Reset critic/α Adam state on load "
+                "(HER buffer not restored)"
+            )
+
+        # Clamp to floor/ceiling — never snap α back to 1.0 (that caused instability).
+        alpha_before = float(self.log_alpha.exp().item())
+        with torch.no_grad():
+            self.log_alpha.clamp_(
+                self.config.log_alpha_min, self.config.log_alpha_max
+            )
+        alpha_after = float(self.log_alpha.exp().item())
+        if abs(alpha_before - alpha_after) > 1e-6 and self.dist_info.is_rank0:
+            print(
+                f"[CRLAgent] Clamped α {alpha_before:.4f} → {alpha_after:.4f} "
+                f"(floor={self.config.log_alpha_min:.2f})"
+            )
+
+        should_reinit_critic = bool(self.config.reinit_critic_on_load) or (
+            self.config.reinit_critic_on_collapsed_alpha and alpha_before < 0.05
+        )
+        if should_reinit_critic:
+            unwrap_module(self.sa_encoder).apply(_reset_module_params)
+            unwrap_module(self.g_encoder).apply(_reset_module_params)
+            # Shrink output projections so initial −L2 logits are not huge;
+            # otherwise λ·lse² dominates before InfoNCE can learn.
+            for enc in (self.sa_encoder, self.g_encoder):
+                out = unwrap_module(enc).output_proj
+                with torch.no_grad():
+                    out.weight.mul_(0.1)
+                    if out.bias is not None:
+                        out.bias.mul_(0.1)
+            self.critic_optimizer = torch.optim.Adam(
+                list(self.sa_encoder.parameters())
+                + list(self.g_encoder.parameters()),
+                lr=self.config.critic_lr,
+            )
+            self._lse_warmup_remaining = int(self.config.lse_penalty_warmup_steps)
+            if self.dist_info.is_rank0:
+                reason = (
+                    "resume without HER buffer"
+                    if self.config.reinit_critic_on_load
+                    else "collapsed α on load"
+                )
+                print(
+                    f"[CRLAgent] Re-initialised SA/G encoders + critic optimiser "
+                    f"({reason}; lse warmup={self._lse_warmup_remaining} steps)"
+                )
+
+        self._resume_buffer_warmup = True
+        self._pending_critic_burst = bool(
+            self.config.reinit_critic_on_load
+            or self.config.reinit_critic_on_collapsed_alpha
+        ) and int(self.config.critic_burst_steps_on_resume) > 0
+
+        episodes_completed = int(ckpt.get("episodes_completed", 0))
+        if episodes_completed <= 0:
+            stem = os.path.splitext(os.path.basename(path))[0]
+            if stem.startswith("crl_ep"):
+                suffix = stem[len("crl_ep") :]
+                if suffix.isdigit():
+                    episodes_completed = int(suffix)
+
+        if self.dist_info.is_rank0:
+            print(
+                f"[CRLAgent] Loaded checkpoint ← {path} "
+                f"(train_steps={self.train_steps}, "
+                f"episodes={episodes_completed})"
+            )
+        return episodes_completed
 
     # ---------------------------------------------------------------------- #
     # Diagnostics                                                              #

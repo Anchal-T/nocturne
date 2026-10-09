@@ -28,12 +28,10 @@ class ValueNorm(nn.Module):
         self.per_element_update = per_element_update
         self.tpdv = dict(dtype=torch.float32, device=device)
 
-        self.running_mean = nn.Parameter(torch.zeros(input_shape),
-                                         requires_grad=False).to(**self.tpdv)
-        self.running_mean_sq = nn.Parameter(
-            torch.zeros(input_shape), requires_grad=False).to(**self.tpdv)
-        self.debiasing_term = nn.Parameter(torch.tensor(0.0),
-                                           requires_grad=False).to(**self.tpdv)
+        self.register_buffer("running_mean", torch.zeros(input_shape))
+        self.register_buffer("running_mean_sq", torch.zeros(input_shape))
+        self.register_buffer("debiasing_term", torch.tensor(0.0))
+        self.to(device)
 
         self.reset_parameters()
 

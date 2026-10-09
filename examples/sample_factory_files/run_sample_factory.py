@@ -30,6 +30,7 @@ import sys
 import time
 
 import hydra
+import gym
 import numpy as np
 from hydra.core.hydra_config import HydraConfig
 from omegaconf import OmegaConf
@@ -43,6 +44,19 @@ from torch import nn
 from nocturne.envs.wrappers import create_env
 
 
+def _to_sample_factory_space(space):
+    """Expose legacy Gym spaces expected by Sample Factory 1.x."""
+    if space.__class__.__name__ == 'Discrete':
+        return gym.spaces.Discrete(int(space.n))
+    if space.__class__.__name__ == 'Box':
+        return gym.spaces.Box(
+            np.asarray(space.low),
+            np.asarray(space.high),
+            dtype=space.dtype,
+        )
+    return space
+
+
 class SampleFactoryEnv():
     """Wrapper environment that converts between our dicts and Sample Factory format."""
 
@@ -54,6 +68,10 @@ class SampleFactoryEnv():
             env (BaseEnv): Base environment that we are wrapping.
         """
         self.env = env
+        self._observation_space = _to_sample_factory_space(
+            self.env.observation_space
+        )
+        self._action_space = _to_sample_factory_space(self.env.action_space)
         self.num_agents = self.env.cfg['max_num_vehicles']
         self.agent_ids = [i for i in range(self.num_agents)]
         self.is_multiagent = True
@@ -87,7 +105,20 @@ class SampleFactoryEnv():
             if already_done:
                 continue
             agent_actions[self.agent_id_to_env_id_map[agent_id]] = action
-        next_obses, rew, done, info = self.env.step(agent_actions)
+        result = self.env.step(agent_actions)
+        if len(result) == 5:
+            next_obses, rew, terminated, truncated, info = result
+            done = {
+                key: bool(terminated.get(key, False)
+                          or truncated.get(key, False))
+                for key in set(terminated) | set(truncated)
+            }
+            done['__all__'] = bool(
+                terminated.get('__all__', False)
+                or truncated.get('__all__', False)
+            )
+        else:
+            next_obses, rew, done, info = result
         rew_n = []
         done_n = []
         info_n = []
@@ -214,6 +245,8 @@ class SampleFactoryEnv():
         self.veh_edge_collided = np.zeros(self.num_agents)
         self.already_done = [False for _ in self.agent_ids]
         next_obses = self.env.reset()
+        if isinstance(next_obses, tuple):
+            next_obses = next_obses[0]
         env_keys = sorted(list(next_obses.keys()))
         # agent ids is a list going from 0 to (num_agents - 1)
         # however, the vehicle IDs might go from 0 to anything
@@ -245,12 +278,12 @@ class SampleFactoryEnv():
     @property
     def observation_space(self):
         """See superclass."""
-        return self.env.observation_space
+        return self._observation_space
 
     @property
     def action_space(self):
         """See superclass."""
-        return self.env.action_space
+        return self._action_space
 
     def render(self, mode=None):
         """See superclass."""
@@ -408,9 +441,36 @@ def main(cfg):
         def __init__(self, adict):
             self.__dict__.update(adict)
 
+    # SF 1.123 expects this field when resuming an existing experiment. Hydra
+    # already resolved the values, so only expose the intentionally changed
+    # training horizon as a CLI override.
+    cfg_dict["cli_args"] = {
+        "train_for_env_steps": cfg_dict["train_for_env_steps"]
+    }
     cfg = Bunch(cfg_dict)
+    _warn_sample_factory_gpu_layout(cfg_dict)
     status = run_algorithm(cfg)
     return status
+
+
+def _warn_sample_factory_gpu_layout(cfg_dict):
+    """SF 1.123 has one learner; extra GPUs are actor inference only."""
+    visible = os.environ.get("CUDA_VISIBLE_DEVICES", "")
+    gpu_ids = [item.strip() for item in visible.split(",") if item.strip()]
+    n_visible = len(gpu_ids)
+    if n_visible == 0 and torch.cuda.is_available():
+        n_visible = torch.cuda.device_count()
+    print(
+        "[sample_factory] APPO 1.123 trains a single learner. "
+        "actor_worker_gpus can run policy inference on extra devices; "
+        "that is not same-policy multi-GPU SGD."
+    )
+    if n_visible > 1 and not cfg_dict.get("actor_worker_gpus"):
+        print(
+            f"[sample_factory] {n_visible} GPUs visible; the learner uses GPU 0 "
+            "of the visible set. Set algorithm.actor_worker_gpus=[1] (etc.) "
+            "only if you want actor-side inference on the remaining devices."
+        )
 
 
 if __name__ == '__main__':

@@ -8,3 +8,7 @@ boto3
 pyvirtualdisplay
 dm-tree
 tabulate
+# Ray 1.x RLlib imports these modules even when using the legacy PPO API.
+gym<0.24
+pandas
+scipy

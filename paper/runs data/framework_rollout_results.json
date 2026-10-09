@@ -1,0 +1,28 @@
+{
+  "evaluation_date": "2026-09-17",
+  "dataset": "/home/anchal/anchal/nocturne/dataset/full_valid/formatted_json_v2_no_tl_valid",
+  "episode_horizon_steps": 80,
+  "deterministic_inference": true,
+  "rllib_ppo": {
+    "checkpoint": "/home/anchal/tmp/rllib_ddp_results/PPO/PPO_nocturne_a424a_00000_0_2026-09-01_18-19-16/checkpoint_000001/checkpoint-1",
+    "num_episodes": 100,
+    "goal_rate": 0.08,
+    "collision_rate": 0.73,
+    "timeout_rate": 0.19,
+    "average_episode_length": 34.63,
+    "average_reward": 1.876000790341236,
+    "training_iteration": 1,
+    "training_timesteps": 512
+  },
+  "sample_factory_appo": {
+    "checkpoint": "/home/anchal/tmp/sf_results/sf_ddp_smoke2/checkpoint_p0/checkpoint_000000012_480.pth",
+    "num_scenarios": 100,
+    "goal_rate": 0.04,
+    "collision_rate": 0.81,
+    "vehicle_vehicle_collision_rate": 0.22,
+    "vehicle_edge_collision_rate": 0.59,
+    "ade": 3.8716152600601648,
+    "fde": 10.154330124679484,
+    "training_environment_steps": 480
+  }
+}

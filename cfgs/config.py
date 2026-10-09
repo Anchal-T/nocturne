@@ -48,5 +48,8 @@ def get_default_scenario_dict():
 def set_display_window():
     """Set a virtual display for headless machines."""
     if "DISPLAY" not in os.environ:
-        disp = Display()
-        disp.start()
+        try:
+            disp = Display()
+            disp.start()
+        except FileNotFoundError:
+            print("WARNING: Xvfb is unavailable; continuing without a display.")

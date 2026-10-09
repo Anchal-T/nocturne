@@ -9,6 +9,18 @@ import torch.nn as nn
 from algos.ppo.utils.util import get_gard_norm, huber_loss, mse_loss
 from algos.ppo.utils.valuenorm import ValueNorm
 from algos.ppo.ppo_utils.util import check
+from nocturne.utils.distributed import (
+    DistInfo,
+    all_reduce_scalar,
+    all_reduce_mean_std,
+    broadcast_module_state,
+)
+
+
+def _masked_mean(values, masks):
+    """Mean of ``values`` over active samples. Empty masks return 0, not NaN."""
+    denom = masks.sum().clamp(min=1.0)
+    return (values * masks).sum() / denom
 
 
 class R_MAPPO():
@@ -19,9 +31,10 @@ class R_MAPPO():
     :param device: (torch.device) specifies the device to run on (cpu/gpu).
     """
 
-    def __init__(self, args, policy, device=torch.device("cpu")):
+    def __init__(self, args, policy, device=torch.device("cpu"), dist_info=None):
 
         self.device = device
+        self.dist_info = dist_info or DistInfo(device=device)
         self.tpdv = dict(dtype=torch.float32, device=device)
         self.policy = policy
 
@@ -103,8 +116,7 @@ class R_MAPPO():
             value_loss = value_loss_original
 
         if self._use_value_active_masks:
-            value_loss = (value_loss *
-                          active_masks_batch).sum() / active_masks_batch.sum()
+            value_loss = _masked_mean(value_loss, active_masks_batch)
         else:
             value_loss = value_loss.mean()
 
@@ -141,9 +153,7 @@ class R_MAPPO():
             cost_value_loss = cost_value_loss_original
 
         if self._use_value_active_masks:
-            cost_value_loss = (
-                cost_value_loss * active_masks_batch
-            ).sum() / active_masks_batch.sum()
+            cost_value_loss = _masked_mean(cost_value_loss, active_masks_batch)
         else:
             cost_value_loss = cost_value_loss.mean()
 
@@ -186,9 +196,9 @@ class R_MAPPO():
                             1.0 + self.clip_param) * adv_targ
 
         if self._use_policy_active_masks:
-            policy_action_loss = (
-                -torch.sum(torch.min(surr1, surr2), dim=-1, keepdim=True) *
-                active_masks_batch).sum() / active_masks_batch.sum()
+            policy_action_loss = _masked_mean(
+                -torch.sum(torch.min(surr1, surr2), dim=-1, keepdim=True),
+                active_masks_batch)
         else:
             policy_action_loss = -torch.sum(
                 torch.min(surr1, surr2), dim=-1, keepdim=True).mean()
@@ -209,10 +219,10 @@ class R_MAPPO():
                 1.0 + self.clip_param) * cost_adv_targ
 
             if self._use_policy_active_masks:
-                lagrangian_penalty = (
+                lagrangian_penalty = _masked_mean(
                     torch.sum(torch.max(cost_surr1, cost_surr2),
-                              dim=-1, keepdim=True)
-                    * active_masks_batch).sum() / active_masks_batch.sum()
+                              dim=-1,
+                              keepdim=True), active_masks_batch)
             else:
                 lagrangian_penalty = torch.sum(
                     torch.max(cost_surr1, cost_surr2),
@@ -294,9 +304,9 @@ class R_MAPPO():
         else:
             advantages = buffer.returns[:-1] - buffer.value_preds[:-1]
         advantages_copy = advantages.copy()
-        advantages_copy[buffer.active_masks[:-1] == 0.0] = np.nan
-        mean_advantages = np.nanmean(advantages_copy)
-        std_advantages = np.nanstd(advantages_copy)
+        active = buffer.active_masks[:-1] != 0.0
+        mean_advantages, std_advantages, _ = all_reduce_mean_std(
+            advantages_copy, active, self.device)
         advantages = (advantages - mean_advantages) / (std_advantages + 1e-5)
 
         # Cost advantages (NOT normalized — the Lagrange multiplier provides
@@ -354,6 +364,11 @@ class R_MAPPO():
         for k in train_info.keys():
             train_info[k] /= num_updates
 
+        if self._use_valuenorm:
+            broadcast_module_state(self.value_normalizer, src=0)
+        if self.use_lagrangian:
+            broadcast_module_state(self.cost_value_normalizer, src=0)
+
         return train_info
 
     def update_lagrangian(self, mean_episode_cost):
@@ -369,6 +384,12 @@ class R_MAPPO():
                       * (mean_episode_cost - self.cost_limit))
         self.lagrangian_multiplier = float(
             np.clip(new_lambda, 0.0, self.lambda_max))
+        if self.dist_info.is_distributed:
+            self.lagrangian_multiplier = all_reduce_scalar(
+                self.lagrangian_multiplier,
+                self.device,
+                op="mean",
+            )
         return self.lagrangian_multiplier
 
     def lagrangian_state_dict(self):
@@ -387,8 +408,11 @@ class R_MAPPO():
         if 'lagrangian_multiplier' in state:
             self.lagrangian_multiplier = float(state['lagrangian_multiplier'])
         if 'cost_value_normalizer' in state:
-            self.cost_value_normalizer.load_state_dict(
-                state['cost_value_normalizer'])
+            try:
+                self.cost_value_normalizer.load_state_dict(
+                    state['cost_value_normalizer'], strict=False)
+            except (RuntimeError, ValueError, TypeError):
+                pass
 
     def prep_training(self):
         self.policy.actor.train()

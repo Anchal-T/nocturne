@@ -22,6 +22,16 @@ from cfgs.config import set_display_window
 from examples.drl_collision_avoidance.collision_avoidance_env import CollisionAvoidanceEnv
 from examples.drl_collision_avoidance.dqn_modules.q_network import QNetwork
 from examples.drl_collision_avoidance.scenario_utils import load_config
+from nocturne.utils.distributed import (
+    all_reduce_scalar,
+    cleanup_distributed,
+    dummy_loss,
+    init_distributed,
+    rank_offset_seed,
+    reduce_metrics,
+    unwrap_module,
+    wrap_ddp,
+)
 
 
 def discretize_expert_action(accel, steer, action_table):
@@ -36,7 +46,7 @@ def discretize_expert_action(accel, steer, action_table):
     return best_idx
 
 
-def collect_data(cfg, num_episodes):
+def collect_data(cfg, num_episodes, dist_rank=0):
     """Run scenarios with continuous expert actions, collect discrete labels."""
     env = CollisionAvoidanceEnv(cfg)
     action_table = env.action_table
@@ -79,7 +89,10 @@ def collect_data(cfg, num_episodes):
                 break
 
         if (ep + 1) % 500 == 0:
-            print(f'  Collected {ep + 1}/{num_episodes} episodes, {len(observations)} samples')
+            print(
+                f'  [rank {dist_rank}] Collected {ep + 1}/{num_episodes} '
+                f'episodes, {len(observations)} samples'
+            )
 
     return np.array(observations, dtype=np.float32), np.array(actions, dtype=np.int64)
 
@@ -99,32 +112,49 @@ def step_continuous_action(env, accel, steer):
 
 def train_bc(observations, actions, obs_dim, n_actions, grid_size, grid_channels,
              grid_rows, grid_cols, hidden_layers, mlp_depth, epochs, batch_size,
-             lr, save_path):
+             lr, save_path, dist_info=None):
     """Train BC classifier."""
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    from nocturne.utils.distributed import DistInfo
+    dist_info = dist_info or DistInfo()
+    device = dist_info.device
 
-    # Same architecture as DDQN Q-network
-    model = QNetwork(
-        obs_dim=obs_dim, n_actions=n_actions, grid_size=grid_size,
-        hidden_layers=hidden_layers,
-        grid_channels=grid_channels, grid_rows=grid_rows, grid_cols=grid_cols,
-        dueling=False, noisy=False, mlp_depth=mlp_depth,
-    ).to(device)
+    model = wrap_ddp(
+        QNetwork(
+            obs_dim=obs_dim, n_actions=n_actions, grid_size=grid_size,
+            hidden_layers=hidden_layers,
+            grid_channels=grid_channels, grid_rows=grid_rows, grid_cols=grid_cols,
+            dueling=False, noisy=False, mlp_depth=mlp_depth,
+        ).to(device),
+        dist_info,
+    )
 
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     dataset_size = len(observations)
+    n_batches = dataset_size // batch_size
+    n_batches = int(all_reduce_scalar(float(n_batches), device, op="min"))
     indices = np.arange(dataset_size)
 
-    print(f'\nTraining BC: {dataset_size} samples, {epochs} epochs, device={device}')
-    print(f'  Model params: {sum(p.numel() for p in model.parameters()):,}')
+    if dist_info.is_rank0:
+        print(
+            f'\nTraining BC: local {dataset_size} samples, {epochs} epochs, '
+            f'{n_batches} synced batches/epoch, device={device}'
+        )
+        print(f'  Model params: {sum(p.numel() for p in model.parameters()):,}')
 
     for epoch in range(epochs):
         np.random.shuffle(indices)
         total_loss = 0.0
         correct = 0
-        n_batches = 0
+        seen = 0
 
-        for start in range(0, dataset_size, batch_size):
+        for batch_i in range(max(n_batches, 1)):
+            if n_batches < 1 or dataset_size < batch_size:
+                loss = dummy_loss(model)
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
+                continue
+            start = batch_i * batch_size
             batch_idx = indices[start:start + batch_size]
             obs_batch = torch.FloatTensor(observations[batch_idx]).to(device)
             act_batch = torch.LongTensor(actions[batch_idx]).to(device)
@@ -138,35 +168,46 @@ def train_bc(observations, actions, obs_dim, n_actions, grid_size, grid_channels
 
             total_loss += loss.item()
             correct += (logits.argmax(dim=1) == act_batch).sum().item()
-            n_batches += 1
+            seen += len(batch_idx)
 
-        acc = correct / dataset_size
-        avg_loss = total_loss / n_batches
-        if (epoch + 1) % 5 == 0 or epoch == 0:
-            print(f'  Epoch {epoch + 1:3d}/{epochs} | loss={avg_loss:.4f} | acc={acc:.3f}')
+        if n_batches < 1:
+            acc = 0.0
+            avg_loss = 0.0
+        else:
+            acc = correct / max(seen, 1)
+            avg_loss = total_loss / n_batches
+        reduced = reduce_metrics(
+            {"loss": avg_loss, "acc": acc}, device)
+        if dist_info.is_rank0 and ((epoch + 1) % 5 == 0 or epoch == 0):
+            print(
+                f'  Epoch {epoch + 1:3d}/{epochs} | '
+                f'loss={reduced["loss"]:.4f} | acc={reduced["acc"]:.3f}'
+            )
 
-    os.makedirs(os.path.dirname(save_path) or '.', exist_ok=True)
-    state_dict = model.state_dict()
-    torch.save({
-        'online_net': state_dict,
-        'target_net': state_dict,
-        'optimizer': optimizer.state_dict(),
-        'train_steps': epochs,
-        'epsilon': 0.0,
-        'obs_dim': obs_dim,
-        'n_actions': n_actions,
-        'hidden_layers': model.hidden_layers,
-        'grid_size': grid_size,
-        'grid_channels': grid_channels,
-        'grid_rows': grid_rows,
-        'grid_cols': grid_cols,
-        'dueling': False,
-        'noisy': False,
-        'mlp_depth': mlp_depth,
-        'use_muon': False,
-        'bc_model': True,
-    }, save_path)
-    print(f'\nSaved BC model to {save_path}')
+    if dist_info.is_rank0:
+        os.makedirs(os.path.dirname(save_path) or '.', exist_ok=True)
+        state_dict = unwrap_module(model).state_dict()
+        torch.save({
+            'online_net': state_dict,
+            'target_net': state_dict,
+            'optimizer': optimizer.state_dict(),
+            'train_steps': epochs,
+            'epsilon': 0.0,
+            'obs_dim': obs_dim,
+            'n_actions': n_actions,
+            'hidden_layers': unwrap_module(model).hidden_layers,
+            'grid_size': grid_size,
+            'grid_channels': grid_channels,
+            'grid_rows': grid_rows,
+            'grid_cols': grid_cols,
+            'dueling': False,
+            'noisy': False,
+            'mlp_depth': mlp_depth,
+            'use_muon': False,
+            'bc_model': True,
+            'world_size': dist_info.world_size,
+        }, save_path)
+        print(f'\nSaved BC model to {save_path}')
 
 
 def main():
@@ -181,28 +222,44 @@ def main():
     parser.add_argument('--save_path', type=str, default='checkpoints/bc/bc_final.pth')
     args = parser.parse_args()
 
-    set_display_window()
-    cfg = load_config(scenario_path=args.scenario_path, scenario_split=args.scenario_split,
-                      num_files=args.num_files)
+    dist_info = init_distributed()
+    try:
+        set_display_window()
+        cfg = load_config(scenario_path=args.scenario_path, scenario_split=args.scenario_split,
+                          num_files=args.num_files)
+        cfg['seed'] = rank_offset_seed(int(cfg.get('seed', 42)), dist_info.rank)
 
-    print('Collecting expert data...')
-    observations, actions = collect_data(cfg, args.num_episodes)
-    print(f'Collected {len(observations)} samples')
-    if len(observations) == 0:
-        raise RuntimeError('No BC samples collected; check scenario validity and expert actions.')
+        if dist_info.is_rank0:
+            print('Collecting expert data...')
+        observations, actions = collect_data(
+            cfg, args.num_episodes, dist_rank=dist_info.rank)
+        print(f'[rank {dist_info.rank}] Collected {len(observations)} samples')
+        local_n = len(observations)
+        global_n = all_reduce_scalar(float(local_n), dist_info.device, op="sum")
+        if global_n < 1:
+            raise RuntimeError(
+                'No BC samples collected; check scenario validity and expert actions.')
 
-    grid_cfg = cfg['occupancy_grid']
-    grid_channels = 3
-    grid_rows = int(grid_cfg['rows'])
-    grid_cols = int(grid_cfg['cols'])
-    grid_size = grid_channels * grid_rows * grid_cols
-    obs_dim = observations.shape[1]
-    n_actions = len(CollisionAvoidanceEnv(cfg).action_table)
+        if local_n == 0:
+            observations = np.zeros((1, 1), dtype=np.float32)
+            actions = np.zeros((1,), dtype=np.int64)
 
-    hidden_layers = list(cfg['drl']['hidden_layers'])
-    train_bc(observations, actions, obs_dim, n_actions, grid_size, grid_channels,
-             grid_rows, grid_cols, hidden_layers, int(cfg['drl']['mlp_depth']),
-             args.epochs, args.batch_size, args.lr, args.save_path)
+        grid_cfg = cfg['occupancy_grid']
+        grid_channels = 3
+        grid_rows = int(grid_cfg['rows'])
+        grid_cols = int(grid_cfg['cols'])
+        grid_size = grid_channels * grid_rows * grid_cols
+        obs_dim = int(observations.shape[1]) if local_n > 0 else 0
+        obs_dim = int(all_reduce_scalar(float(obs_dim), dist_info.device, op="max"))
+        n_actions = len(CollisionAvoidanceEnv(cfg).action_table)
+
+        hidden_layers = list(cfg['drl']['hidden_layers'])
+        train_bc(observations, actions, obs_dim, n_actions, grid_size, grid_channels,
+                 grid_rows, grid_cols, hidden_layers, int(cfg['drl']['mlp_depth']),
+                 args.epochs, args.batch_size, args.lr, args.save_path,
+                 dist_info=dist_info)
+    finally:
+        cleanup_distributed()
 
 
 if __name__ == '__main__':

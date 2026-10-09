@@ -20,7 +20,7 @@ The goal for a sample (t → t') is computed in the ego frame at time t:
 
 from __future__ import annotations
 
-from collections import deque
+import math
 from typing import Dict, List, Optional
 
 import numpy as np
@@ -53,9 +53,12 @@ class _Episode:
             ego_info: Ego vehicle info [ego_x, ego_y, cos_heading, sin_heading].
         """
         assert not self._finalised, "Cannot add to a finalised episode."
-        self.states.append(state.astype(np.float32, copy=False))
-        self.actions.append(action.astype(np.float32, copy=False))
-        self.ego_infos.append(ego_info.astype(np.float32, copy=False))
+        self.states.append(np.array(state, dtype=np.float32, copy=True))
+        self.actions.append(np.array(action, dtype=np.float32, copy=True))
+        # Must copy: callers often pass a row view into a persistent ego buffer.
+        # Without a copy, every timestep aliases the same memory and HER goals
+        # collapse to 0 (InfoNCE stuck at ln(B)).
+        self.ego_infos.append(np.array(ego_info, dtype=np.float32, copy=True))
 
     def finalise(self) -> None:
         """Convert lists to contiguous arrays for efficient indexing."""
@@ -103,8 +106,11 @@ class HERReplayBuffer:
         self.gamma = float(gamma)
         self.min_ep_len = int(min_ep_len)
 
-        # Completed episodes stored as a ring buffer via a bounded deque.
-        self._episodes: deque[_Episode] = deque(maxlen=int(max_episodes))
+        # List ring buffer: O(1) random access. A deque would make every
+        # sample O(buffer size) because deque[i] is linear in i.
+        self._max_episodes = int(max_episodes)
+        self._episodes: List[_Episode] = []
+        self._write = 0
         # Running total of stored transition steps (approximate after wrap).
         self._total_steps: int = 0
 
@@ -141,7 +147,11 @@ class HERReplayBuffer:
             ep.finalise()
             if len(ep) >= self.min_ep_len:
                 self._total_steps += len(ep)
-                self._episodes.append(ep)
+                if len(self._episodes) < self._max_episodes:
+                    self._episodes.append(ep)
+                else:
+                    self._episodes[self._write] = ep
+                    self._write = (self._write + 1) % self._max_episodes
             # Reset active episode for this env regardless of length.
             self._active[env_id] = _Episode()
 
@@ -192,33 +202,37 @@ class HERReplayBuffer:
             ``'goal'`` (B, goal_dim), all float32; or ``None`` if the buffer
             contains no completed episodes.
         """
-        valid_episodes = [ep for ep in self._episodes if len(ep) >= 2]
-        if not valid_episodes:
+        num_eps = len(self._episodes)
+        if num_eps == 0:
             return None
 
         batch_size = int(batch_size)
-        num_eps = len(valid_episodes)
+        obs_out = np.empty((batch_size, self.state_dim), dtype=np.float32)
+        act_out = np.empty((batch_size, self.action_dim), dtype=np.float32)
+        goal_out = np.empty((batch_size, self.goal_dim), dtype=np.float32)
+        log_gamma = math.log(self.gamma) if 0.0 < self.gamma < 1.0 else None
 
-        obs_out = np.zeros((batch_size, self.state_dim), dtype=np.float32)
-        act_out = np.zeros((batch_size, self.action_dim), dtype=np.float32)
-        goal_out = np.zeros((batch_size, self.goal_dim), dtype=np.float32)
-
-        # Pre-sample valid episode indices in one vectorised call.
         ep_indices = np.random.randint(0, num_eps, size=batch_size)
-
         for i, ep_idx in enumerate(ep_indices):
-            ep = valid_episodes[ep_idx]
+            ep = self._episodes[int(ep_idx)]
             ep_len = len(ep)
-
-            # Anchor timestep t (must have at least one future step).
-            t = np.random.randint(0, ep_len - 1)
-
-            # Future timestep t' with geometric-γ weights.
-            t_prime = self._sample_future(t, ep_len)
-
+            if ep_len < 2:
+                obs_out[i] = ep.states[-1]
+                act_out[i] = ep.actions[-1]
+                goal_out[i] = 0.0
+                continue
+            t = int(np.random.randint(0, ep_len - 1))
+            t_prime = self._sample_future(t, ep_len, log_gamma)
             obs_out[i] = ep.states[t]
             act_out[i] = ep.actions[t]
-            goal_out[i] = self._compute_goal(ep.ego_infos, t, t_prime)
+            ego_t = ep.ego_infos[t]
+            ego_p = ep.ego_infos[t_prime]
+            dx = float(ego_p[0]) - float(ego_t[0])
+            dy = float(ego_p[1]) - float(ego_t[1])
+            cos_h = float(ego_t[2])
+            sin_h = float(ego_t[3])
+            goal_out[i, 0] = (dx * cos_h + dy * sin_h) / DIST_NORM
+            goal_out[i, 1] = (-dx * sin_h + dy * cos_h) / DIST_NORM
 
         return {"obs": obs_out, "action": act_out, "goal": goal_out}
 
@@ -226,31 +240,30 @@ class HERReplayBuffer:
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _sample_future(self, t: int, ep_len: int) -> int:
+    def _sample_future(
+        self, t: int, ep_len: int, log_gamma: Optional[float] = None
+    ) -> int:
         """Sample a future index t' ∈ [t+1, ep_len−1] with γ^(offset) weights.
 
-        ``offset = t' − t − 1`` so offset=0 (the very next step) has weight 1,
-        offset=1 has weight γ, etc.  This mirrors the geometric discounting
-        used by the CRL critic and keeps HER goals temporally consistent.
-
-        Args:
-            t:      Anchor timestep (0-based).
-            ep_len: Total episode length (number of stored steps).
-
-        Returns:
-            Sampled future timestep index t'.
+        Inverse-CDF of the truncated geometric γ^k / Σ γ^j, same distribution
+        as explicitly building the probability vector.
         """
-        num_future = ep_len - t - 1  # number of valid future steps
-
-        if num_future == 1:
+        num_future = ep_len - t - 1
+        if num_future <= 1:
             return t + 1
-
-        offsets = np.arange(num_future, dtype=np.float64)  # [0, 1, …, num_future−1]
-        probs = self.gamma**offsets
-        probs /= probs.sum()
-
-        chosen_offset = int(np.random.choice(num_future, p=probs))
-        return t + 1 + chosen_offset
+        if log_gamma is None:
+            if not (0.0 < self.gamma < 1.0):
+                return t + 1 + int(np.random.randint(0, num_future))
+            log_gamma = math.log(self.gamma)
+        u = float(np.random.random())
+        g_n = self.gamma ** num_future
+        inner = max(1.0 - u * (1.0 - g_n), 1e-12)
+        k = int(math.log(inner) / log_gamma)
+        if k < 0:
+            k = 0
+        elif k >= num_future:
+            k = num_future - 1
+        return t + 1 + k
 
     @staticmethod
     def _compute_goal(

@@ -6,7 +6,8 @@
 % official conference style file (e.g. \usepackage{iclr2026_conference} or
 % \usepackage{icml2026}) -- the section structure is compatible with both.
 %
-% Completed draft grounded in DDQN held-out eval + PPO/R-MAPPO training windows.
+% Interim checkpoint-audit results are included below. Planned experiments
+% remain marked with \results{...} so they are easy to find.
 % =========================================================================
 \documentclass{article}
 
@@ -28,6 +29,9 @@
 \usepackage[colorlinks=true,linkcolor=blue,citecolor=blue,urlcolor=blue]{hyperref}
 \usepackage[numbers,sort&compress]{natbib}
 
+% --- Placeholder macro for results to be filled in later -----------------
+\newcommand{\results}[1]{\textcolor{red}{[\textbf{RESULT}: #1]}}
+
 % --- Notation helpers -----------------------------------------------------
 \newcommand{\E}{\mathbb{E}}
 \newcommand{\R}{\mathbb{R}}
@@ -38,7 +42,8 @@ in Partially Observable Real-World Driving Scenarios}}
 
 \author{%
   Anonymous Authors\\
-  Anonymous Institution
+  Anonymous Institution\\
+  \texttt{anonymous@example.com}
 }
 
 \date{}
@@ -48,34 +53,34 @@ in Partially Observable Real-World Driving Scenarios}}
 
 % =========================================================================
 \begin{abstract}
-The novelty of this work is collision avoidance learned on a simulator that
-replays a real-world driving dataset, under a ray-cast sensor model, with a
-risk-aware reward. The agent has to choose an action when the hazard is not
-fully visible: a vehicle can sit behind a truck, inside the field of view,
-and still be absent from the observation. Most
+Some of the hardest collisions to avoid are those a driver cannot yet see
+coming: vehicles hidden behind blockers, pedestrians emerging from occluded
+crossings, conflicts developing outside a limited field of view. Most
 reinforcement learning (RL) results for driving assume the opposite --
 fully observed, synthetic traffic. We study risk-aware collision avoidance
 under partial observability, training deep RL agents on real-world driving
 scenarios from the Waymo Open Motion Dataset replayed in the Nocturne
 simulator, whose ray-cast visibility model restricts perception to what a
-physical sensor could see: hidden vehicles remain hidden. The observation
-has two levels the policy may use, visible state and sensor-derived
-occlusion geometry. Hidden state and future trajectories are withheld from
-the policy. Our agent
+physical sensor could see: hidden vehicles remain hidden. The novelty is this
+setting: a risk-aware agent must act on real driving logs while a hazard may
+lie outside its view. Our agent
 observes an ego-centric occupancy grid and analytic time-to-zero (TTZ)
 conflict features, both filtered to visible objects, together with
 \emph{occlusion-risk summaries} that expose how much of the view cone is
 blocked and by what; a TTZ-barrier shaped reward penalizes risky closing
 behavior before a collision becomes unavoidable. A double dueling DQN is
 trained at scale with an asynchronous actor--learner architecture that runs
-unchanged from a single workstation to a Ray cluster. We additionally compare late-training dynamics for PPO and risk-aware
-R-MAPPO on the same occlusion-aware setup at episodes 400k--430k. In the
-completed DDQN held-out evaluation on 1{,}500 episodes, the agent reaches the
-goal in 95.33\% of episodes (95\% Wilson CI: 94.15--96.29\%) with a 5.13\%
-collision rate (95\% Wilson CI: 4.13--6.37\%). On the 1{,}089 episodes with
-non-degenerate trajectory traces, mean ADE is $2.24 \pm 2.13$\,m, mean FDE
-is $6.40 \pm 6.20$\,m, and mean absolute jerk is
-$10.27 \pm 4.08$\,m/s$^3$.
+unchanged from a single workstation to a Ray cluster. Beyond aggregate
+rates, we specify a safety--efficiency trade-off analysis and stratification
+protocol. An interim audit evaluates every checkpoint family currently
+available: a CRL checkpoint reaches 47.73\% of goals with 16.87\%
+collisions on the mini validation split, while the epoch-100 Waymo
+imitation checkpoint reaches 23.93\% of goals with 40.82\% collisions on
+the full-validation directory. RLlib PPO and Sample Factory APPO smoke
+checkpoints reach 8.00\% and 4.00\% of goals, respectively, on 100
+full-directory rollouts. These are descriptive checkpoint results rather than a
+final apples-to-apples benchmark because training maturity, split, and
+evaluator aggregation differ across families.
 \end{abstract}
 
 % =========================================================================
@@ -120,29 +125,28 @@ and characterize it directly.
 
 Our contributions are as follows:
 \begin{itemize}
-  \item \textbf{Collision avoidance on replayed real logs, under a sensor
-  model.} We train on Waymo scenarios in Nocturne. The observation has three
-  levels of information, and the policy is restricted to the first two.
-  Level~1 is the visible state: an ego-centric occupancy grid and analytic
-  time-to-zero (TTZ) features over objects the ray cast returns. Level~2 is
-  sensor-derived uncertainty: the occluded fraction of the view cone, the
-  distance to the nearest blocker, blocker density, and occlusion pressure.
-  Level~3 is hidden ground truth, including objects behind blockers and the
-  logged future trajectories. Level~3 is a privileged training reward and an
-  evaluation label. The policy input is levels 1 and 2
-  (Section~\ref{sec:observation}).
-  \item \textbf{Risk-aware reward shaping.} We combine sparse terminal
-  signals with a TTZ-barrier penalty that activates only when a conflict is
-  imminent, providing a dense safety gradient before a collision becomes
-  unavoidable (Section~\ref{sec:reward}). The collision penalty $R_c$ remains
-  an explicit safety--efficiency knob; we report one operating point and leave
-  a full Pareto sweep for follow-on work.
-  \item \textbf{Stratified, statistically grounded evaluation.} We evaluate a
-  trained DDQN checkpoint on 1{,}500 held-out episodes with Wilson intervals
-  for binary rates, and stratify failures by vehicle TTZ imminence and
-  episode length, alongside ADE/FDE and jerk-based smoothness
-  (Sections~\ref{sec:setup}--\ref{sec:results}). We further report late
-  training returns for PPO and R-MAPPO as on-policy references.
+  \item \textbf{Occlusion-aware collision avoidance from real logs.} We
+  formulate collision avoidance in replayed Waymo scenarios under a
+  ray-cast visibility model, and design an observation that makes occlusion
+  risk explicit: an ego-centric, class-weighted occupancy grid and analytic
+  time-to-zero (TTZ) conflict features -- both filtered to visible objects
+  only -- plus dedicated \emph{occlusion-risk summaries} (occluded view
+  fraction, nearest-blocker proximity, blocker density, and occlusion
+  pressure) that allow the policy to modulate its behavior in response to
+  unseen hazards (Section~\ref{sec:observation}).
+  \item \textbf{Risk-aware reward shaping and its trade-off analysis.} We
+  combine sparse terminal signals with a TTZ-barrier penalty that activates
+  only when a conflict is imminent, providing a dense safety gradient before
+  a collision becomes unavoidable (Section~\ref{sec:reward}). We define a
+  collision-penalty sweep for tracing the induced Pareto frontier between
+  goal-reaching rate and collision rate (Section~\ref{sec:tradeoff}), making
+  the safety--efficiency compromise an explicit, tunable design parameter
+  rather than an implicit artifact.
+  \item \textbf{A reproducible evaluation protocol.} We define safety,
+  task-success, trajectory-quality, and comfort metrics, report evaluation
+  sample sizes and Wilson intervals where episode-level counts are
+  available, and record checkpoint provenance, split, and evaluator
+  aggregation for every located model family (Section~\ref{sec:setup}).
   \item \textbf{A scalable training system.} A modern value-based learner
   (double dueling DQN with noisy exploration, $n$-step returns, prioritized
   replay, and the Muon optimizer~\citep{jordan2024muon}) is trained with an
@@ -152,21 +156,24 @@ Our contributions are as follows:
   (Sections~\ref{sec:agent}--\ref{sec:system}).
 \end{itemize}
 
-On a held-out split of Waymo scenarios, the completed single-checkpoint
-evaluation covers 1{,}500 episodes and yields a 95.33\% goal rate and 5.13\%
-collision rate. The trajectory subset with valid multi-step traces yields
-$2.24 \pm 2.13$\,m ADE, $6.40 \pm 6.20$\,m FDE, and
-$10.27 \pm 4.08$\,m/s$^3$ mean absolute jerk. Collision mass concentrates in
-low-TTZ episodes (15.3\% collision when vehicle TTZ $<1$\,s versus 0\% when
-$\mathrm{TTZ}\ge 3$\,s).
+The current evaluation is an interim checkpoint audit rather than a
+controlled comparison. It includes mini-split evaluations for BC, DDQN,
+CRL, and R-MAPPO, full-directory evaluations for Waymo BC, RLlib PPO, and
+Sample Factory APPO, and an archived DDQN result whose checkpoint is no
+longer available locally. Because the checkpoints differ in training
+maturity and the framework evaluators use different aggregation semantics,
+the results establish provenance and failure modes but do not support a
+claim of method superiority. The reward-penalty sweep, matched multi-seed
+comparison, density study, and occlusion ablation remain open experiments.
 
 The remainder of the paper is organized as follows. Section~\ref{sec:related}
 positions our work relative to safe RL, occlusion-aware planning, and
 scalable RL systems. Section~\ref{sec:problem} formalizes the task as a
 POMDP, and Section~\ref{sec:method} details the observation, reward, agent,
-and training system. Section~\ref{sec:setup} defines the metrics and
-statistical protocol; Section~\ref{sec:results} presents the held-out DDQN
-evaluation, PPO/R-MAPPO training references, and stratified analyses.
+and training system. Section~\ref{sec:setup} defines the metrics,
+statistical protocol, and baselines; Section~\ref{sec:results} presents the
+main comparison, the trade-off and stratified analyses, ablations, and
+interpretability probes.
 
 % =========================================================================
 \section{Related Work}
@@ -200,8 +207,8 @@ differentiable-in-effect analogue of a control-barrier condition: it applies
 increasing pressure as the most imminent conflict approaches, rather than
 penalizing only terminal collisions. Unlike hard-constraint methods we do
 not guarantee constraint satisfaction; instead we expose the
-safety--efficiency trade-off explicitly by reporting the measured operating
-point under a fixed penalty coefficient, following the position that in
+safety--efficiency trade-off explicitly by sweeping the penalty coefficient
+and reporting the resulting Pareto frontier, following the position that in
 learned driving stacks the operating point should be a deliberate,
 measurable choice.
 
@@ -220,9 +227,8 @@ constructed worst cases.
 Behavior cloning remains a strong supervised baseline for
 driving~\citep{bansal2018chauffeurnet, codevilla2019exploring}, but suffers
 compounding errors under distribution shift~\citep{ross2011reduction} --
-exactly the regime of near-collision states. A matched behavior-cloning evaluation uses the same success definition as
-the RL agents: a low collision rate together with a high timeout rate means
-the cloned policy stopped instead of reaching the goal.
+exactly the regime of near-collision states. We include a BC baseline
+trained on the same observations to quantify this gap.
 
 \paragraph{Value-based deep RL.}
 Our agent composes established components: double
@@ -265,24 +271,31 @@ outside the ego's view cone or occluded behind a nearer object, and then
 encodes the surviving objects into the feature vector
 $o \in \Omega \subset \R^{613}$ described in Section~\ref{sec:observation}.
 Partial observability in our setting is therefore physical (sensor-like
-occlusion), not an artifact of feature compression. We separate that
-information into three levels. Level~1 is the kinematic state of objects
-inside the ray-cast set. Level~2 is geometry computed only from those
-visible returns: how much of the view cone they cover, and how close the
-nearest cover is. Level~3 is the state the ray cast removed, together with
-the future positions stored in the driving log. The learned policy is a
-function of levels 1 and 2. Level~3 enters the TTZ reward when that reward
-is taken from ground truth, and it supplies evaluation labels such as
-whether the nearest object at contact was hidden one second earlier.
+occlusion), not an artifact of feature compression.
+
+We separate the information available to the agent into three levels.
+Level~1 is the visible state: the kinematic state of objects inside the
+ray-cast set, as encoded by the occupancy grid and the TTZ features.
+Level~2 is sensor-derived uncertainty: geometry computed only from those
+visible returns, namely how much of the view cone they cover and how close
+the nearest cover is (Section~\ref{sec:observation}). Level~3 is hidden
+ground truth: objects removed by the ray cast, and the logged future
+trajectories. The policy is a function of Levels~1 and~2 only. The method
+is designed for hazards that are visible or signaled by visible blockers;
+it does not infer hidden vehicles. Level~3 is used in two places outside
+the policy input: as an evaluation label, for example whether the nearest
+object at a collision was hidden one second earlier, and, in the planned
+controlled comparison (Section~\ref{sec:setup}), as a privileged training
+reward signal.
 
 The ego receives the
 goal position $g \in \R^2$ recorded at the end of the human trajectory and
 must reach it within a tolerance while avoiding collisions with other
-objects and road edges. An episode is a success only when the goal is
-reached and no collision occurs. Termination on the horizon without either
-event is a timeout: the agent neither crashed nor completed the drive.
-Episodes terminate on goal achievement, collision,
-or a horizon of $T_{\max} = 80$ steps (8 seconds).
+objects and road edges. Episodes terminate on goal achievement, collision,
+or a horizon of $T_{\max} = 80$ steps (8 seconds). A success is an episode
+that reaches the goal with no collision. A timeout is an episode that reaches
+the horizon with neither a goal nor a collision. A timeout is a failure, not
+a safe outcome.
 
 The action space is a discrete product of throttle and steering levels,
 $\mathcal{A} = \{-1.0, 0.0, 2.0\} \times \{-0.7, -0.2, 0.0, 0.2, 0.7\}$,
@@ -335,67 +348,68 @@ compute the scalar closing speed along the line of sight,
 where $\text{TTZ}_{\infty}$ is a finite sentinel (999\,s) and contact
 distances below $0.5$\,m map to $\text{TTZ} = 0$. The observation exposes
 the minimum TTZ over vehicles, the minimum over pedestrians and cyclists
-(both clipped to $20$\,s), and their difference. This is the line-of-sight
-range divided by the line-of-sight range rate, the same construction as
-time-to-collision along the bearing to each object~\citep{minderhoud2001extended}.
-We use it because it is analytic, cheap to compute for every visible object,
-and separates vehicles from vulnerable road users. It assumes constant
-velocity along the current line of sight, so a vehicle that will turn across
-the ego later can still have a large TTZ. The barrier threshold $\tau = 3$\,s
-is the onset used in the reward below. The controlled study repeats training
-at $\tau \in \{1, 2, 4, 5\}$\,s so the operating point is compared with
-nearby values rather than fixed by convention alone.
+(both clipped to $20$\,s), and their difference -- a compact, analytic
+summary of the most imminent conflict of each class.
+
+\paragraph{Why time-to-zero.}
+TTZ is the line-of-sight range divided by the line-of-sight closing speed, a
+line-of-sight variant of time-to-collision in the sense of extended
+time-to-collision measures~\citep{minderhoud2001extended}. We use it because
+it is analytic, cheap to evaluate for every object at every step, and it
+separates vehicles from vulnerable road users. It assumes constant velocity
+along the current bearing, so a vehicle that turns across the ego later can
+still show a large TTZ. The barrier threshold $\tau = 3$\,s is the onset used
+in the reward (Section~\ref{sec:reward}). The planned controlled comparison
+also varies $\tau \in \{1, 2, 4, 5\}$\,s, so the operating point is compared
+with nearby values rather than fixed by convention alone.
 
 \paragraph{Occlusion-risk features.}
-The source of the visibility set is one call per step to Nocturne's C++
-ray caster, \texttt{visible\_objects\_state}, with view distance
-$\max(40, 10) + 5 = 45$\,m and view angle $\pi$ (a $180^\circ$ forward
-cone). An object is returned only when a ray reaches it. A truck between
-the ego and another vehicle removes that vehicle from the set, so the
-occupancy grid and the observed TTZ contain the truck and omit the vehicle
-behind it.
+A single call per step to Nocturne's C++ ray-casting engine returns the set
+of visible objects within the view cone. This visibility set serves two
+roles. First, it filters the occupancy grid and TTZ features above, so the
+agent only perceives objects a real sensor could see. Second, from the
+angular intervals subtended by visible blockers we compute four summary
+statistics that quantify what the agent \emph{cannot} see: the occluded
+fraction of the view cone, the normalized distance to the nearest blocker,
+blocker density, and an ``occlusion pressure'' term (occluded fraction
+weighted by blocker proximity). These features are part of the full model;
+the \emph{no-occlusion} ablation in Section~\ref{sec:results} removes the
+four summary statistics while keeping the visibility filtering, isolating
+the value of explicitly representing occlusion risk from the (fixed) effect
+of sensor-limited perception.
 
-Each returned object $j$ has range $r_j$, azimuth $\alpha_j$, and a
-half-extent $\rho_j = \tfrac{1}{2}\sqrt{\ell_j^2 + w_j^2}$ from its length
-and width. It subtends the interval
+The full observation has dimension
+$3 \times 20 \times 10 + 4 + 2 + 3 + 4 = 613$ (609 for the no-occlusion
+ablation).
+
+The four summaries are computed from the visible returns only. The source is
+one call per step to Nocturne's \texttt{visible\_objects\_state}, with a view
+range of $\max(40, 10) + 5 = 45$\,m and a view angle of $\pi$. Each returned
+object $j$ has range $r_j$, azimuth $\alpha_j$, and half-extent
+$\rho_j = \tfrac{1}{2}\sqrt{\ell_j^2 + w_j^2}$ from its length $\ell_j$ and
+width $w_j$. It covers the angular interval
 $[\alpha_j - \arctan(\rho_j / r_j),\; \alpha_j + \arctan(\rho_j / r_j)]$,
-clipped to the cone $[-\pi/2, \pi/2]$. Let $\mathcal{U}$ be the union of
-those intervals, $B$ the number of objects with positive angular width, and
-$V$ the number of valid returns. The four features are
+clipped to the cone. With $\mathcal{U}$ the union of these intervals, $B$ the
+number of objects with positive angular width, and $V$ the number of valid
+returns,
 \begin{align}
 f_{\mathrm{frac}} &= |\mathcal{U}| / \pi, \\
-f_{\mathrm{near}} &= \min_j r_j \;/\; 45\,\mathrm{m}, \\
+f_{\mathrm{near}} &= \min_j r_j \,/\, 45\,\mathrm{m}, \\
 f_{\mathrm{den}} &= B / \max(V, 1), \\
 f_{\mathrm{press}} &= f_{\mathrm{frac}}\,(1 - f_{\mathrm{near}}).
 \end{align}
-$f_{\mathrm{frac}}$ is the fraction of the cone covered by visible bodies.
-$f_{\mathrm{near}}$ is the nearest of those bodies, scaled by the view
-range. $f_{\mathrm{den}}$ is the share of returns that actually cover a
-positive angle. $f_{\mathrm{press}}$ is large when a large angle is covered
-by something close. If no return covers a positive angle, all four features
-are 0. A truck close ahead produces a wide interval, a small
-$f_{\mathrm{near}}$, and a high $f_{\mathrm{press}}$. The car behind the
-truck is absent from all four numbers. The features describe the blockage
-the sensor can measure. They do not name the hidden car.
+A near truck produces a wide interval, a small $f_{\mathrm{near}}$, and a
+large $f_{\mathrm{press}}$. A car hidden behind the truck contributes to none
+of the four numbers. The summaries therefore describe the blockage the sensor
+measures, not the hidden vehicle. If no return covers a positive angle, all
+four features are zero.
 
-These four numbers are Level~2. The visibility filter on the grid and on
-observed TTZ is Level~1. The revised configuration sets the two switches
-independently. The archived checkpoint used a single coupled switch. Under
-that switch the C++ occupancy grid stamps every object, because that grid
-routine does not take a visibility set, while TTZ and the four summaries
-use the ray-cast set. When \texttt{visibility\_filter} is set on its own,
-the grid is stamped in Python from the ray-cast set, so hidden objects
-leave the grid as well.
-
-With the four summaries the observation has dimension
-$3 \times 20 \times 10 + 4 + 2 + 3 + 4 = 613$. Without them it has dimension
-$609$. The summaries skip the grid encoder and enter the dueling heads.
-Each head is a noisy linear map, which stores a mean matrix and a
-standard-deviation matrix, so the parameter difference is
-$2 \times 2 \times 256 \times 4 = 4096$ weights. Biases do not grow with
-the input width, and the convolutional trunk is shared. Relative to the
-rest of the network this increment is negligible; \texttt{scripts/count\_q\_parameters.py}
-prints both totals.
+\paragraph{Implementation note.} In the archived run, one switch controlled
+both the visibility filter and the four summaries. Under that switch the C++
+occupancy grid stamped every object, including hidden ones, while TTZ and the
+summaries used the visible set. The revised code controls the two effects
+separately, and the planned comparison in Section~\ref{sec:setup} uses the
+separated switches.
 
 \begin{figure*}[t]
   \centering
@@ -417,7 +431,7 @@ The per-step reward combines sparse terminal events with dense shaping:
 r_t \;=\;
 \underbrace{R_g \,\mathbb{1}[\text{goal}]}_{\text{goal bonus}}
 \;-\; \underbrace{R_c \,\mathbb{1}[\text{collision}]
-      \;+\; R_o \,\mathbb{1}[\text{road-edge collision}]}_{\text{safety penalties}}
+      \;-\; R_o \,\mathbb{1}[\text{road-edge collision}]}_{\text{safety penalties}}
 \;-\; \underbrace{c_s}_{\text{step cost}}
 \;+\; \underbrace{c_p \,(d_{t-1} - d_t)}_{\text{progress}}
 \;+\; \underbrace{c_h \Big(1 - \tfrac{|\theta_t|}{\pi}\Big)}_{\text{heading}}
@@ -427,23 +441,22 @@ where $d_t$ is the distance to goal, $\theta_t$ the heading error,
 $\text{TTZ}^{\min}_t$ the minimum TTZ over all object classes, and
 $\tau = 3$\,s the safety threshold. We use $R_g = 100$, $R_c = 100$,
 $R_o = 50$, $c_s = 0.1$, $c_p = 2.0$, $c_h = 0.3$, $c_z = 0.5$. The shaping
-terms are active only on non-terminal steps. The TTZ barrier grows linearly
-as the most imminent conflict drops below $\tau$, so the learner receives a
-safety gradient while a collision is still avoidable.
+terms are active only on non-terminal steps. The TTZ barrier is the key
+safety-shaping component: it grows linearly as the most imminent conflict
+drops below $\tau$, providing gradient signal \emph{before} a collision
+occurs rather than only at the terminal event.
 
-In the controlled comparison, $\text{TTZ}^{\min}_t$ is computed from every
-object, including objects the ray cast removed. That choice keeps the reward
-identical across arms that differ only in the observation. It is a
-privileged training signal: the penalty can respond to a hidden closer
-before the policy has seen it. The archived checkpoint used the other
-setting, in which the barrier sees only the objects that entered the
-observation. Setting $c_z = 0$ removes the barrier and leaves the terminal
-collision penalty. An 80-step timeout forgoes the goal bonus of $100$ and
-pays $0.1$ per step, and it also forgoes the progress term. Those terms are
-what penalize a policy that stops in order to avoid collisions. Success,
-timeout rate, and mean speed are therefore reported together. A low
-collision rate with a high timeout rate is a stalled policy, which we count
-as a failure.
+In the planned controlled comparison, $\text{TTZ}^{\min}_t$ can be computed
+from every object, including objects removed by the ray cast. That keeps the
+penalty identical across arms that differ only in the observation. It is a
+privileged training signal, since the penalty can respond to a hidden vehicle
+before the policy can observe it. The archived run used the visible-objects
+setting. Setting $c_z = 0$ removes the barrier and leaves the terminal
+collision penalty. Stalling is also penalized in RL training: an episode that
+reaches the horizon forgoes the goal bonus of $R_g = 100$ and accrues the step
+cost, so a policy that stops is worse than one that completes the drive. This
+is why success, timeout, and mean speed are reported beside every collision
+rate.
 
 \subsection{Agent}
 \label{sec:agent}
@@ -471,25 +484,18 @@ head layers use AdamW; the base learning rate is $3 \times 10^{-4}$ with
 $\gamma = 0.99$, batch size 256, and gradient-norm clipping at 10.
 
 \paragraph{Why double DQN, and why a discrete action space.}
-The action space has 15 elements, so a Q-network can rank them with one
-forward pass. The max operator in standard Q-learning uses the same network
-to choose the next action and to score it, which systematically
-overestimates values~\citep{van2016deep}. Overestimated values are a poor
-fit for collision avoidance: an action that looks safe only because its
-value was inflated is exactly the action we want the penalty to suppress.
-Double Q-learning selects the next action with the online network and
-evaluates it with the target network, which is the bootstrap in the target
-above. The same finite action set is what makes that split straightforward.
-A continuous actor--critic method would remove the chattering that a
-15-way discretization can introduce, and Section~\ref{sec:limitations}
-treats that as open. Every arm of the comparison below uses this same
-15-action set, so a difference in collisions is attributable to the
-observation and the TTZ term. Off-policy replay is also the practical match
-for this simulator: stepping Nocturne is the expensive part, and a replay
-buffer lets the learner reuse those transitions. The late-training windows
-in Section~\ref{sec:algo-compare} are the empirical companion. PPO stays
-high, and both risk-aware R-MAPPO runs collapse at episode 430k, while DDQN
-is the method with a finished deterministic held-out evaluation.
+The action set has 15 elements, so the Q-network scores every action in one
+forward pass. Standard Q-learning uses the same estimates to select and to
+evaluate the next action, which biases the target upward; the bias is largest
+where value estimates are noisy. In collision avoidance that bias is harmful,
+because an action that looks safe only through an inflated value is exactly
+the action the penalty should suppress. Double Q-learning selects the next
+action with the online network and evaluates it with the target network,
+which is the bootstrap in the target above~\citep{van2016deep}. A finite
+action set makes that split direct to implement. Off-policy replay also suits
+the simulator, where stepping the environment is the expensive part and each
+transition can be reused. The continuous-control alternative is discussed in
+Section~\ref{sec:limitations}.
 
 \subsection{Asynchronous Training System}
 \label{sec:system}
@@ -554,123 +560,102 @@ corrections~\citep{espeholt2018impala}.
 \label{sec:setup}
 
 \paragraph{Data.}
-Training uses the processed Waymo training directory. The held-out directory
-is partitioned by a stable hash of the filename (SHA-256 of the split seed
-and the filename, first 8 bytes interpreted as a uniform value). With
-\texttt{split\_seed}$=42$ and \texttt{val\_fraction}$=0.5$, each file lands
-in validation or test and stays there across seeds and arms. Validation is
-for checkpoint selection. Test is the split quoted in the controlled
-comparison. The archived 1{,}500-episode evaluation used the held-out
-directory without this hash partition; the artifact does not record how
-many distinct files were drawn, and that count is not inferred here.
-Each episode replays one scenario for up to 80 steps at 10\,Hz; non-ego
-road users follow their logged trajectories. Scenarios in which the ego is
-removed at goal or collision follow the standard Nocturne configuration.
+We use driving scenarios from the Waymo Open Motion
+Dataset~\citep{ettinger2021waymo} converted to Nocturne's format, split into
+train and held-out validation scenarios. The repository contains no distinct
+test split; accordingly, we call the reported split ``validation'' and do
+not label it as test data. The interim results use either the 100-file mini
+directory or the full-validation directory, as recorded per row in
+Table~\ref{tab:main}. Each episode replays one scenario for up to 80 steps at
+10\,Hz; non-ego road users follow their logged trajectories. Scenarios in
+which the ego is removed at goal or collision follow the standard Nocturne
+configuration.
 
 \paragraph{Metrics.}
-Success is the fraction of episodes that reach the goal with no collision.
-A timeout is an episode that hits the 80-step horizon with neither a goal
-nor a collision. Goal rate and collision rate are still reported, and an
-episode can carry both labels when the evaluator records both events.
-Collision type uses the simulator flag: object--object contact
-(\texttt{veh\_veh\_collision}, which covers vehicles and vulnerable road
-users, since the engine has a single object--object type) or road-edge
-contact. The partner label is the type of the nearest object within 5\,m
-when the contact is object--object.
+We report safety, task, trajectory-quality, and comfort metrics:
+(i) \emph{goal rate}: fraction of episodes in which the ego reaches its goal
+position within tolerance; (ii) \emph{collision rate}: fraction of episodes
+terminating in a collision, decomposed into vehicle--vehicle,
+vehicle--VRU, and road-edge collisions; (iii) \emph{minimum TTZ statistics}:
+distribution of the per-episode minimum time-to-zero against vehicles and
+against vulnerable road users, as a near-miss measure; (iv) \emph{average
+and final displacement error} (ADE/FDE): mean and endpoint Euclidean
+distance between the agent trajectory and the logged human trajectory over
+the episode, measuring how human-like the executed path is;
+(v) \emph{smoothness}: mean absolute longitudinal jerk
+$\overline{|\dddot{x}|}$ and steering-rate magnitude, capturing ride comfort
+and control chattering -- a known concern for discrete action spaces; and
+(vi) \emph{training throughput}: environment steps per second.
 
-Minimum TTZ is the per-episode minimum of the ground-truth time-to-zero.
-On a collision episode we also record ground-truth TTZ one second and two
-seconds before the terminal step. The anticipatory lead is the time from
-the first 1\,m/s speed drop, inside the two seconds before the minimum-TTZ
-step, until that minimum. A positive lead means the agent had already
-slowed before the closest approach. The maneuver in that same window is
-brake if the speed drops by at least 1\,m/s, lateral if any steering
-command has magnitude at least $0.2$\,rad, both, or neither.
-
-Local density is the mean number of vehicles inside 40\,m, the forward
-extent of the grid. The archived field \texttt{num\_vehicles} is the count
-of vehicles in the whole scenario file and is 50 on every archived episode,
-so it cannot support a density curve. Occlusion level is the mean of
-$f_{\mathrm{frac}}$ over the episode, binned as $[0,0.1)$, $[0.1,0.3)$,
-$[0.3,0.6)$, and $[0.6,1]$. Pressure uses the same episode mean of
-$f_{\mathrm{press}}$. A collision is labeled hidden when the nearest object
-within 5\,m was outside the ray-cast set 10 steps (1\,s) earlier.
-
-Average speed is reported next to the logged expert speed. ADE, FDE, mean
-absolute jerk, and steering-rate magnitude are unchanged. Eval-time
-robustness, applied only at test time on a frozen checkpoint, zeros the
-four occlusion features with probability $p$, adds Gaussian noise of scale
-$\sigma$ to the observation, or shrinks the view cone from $\pi$ to
-$2\pi/3$.
+\paragraph{Outcome definitions.}
+A collision is classified as vehicle, vulnerable-road-user, or road-edge from
+the simulator flags. Its partner is the nearest object within 5\,m when the
+contact is with another object. A collision is labeled hidden when the nearest
+object was absent from the ray-cast set one second earlier. Local density is
+the number of vehicles within 40\,m of the ego. It differs from the archived
+\texttt{num\_vehicles} field, which counts vehicles in the scenario file and
+equals 50 on every archived episode, so that field cannot support a density
+analysis. Occlusion severity is the episode mean of $f_{\mathrm{frac}}$. For
+each collision, the brake and lateral labels describe the two seconds before
+the closest approach. The anticipatory lead is the time from the first
+1\,m/s speed drop in that window to the closest approach. Ground-truth TTZ is
+recorded one and two seconds before each collision.
 
 \paragraph{Statistical protocol.}
-The currently completed evaluation contains 1{,}500 held-out episodes from
-one trained DDQN checkpoint (training seed 42). For binary goal and collision
-rates we report 95\% Wilson score intervals over episodes. For continuous
-trajectory metrics we report the episode-level mean $\pm$ standard
-deviation and the number of valid traces. These intervals quantify
-evaluation-episode uncertainty, not training-seed uncertainty. Consequently,
-we do not perform between-method significance tests on the present single-run
-held-out result. PPO and R-MAPPO are compared only on late training-window
-returns.
+For rows with episode-level binary labels and integer counts we report 95\%
+Wilson score intervals; these intervals quantify evaluation-sample
+uncertainty, not training-seed uncertainty. Waymo BC reports scenario-level
+aggregates, while R-MAPPO and the framework-native evaluators report
+per-agent aggregates, so their rates are not pooled with the episode-level
+rows. We do not perform between-method significance tests because the
+current checkpoints, splits, and aggregation semantics are not matched.
+Independent training seeds, a common split, and a common evaluator are
+required before making comparative claims.
 
 \paragraph{Stratified evaluation.}
-Aggregate rates hide where a policy fails. Because every evaluation episode
-reports a fixed surrounding-agent count of 50, traffic-density curves are not
-identifiable from the artifact. We instead stratify safety metrics along two
-recoverable axes: (i) \emph{episode length} (1-step; 2--10; 11--30; 31--50;
-51--80 steps), which proxies scenario duration and interaction complexity;
-and (ii) \emph{vehicle TTZ imminence} ($<1$\,s, $1$--$2$\,s, $2$--$3$\,s,
-$\ge 3$\,s, or missing), isolating performance in near-conflict regimes.
+Aggregate rates hide where a policy fails. Our evaluation protocol stratifies
+safety metrics along two axes: (i) \emph{traffic density} -- the number of
+vehicles within 40\,m of the ego (Outcome definitions above), binned into \results{e.g., 0, 1--4, 5--9, 10--14, 15+,
+} agents -- yielding collision-rate-versus-density curves that expose
+degradation under crowding; and (ii) \emph{occlusion severity} -- the mean
+occluded view fraction over the episode, binned into low/medium/high --
+isolating performance in exactly the sensor-limited regime this paper
+targets.
 
-\paragraph{Algorithm comparison.}
-We compare three RL families trained to $\sim$400k episodes on the same
-occlusion-aware environment: double dueling DQN, PPO, and risk-aware
-R-MAPPO (two reported runs). For DDQN we additionally report a
-deterministic held-out evaluation over 1{,}500 validation episodes
-(Table~\ref{tab:main}). For PPO and R-MAPPO we report the late
-1{,}000-episode training windows at episodes 400k, 420k, and 430k,
-including mean reward, exploration rate, and terminal goal distance
-(\texttt{goal\_dist}).
+\paragraph{Baselines.}
+The interim audit covers the located artifacts rather than a matched
+baseline suite: discrete DDQN and BC checkpoints, contrastive RL (CRL),
+Waymo imitation learning, R-MAPPO, RLlib PPO, and Sample Factory APPO.
+The archived DDQN result is retained for provenance, but its checkpoint is
+not available locally. The current artifacts do not include the planned
+vanilla-DQN, AdamW, no-TTZ, or no-occlusion ablations, so those rows are not
+presented as measured comparisons.
 
-\paragraph{Controlled comparison.}
-The archived runs coupled three choices in one flag: ray-cast filtering of
-TTZ, the four occlusion summaries, and a C++ occupancy grid that still
-stamped hidden objects. The revised comparison separates them. Every arm
-except the oracle uses the ray-cast visibility filter, including on the
-occupancy grid. Every arm uses ground-truth TTZ in the reward, or turns
-that term off. The arms are:
-\begin{itemize}
-  \item A: visibility filter, no occlusion summaries, $c_z = 0$.
-  \item B: visibility filter, occlusion summaries, $c_z = 0$.
-  \item C: visibility filter, no occlusion summaries, $c_z = 0.5$.
-  \item D: visibility filter, occlusion summaries, $c_z = 0.5$. This is the
-  proposed agent.
-  \item Oracle: no visibility filter, no occlusion summaries, $c_z = 0.5$.
-  Full state is an upper bound, since the policy can see the objects the
-  sensor would hide.
-\end{itemize}
-A and B differ by the four summaries. C and D differ by the same four
-summaries, with the barrier present in both. A and C differ by the barrier.
-B and D differ by the barrier. The network for A and C has the 609-D
-observation; B and D have the 613-D observation; the parameter gap is the
-4096 weights above. Seeds 42, 43, and 44 repeat A--D and the oracle.
-Thresholds $\tau \in \{1, 2, 4, 5\}$ and scales $c_z \in \{0.25, 1.0\}$
-repeat arm D at seed 42. Behavior cloning is evaluated with the same
-success, collision, timeout, and speed metrics. The launch script is
-\texttt{scripts/launch\_reviewer\_ablation.sh}, and it refuses to start
-unless training has been explicitly enabled on the training machine.
+\paragraph{Planned controlled comparison.}
+The next experiment isolates the two inputs. Every arm keeps the visibility
+filter, except an oracle with full observability. The arms vary only the
+occlusion summaries and the TTZ penalty: (A) no summaries and no barrier;
+(B) summaries and no barrier; (C) no summaries with the barrier; (D) summaries
+and barrier, the proposed agent; and an oracle with full observability and
+the barrier. The launch script \texttt{scripts/launch\_reviewer\_ablation.sh}
+trains each arm on seeds 42, 43, and 44, sweeps $\tau$ and $c_z$ on the
+proposed arm at seed 42, and evaluates each checkpoint on the held-out
+validation directory. That directory is split by a stable hash of the
+filenames into a subset for checkpoint selection and a subset for reporting.
+This partitions one directory and is not a separately collected test set.
+No arm of this comparison has been trained or evaluated yet, so none of its
+numbers appear in the tables.
 
 \paragraph{Training details.}
-The completed DDQN run used synchronous vectorization with four workers and
-12 environments per worker (48 parallel environments), a replay buffer of
-$10^6$, and the hyperparameters of Section~\ref{sec:agent}; the full
-configuration is in Appendix~\ref{app:hyper}. The contiguous late-training
-log reaches episode 347{,}000 with 11{,}757{,}888 environment steps and
-22{,}955 learner updates at approximately 283 environment frames per second;
-additional windows at episodes 400{,}000 and 405{,}000 mark the evaluated
-checkpoint region. PPO and R-MAPPO late windows are reported at episodes
-400{,}000--430{,}000.
+Training maturity varies substantially. The CRL checkpoint records
+400{,}001 completed episodes and 648{,}241 learner steps; the Waymo
+imitation checkpoint is from epoch 100; the RLlib checkpoint records one
+training iteration and 512 timesteps; and the Sample Factory checkpoint
+suffix records 480 environment steps. The BC and current DDQN validation
+checkpoints are smoke/validation artifacts with one and three learner steps,
+respectively. These provenance fields are recorded in
+\texttt{paper/runs data/evaluation_summary.json}; they are essential when
+interpreting the table.
 
 % =========================================================================
 \section{Results}
@@ -679,8 +664,9 @@ checkpoint region. PPO and R-MAPPO late windows are reported at episodes
 \subsection{Training Dynamics}
 \label{sec:training-results}
 
-The console trace records a clear improvement in the exploration-policy
-return over the completed run. During episodes 1{,}000--10{,}000, the ten
+The archived DDQN console trace records a clear improvement in the
+exploration-policy return over that historical run. During episodes
+1{,}000--10{,}000, the ten
 reported 1{,}000-episode window averages have mean $-49.69 \pm 8.91$. By
 episodes 338{,}000--347{,}000, after exploration reached its
 $\epsilon=0.05$ floor, the corresponding ten window averages have mean
@@ -690,59 +676,90 @@ at episode 347{,}000. Across all 17 supplied late-training windows
 (episodes 331{,}000--347{,}000), the mean is $76.23 \pm 22.89$; the larger
 spread is driven mainly by the 4.22 window at episode 331{,}000.
 
-The run also demonstrates stable collection throughput: frames per second
+The archived evaluation is labeled \texttt{ddqn\_ep400000.pth}. The contiguous
+late-training log ends at episode 347{,}000, and isolated windows at 400{,}000
+and 405{,}000 are also recorded. The artifacts do not establish whether the
+episode-400{,}000 weights are the final weights of that run. The archived
+table row should therefore be read as the evaluated checkpoint, not as proof
+that training converged.
+
+That historical run also demonstrates stable collection throughput: frames per second
 increase from 228 at episode 1{,}000 to 283 in the late-training trace, the
 replay buffer reaches its $10^6$ capacity by episode 36{,}000, and the final
 record contains 11{,}757{,}888 environment steps and 22{,}955 learner updates.
 The printed \texttt{q}, \texttt{lag}, and \texttt{dropped} fields are queueing
 telemetry rather than Q-value estimates; all remain zero in synchronous mode.
 These training returns were collected under epsilon-greedy exploration and
-are therefore not substitutes for deterministic held-out evaluation. The
-separate 1{,}500-episode evaluation below provides that test.
+are therefore not substitutes for deterministic validation evaluation. The
+separate checkpoint audit below is reported independently and should not be
+interpreted as evidence that the archived training run is reproducible from
+the current workspace.
 
-\subsection{Held-out DDQN Evaluation}
+\subsection{Main Comparison}
 
 \begin{table}[t]
 \centering
-\caption{Held-out collision-avoidance performance for the evaluated DDQN
-checkpoint (1{,}500 episodes). Continuous metrics are episode-level mean
-$\pm$ standard deviation over 1{,}089 valid multi-step traces. Rate
-intervals are reported in the text.}
+\caption{Interim checkpoint audit on validation scenarios. ``Mini'' denotes
+the 100-file validation directory; ``full-dir'' denotes the full validation
+directory, sampled at the $n$ shown.
+Rates are not directly comparable across rows because split, training
+maturity, and evaluator aggregation differ. Dashes denote unavailable
+metrics, not zero values.}
 \label{tab:main}
 \resizebox{\linewidth}{!}{%
-\begin{tabular}{lcccccc}
+\begin{tabular}{lccccccc}
 \toprule
-Method & Goal (\%) $\uparrow$ & Collision (\%) $\downarrow$ &
-Min-TTZ p10 (s) $\uparrow$ &
-ADE (m) $\downarrow$ & FDE (m) $\downarrow$ &
-Jerk (m/s$^3$) $\downarrow$ \\
+Method & $n$ & Split & Goal (\%) $\uparrow$ & Collision (\%) $\downarrow$ &
+Timeout (\%) $\downarrow$ & ADE (m) $\downarrow$ & FDE (m) $\downarrow$ \\
 \midrule
-DDQN (ep.\ 400k ckpt) & \textbf{95.33} & 5.13 & 0.43 &
-$2.24 \pm 2.13$ & $6.40 \pm 6.20$ & $10.27 \pm 4.08$ \\
+Archived DDQN result & 1{,}500 & archived & 95.33 & 5.13 & -- &
+$2.24 \pm 2.13$ & $6.40 \pm 6.20$ \\
+DDQN validation & 1{,}500 & mini & 8.27 & 15.13 & 76.60 &
+735.92 & 4{,}237.12 \\
+BC & 1{,}500 & mini & 12.87 & 5.47 & 81.67 &
+402.23 & 2{,}467.96 \\
+CRL & 1{,}500 & mini & 47.73 & 16.87 & 35.40 & -- & -- \\
+Waymo BC & 1{,}000 & full-dir & 23.93 & 40.82 & -- &
+$5.24 \pm 2.34$ & $8.66 \pm 4.65$ \\
+R-MAPPO & 1{,}000 & mini & 11.60 & 22.30 & 35.80 & -- & -- \\
+RLlib PPO & 100 & full-dir & 8.00 & 73.00 & 19.00 & -- & -- \\
+Sample Factory APPO & 100 & full-dir & 4.00 & 81.00 & -- & 3.87 & 10.15 \\
 \bottomrule
 \end{tabular}}
 \end{table}
 
-The evaluated checkpoint reaches the goal in 1{,}430 of 1{,}500 episodes
-(95.33\%; 95\% Wilson CI: 94.15--96.29\%) and records collisions in 77
-(5.13\%; 95\% Wilson CI: 4.13--6.37\%). Seven episodes carry both labels,
-which reflects the evaluator's event accounting and means the two rates
-should not be interpreted as complementary outcomes. Mean return is
-$109.99 \pm 48.84$, and mean episode length is $20.63 \pm 17.85$ steps.
+The archived DDQN artifact reports 1{,}430 goals and 77 collisions in
+1{,}500 episodes (95\% Wilson intervals of 94.15--96.29\% and
+4.13--6.37\%, respectively), but its checkpoint path points outside the
+current workspace and is not locally reproducible. The current DDQN
+validation checkpoint is a separate smoke artifact and should not be
+confused with that archived result. For the current locally available
+checkpoints, CRL has the highest mini-split goal rate (47.73\%), whereas
+Waymo BC has the lowest reported ADE/FDE among the full-directory rows with
+trajectory metrics; neither observation is a controlled method comparison.
 
-Trajectory metrics are available for 1{,}089 episodes: ADE is
-$2.24 \pm 2.13$\,m, FDE is $6.40 \pm 6.20$\,m, and mean absolute jerk is
-$10.27 \pm 4.08$\,m/s$^3$. Vehicle TTZ has mean
-$2.04 \pm 1.71$\,s and a 10th percentile of 0.43\,s; pedestrian TTZ is
-available for 362 episodes, with mean $2.40 \pm 0.11$\,s. The omitted
-trajectory values correspond to 411 one-step episodes for which ADE, FDE,
-jerk, smoothness, and vehicle TTZ were not emitted. We therefore report the
-valid sample size and do not impute those observations.
+A low collision rate does not establish successful driving. On the mini split,
+the BC row has a 5.47\% collision rate, below the 15.13\% of the DDQN
+validation checkpoint, yet it reaches the goal in only 12.87\% of episodes and
+times out in 81.67\%. The lower collision rate is therefore consistent with a
+policy that often stalls rather than with safer driving. An RL agent is
+penalized for stalling, since a timeout forgoes the goal bonus and accrues the
+step cost. A behavior-cloned policy receives no such signal during training.
+Every collision rate in Table~\ref{tab:main} should therefore be read beside
+the goal and timeout rates.
+
+The table also exposes the dominant failure mode of the framework smoke
+checkpoints: RLlib PPO and Sample Factory APPO collide in 73\% and 81\% of
+their 100 full-directory rollouts, respectively. These rates are descriptive
+only; the RLlib checkpoint contains one training iteration and the Sample
+Factory checkpoint contains 480 environment steps. Detailed checkpoint
+paths, split names, and aggregation semantics are recorded in
+\texttt{paper/runs data/evaluation_summary.json}.
 
 \begin{figure*}[t]
   \centering
   \includegraphics[width=0.96\textwidth]{figures/evaluation_summary.png}
-  \caption{Held-out results for the evaluated DDQN checkpoint. Left: goal
+  \caption{Archived DDQN result artifact. Left: goal
   and collision event rates across 1{,}500 episodes; seven episodes contain
   both event labels. Center and right: episode-level ADE and mean absolute
   jerk distributions over the 1{,}089 valid multi-step traces. Dashed lines
@@ -750,141 +767,42 @@ valid sample size and do not impute those observations.
   \label{fig:evaluation-summary}
 \end{figure*}
 
-The 1{,}430 goal labels and 77 collision labels share 7 episodes, so
-$1430 + 77 - 7 = 1500$. Every archived episode is a goal, a collision, or
-both. The timeout count on this checkpoint is 0. Mean length is
-$20.63$ steps, about $2.1$\,s, so the reported policy is finishing the
-drive. A behavior-cloning policy can post a low collision rate for a
-different reason: the cloned actions never commit, the episode reaches the
-horizon, and the vehicle has neither crashed nor arrived. Under the success
-definition that episode is a failure. Collision rate is therefore reported
-beside timeout rate and mean speed. The matched behavior-cloning numbers
-join Section~\ref{sec:controlled} when that evaluation is attached.
+\subsection{The Safety--Efficiency Trade-off}
+\label{sec:tradeoff}
 
-The checkpoint behind Table~\ref{tab:main} is \texttt{ddqn\_ep400000.pth},
-evaluated with $\epsilon = 0$. The training curve in
-Figure~\ref{fig:curves} is the exploratory return, which rises from a mean
-of $-49.69$ over episodes 1{,}000--10{,}000 to a mean of $77.03$ over
-episodes 338{,}000--347{,}000. The logged window at episode 347{,}000 is
-$74.09$, and the exploratory window at episode 400{,}000 is $55.94$. Those
-are training returns under $\epsilon = 0.05$. The model we report is the
-deterministic evaluation of the episode-400k weights.
+The collision penalty $R_c$ is the single most consequential reward
+coefficient: too small, and the agent accepts collisions as a cost of fast
+progress; too large, and it learns overly conservative behavior that fails
+to reach goals. We sweep
+$R_c \in \results{\{25, 50, 100, 200, 400\}}$ with all other
+coefficients fixed and plot the resulting (goal rate, collision rate)
+operating points once those runs are complete. No Pareto curve is drawn from
+the single available operating point, because doing so would fabricate a
+trade-off trend that has not been measured.
 
-\subsection{Controlled comparison}
-\label{sec:controlled}
+\results{Analysis paragraph: shape of the frontier (is it steep near the
+low-collision end, i.e.\ cheap safety gains?), the knee point, whether the
+TTZ barrier shifts the entire frontier inward (a strict improvement) or
+merely moves along it, and a recommended operating point for
+safety-critical deployment.}
 
-\input{analysis/generated_results.tex}
-
-\subsection{Algorithm Comparison: DDQN, PPO, and R-MAPPO}
-\label{sec:algo-compare}
-
-Table~\ref{tab:train-compare} reports the late-training windows for all
-three algorithms at episodes 400k--430k. PPO maintains high and
-stable training reward ($153.53 \to 153.78 \to 152.90$) with low
-\texttt{goal\_dist} (3.6--7.6\,m at 400--420k; 0.6\,m at 430k). Both
-R-MAPPO runs track similarly at 400--420k (run~A: 135.53/135.78;
-run~B: 168.60/168.85) but collapse at episode 430k (13.90 and 16.10) with
-\texttt{goal\_dist} jumping to 45.78\,m---a clear late-training instability.
-The DDQN occlusion run at episode 400k logs 55.94 mean reward with
-\texttt{goal\_dist}=2.8\,m under $\epsilon{=}0.05$; its deterministic
-held-out evaluation (Table~\ref{tab:main}) is substantially stronger
-(95.33\% goal, 5.13\% collision), showing that exploration-inflated training
-returns understate DDQN's deployed performance.
-
-\begin{table}[t]
-\centering
-\caption{Late training windows at episodes 400k--430k.
-DDQN held-out eval is separate (Table~\ref{tab:main}).}
-\label{tab:train-compare}
-\begin{tabular}{lrrrr}
-\toprule
-Method & Episode & Avg reward & $\epsilon$ & Goal dist (m) \\
-\midrule
-\multirow{3}{*}{PPO}
-  & 400k & 153.53 & 0.154 & 3.6 \\
-  & 420k & 153.78 & 0.153 & 7.6 \\
-  & 430k & 152.90 & 0.154 & 0.6 \\
-\midrule
-\multirow{3}{*}{R-MAPPO (A)}
-  & 400k & 135.53 & 0.135 & 5.55 \\
-  & 420k & 135.78 & 0.147 & 11.90 \\
-  & 430k & 13.90 & 0.190 & 45.78 \\
-\midrule
-\multirow{3}{*}{R-MAPPO (B)}
-  & 400k & 168.60 & 0.135 & 3.6 \\
-  & 420k & 168.85 & 0.147 & 7.6 \\
-  & 430k & 16.10 & 0.145 & 45.78 \\
-\midrule
-\multirow{1}{*}{DDQN (train)}
-  & 400k & 55.94 & 0.050 & 2.8 \\
-\bottomrule
-\end{tabular}
-\end{table}
-
-\begin{figure}[t]
-  \centering
-  \includegraphics[width=0.92\linewidth]{figures/algo_training_compare.png}
-  \caption{Late training-window mean reward at episode 400k (PPO mean over
-  400--430k windows). R-MAPPO bars use the 420k pre-collapse windows; both
-  runs fall to $\sim$14--16 reward at 430k.}
-  \label{fig:algo-compare}
-\end{figure}
-
-PPO achieves the highest stable training return among the three families,
-but without a matching zero-$\epsilon$ held-out eval we cannot rank safety.
-R-MAPPO's collapse suggests the Lagrangian safety critic does not stabilize
-under this training budget. DDQN is the only method with a completed
-held-out safety evaluation in the dataset.
-
-\subsection{Conflict Imminence and Episode Length}
+\subsection{Collision Rate vs.\ Traffic Density and Occlusion}
 \label{sec:density}
 
-Figure~\ref{fig:stratified} and Table~\ref{tab:stratified} show that
-failures are highly non-uniform. Episodes with vehicle TTZ $<1$\,s
-($n=412$) have an 85.0\% goal rate and 15.3\% collision rate, whereas
-episodes with TTZ $\ge 3$\,s ($n=362$) achieve 100\% goals and 0\%
-collisions. Length strata tell a complementary story: mid-horizon episodes
-(31--50 steps; $n=126$) are hardest (70.6\% goal, 29.4\% collision), while
-1-step episodes ($n=411$) are all labeled goal successes with missing
-trajectory metrics, and 51--80-step episodes ($n=220$) also reach 100\%
-goals. The 2--10-step bin is tiny ($n=2$) and fully colliding; we report it
-for completeness but do not over-interpret it. Together these strata support
-a concrete claim: residual risk concentrates in imminent-conflict regimes
-rather than being sprinkled uniformly across the test set.
+Some episode artifacts contain the number of vehicles, but the evaluation
+outputs do not expose a common density definition or consistent
+occlusion-severity trace across all model families. We therefore do not
+construct cross-method density or occlusion curves from these heterogeneous
+files. Figure~\ref{fig:curves} instead plots the available 1{,}000-episode
+moving-average reward and exploration schedule from the archived DDQN run.
+Goal and collision rates are taken only from deterministic checkpoint
+evaluations, never reconstructed from training reward.
 
-\begin{table}[t]
-\centering
-\caption{Held-out DDQN rates stratified by episode length and vehicle TTZ.}
-\label{tab:stratified}
-\begin{tabular}{lrrr}
-\toprule
-Stratum & $n$ & Goal (\%) & Collision (\%) \\
-\midrule
-\multicolumn{4}{l}{\emph{Episode length}} \\
-1-step & 411 & 100.0 & 0.0 \\
-2--10 & 2 & 0.0 & 100.0 \\
-11--30 & 741 & 95.8 & 5.1 \\
-31--50 & 126 & 70.6 & 29.4 \\
-51--80 & 220 & 100.0 & 0.0 \\
-\midrule
-\multicolumn{4}{l}{\emph{Vehicle TTZ}} \\
-$<1$\,s & 412 & 85.0 & 15.3 \\
-1--2\,s & 312 & 97.4 & 4.5 \\
-2--3\,s & 3 & 100.0 & 0.0 \\
-$\ge 3$\,s & 362 & 100.0 & 0.0 \\
-missing & 411 & 100.0 & 0.0 \\
-\bottomrule
-\end{tabular}
-\end{table}
-
-\begin{figure*}[t]
-  \centering
-  \includegraphics[width=0.96\textwidth]{figures/stratified_rates.png}
-  \caption{Held-out goal and collision rates stratified by episode length
-  (left) and vehicle TTZ imminence (right). Collision mass concentrates in
-  low-TTZ and mid-horizon episodes.}
-  \label{fig:stratified}
-\end{figure*}
+\results{Analysis: how quickly each method degrades as agent count grows
+(slope comparison); whether the gap between full and no-occlusion variants
+widens in the high-occlusion stratum, which would directly support the
+claim that explicit occlusion-risk features drive robust behavior under
+partial observability; and any density $\times$ occlusion interaction.}
 
 \begin{figure}[t]
   \centering
@@ -896,51 +814,78 @@ missing & 411 & 100.0 & 0.0 \\
   \label{fig:curves}
 \end{figure}
 
-\subsection{Safety--Efficiency Operating Point}
-\label{sec:tradeoff}
+\subsection{Ablations}
 
-With $R_c=100$ (and the TTZ barrier at $\tau=3$\,s, $c_z=0.5$), the held-out
-operating point is 95.33\% goal rate at 5.13\% collision rate. A multi-value
-penalty sweep was not completed in the supplied artifacts, so we do not draw
-a Pareto curve. The single measured point already shows that the shaped
-reward yields high goal completion with a non-zero residual collision rate,
-consistent with an explicit safety--efficiency compromise rather than a
-hard constraint.
+\begin{table}[t]
+\centering
+\caption{Ablations of observation and agent components. \results{Fill from
+ablation runs (e.g., depth-4/16/64/256 network variants, occlusion features
+on/off, PER on/off, $n$-step $\in \{1,3\}$).}}
+\label{tab:ablations}
+\begin{tabular}{lccc}
+\toprule
+Variant & Goal rate (\%) $\uparrow$ & Collision rate (\%) $\downarrow$ & Steps/s $\uparrow$ \\
+\midrule
+Full model                    & \results{--} & \results{--} & \results{--} \\
+$-$ noisy layers              & \results{--} & \results{--} & \results{--} \\
+$-$ prioritized replay        & \results{--} & \results{--} & \results{--} \\
+$-$ $n$-step ($n{=}1$)        & \results{--} & \results{--} & \results{--} \\
+$-$ velocity channels         & \results{--} & \results{--} & \results{--} \\
+$-$ occlusion features        & \results{--} & \results{--} & \results{--} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\results{Ablation analysis paragraph(s).}
 
 \subsection{Scaling and Throughput}
 
-The supplied synchronous DDQN run improves from 228 to 283 environment frames
-per second in the contiguous late log (439 at the episode-400k window) and
-reports zero queue lag and dropped transitions. Matched asynchronous or
-multi-node scaling curves were not supplied.
+The supplied synchronous run improves from 228 to 283 environment frames
+per second and reports zero queue lag and dropped transitions. Because no
+matched asynchronous or multi-node runs were supplied, we do not draw a
+scaling curve or claim a parallel speedup.
 
-\subsection{Scope of Reported Experiments}
+\subsection{Interpretability: What Does the Policy Attend To?}
+\label{sec:interpretability}
 
-The numbers in Table~\ref{tab:main} and Figure~\ref{fig:curves} are the
-archived DDQN run. Component ablations of noisy layers, prioritized replay,
-$n$-step returns, and velocity channels are not in that bundle. The
-occlusion and reward arms defined in Section~\ref{sec:setup}, the
-density and occlusion bins, the hidden-contact breakdown, and the
-eval-time dropout, noise, and field-of-view probes are produced by the
-revised evaluator and written into Section~\ref{sec:controlled} when the
-training machine deposits the JSON files. Within the archived data, the
-algorithm comparison covers DDQN (held-out eval + training), PPO
-(training), and R-MAPPO (two training runs). Stratified held-out analysis
-of that checkpoint uses episode length and vehicle TTZ.
+Safety-critical deployment requires understanding \emph{why} a policy
+brakes or swerves, not only that it does. We probe the trained agent with
+three complementary analyses:
 
-Occlusion and density interact in a way the four summaries only partly
-address. $f_{\mathrm{frac}}$ and $f_{\mathrm{press}}$ grow when many nearby
-bodies cover the cone, and they saturate once the cone is already full, so
-a further hidden vehicle does not change the observation. The bins in
-Section~\ref{sec:controlled} separate sparse scenes from scenes with 15 or
-more vehicles inside 40\,m, and low occlusion from occlusion above 0.6, and
-they report timeouts beside collisions. A rise in collisions at high
-density with a flat timeout rate is a perception failure. A rise in
-timeouts with a drop in speed is the policy becoming overly cautious. The
-barrier scale $c_z$ and the threshold $\tau$ are the two knobs the sweep
-uses to move that trade-off. Memory of the occluded region, or an explicit
-phantom agent behind the blocker, would be a different observation. This
-paper measures the four-summary policy first.
+\paragraph{Feature attribution.} We compute gradient-based saliency of the
+chosen action's Q-value with respect to the observation, aggregated over
+evaluation episodes and separated by feature group (occupancy channels, TTZ
+features, occlusion features, goal features). \results{Report the relative
+attribution mass per group, and how it shifts between free-driving and
+near-conflict states -- the expected signature is attribution concentrating
+on TTZ and occlusion features as min-TTZ drops.}
+
+\paragraph{Q-value decomposition over risk.} We bin evaluation states by
+min-TTZ and plot the advantage gap between braking and accelerating actions
+as a function of imminence. \results{Figure/paragraph: the gap should widen
+monotonically as TTZ falls if the policy has internalized the risk
+gradient; report where the crossover to braking-preferred occurs and how
+the TTZ-barrier ablation shifts it.}
+
+\paragraph{Behavioral probes under synthetic occlusion.} We take scenarios
+the agent completes safely, artificially inflate the occluded view fraction
+in its observation, and measure the induced speed reduction.
+\results{Report the dose--response curve: a policy that has learned
+occlusion-aware caution should slow smoothly as occlusion pressure rises;
+the no-occlusion ablation should show no response.}
+
+These probes require checkpoint-gradient and counterfactual rollout data
+that are not present in the supplied artifacts. We therefore retain them as
+a preregistered analysis protocol but do not display a synthetic
+interpretability figure.
+
+\subsection{Qualitative Behavior}
+
+\results{Qualitative analysis with 2--4 rendered rollouts (from
+\texttt{visualize.py}): e.g., the agent yielding to a jaywalking pedestrian,
+slowing for an occluded intersection when occlusion features are enabled
+(paired with the same scenario under the no-occlusion ablation colliding or
+near-missing), and a characteristic failure mode.}
 
 % =========================================================================
 \section{Limitations}
@@ -951,32 +896,26 @@ so the agent cannot learn to exploit (or be robust to) reactive behavior of
 others; closed-loop multi-agent training is a natural extension.
 
 \paragraph{Discrete vs.\ continuous control.}
-The 15-action set is what makes double Q-learning a direct fit: the online
-network can enumerate the argmax, and the target network can score that
-single action. The same enumeration is a coarse throttle and steering
-quantization. Jerk and steering-rate in Section~\ref{sec:setup} are the
-measurements of the resulting chatter. Continuous control (SAC or TD3)
-would score actions by an actor instead of an argmax, which removes the
-overestimation argument that selected DDQN and changes the exploration
-problem. A finer discretization, up to the 630 actions Nocturne already
-supports, sits between the two. The controlled comparison holds the
-15-action set fixed.
+The 15-action set (3 throttle $\times$ 5 steering levels) is what makes
+double Q-learning a direct fit: the online network enumerates the argmax, and
+the target network scores that single action. The same quantization limits
+fine maneuvering and can cause control chattering, which the jerk and
+steering-rate metrics of Section~\ref{sec:setup} measure. Continuous control
+with actor--critic methods (e.g., SAC or TD3) would remove the argmax that
+motivates DDQN and would change the exploration problem in sparse-conflict
+scenarios. A finer discretization, up to the 630 actions Nocturne supports
+including head-angle control, sits between the two. The planned controlled
+comparison holds the 15-action set fixed, so it does not measure the
+discrete-versus-continuous trade-off; that comparison remains open.
 
 \paragraph{Safety guarantees.}
 Our approach is risk-\emph{aware}, not risk-\emph{guaranteed}: the TTZ
 barrier shapes behavior away from imminent conflicts but provides no formal
-constraint satisfaction, and the residual collision rate -- 5.13\% at the
-measured $R_c{=}100$ operating point -- remains above the threshold required
-for deployment in safety-critical systems. Combining the learned policy with
-a verified shield or control-barrier filter is a natural direction.
-
-\paragraph{Evaluation scope.}
-The training log includes a three-way comparison at episodes 400k--430k
-(DDQN, PPO, two R-MAPPO runs). Only DDQN has a matching 1{,}500-episode
-held-out evaluation with goal/collision rates and trajectory metrics. The
-archived JSON stores \texttt{num\_vehicles}$=50$ on every episode, a count of
-vehicles in the file. Density in the revised evaluator is the number of
-vehicles inside 40\,m, reported with timeouts in the same bins.
+constraint satisfaction, and the residual collision rate -- while
+tunable along the Pareto frontier of Section~\ref{sec:tradeoff} -- remains
+above the threshold required for deployment in safety-critical systems.
+Combining the learned policy with a verified shield or control-barrier
+filter is a natural direction.
 
 \paragraph{Other limitations.}
 The occupancy grid discards agent identity and history beyond relative
@@ -990,21 +929,22 @@ perception-driven stacks is out of scope.
 
 We presented a risk-aware deep RL system for collision avoidance under
 physically grounded partial observability, trained on real-world driving
-logs: an observation design that makes occlusion risk explicit through
-ray-cast visibility filtering and dedicated occlusion-risk summaries, a
-TTZ-barrier shaped reward that provides a dense safety gradient before
-conflicts become unavoidable, and a stratified evaluation that localizes
-residual risk. In the completed single-checkpoint evaluation, the DDQN agent
-attains a 95.33\% goal rate and a 5.13\% collision rate across 1{,}500
-held-out episodes, with ADE of $2.24 \pm 2.13$\,m and FDE of
-$6.40 \pm 6.20$\,m over the 1{,}089 valid multi-step traces. Collisions
-concentrate where vehicle TTZ is below one second (15.3\% collision rate)
-and in mid-horizon episodes. Late PPO training returns exceed DDQN
-exploration returns, while R-MAPPO exhibits a sharp late collapse in both
-reported runs; only DDQN currently has held-out evaluation. Treating the
-safety--efficiency compromise as an explicit operating point, together with
-log-replay realism and high-throughput off-policy training, is a practical
-recipe for studying safety-critical driving behaviors at scale.
+logs: an
+observation design that makes occlusion risk explicit through ray-cast
+visibility filtering and dedicated occlusion-risk summaries, a TTZ-barrier
+shaped reward that provides a dense safety gradient before conflicts become
+unavoidable, and a provenance-aware evaluation protocol. The interim audit
+locates and evaluates DDQN, BC, CRL, Waymo imitation, R-MAPPO, RLlib PPO,
+and Sample Factory APPO checkpoints. It shows substantial variation in both
+goal and collision rates, but the variation cannot yet be attributed to the
+learning algorithms: the rows use different validation subsets, training
+maturity, and evaluator aggregation semantics. The archived DDQN artifact
+reports a 95.33\% goal rate and 5.13\% collision rate, while the current
+full-directory Waymo BC, RLlib PPO, and Sample Factory APPO rollouts report
+23.93\%/40.82\%, 8.00\%/73.00\%, and 4.00\%/81.00\%, respectively. A
+matched full-directory benchmark with completed checkpoints, independent seeds,
+reward-penalty sweeps, and occlusion ablations is required before drawing
+comparative or deployment conclusions.
 
 % =========================================================================
 \bibliographystyle{plainnat}
@@ -1053,30 +993,20 @@ TTZ clip                 & 20\,s              & Simulation $\Delta t$      & 0.1
 \section{Additional Results}
 \label{app:additional}
 
-For the completed 1{,}500-episode evaluation, the goal count is
-1{,}430 (95.33\%; 95\% Wilson CI: 94.15--96.29\%) and the collision count is
-77 (5.13\%; 95\% Wilson CI: 4.13--6.37\%). Seven episodes have both labels.
-Continuous statistics are: return $109.99 \pm 48.84$ ($n=1{,}500$), episode
-length $20.63 \pm 17.85$ steps ($n=1{,}500$), ADE
-$2.24 \pm 2.13$\,m ($n=1{,}089$), FDE $6.40 \pm 6.20$\,m
-($n=1{,}089$), jerk $10.27 \pm 4.08$\,m/s$^3$ ($n=1{,}089$), smoothness
-$10.14 \pm 1.13$ ($n=1{,}089$), vehicle TTZ $2.04 \pm 1.71$\,s
-($n=1{,}089$), and pedestrian TTZ $2.40 \pm 0.11$\,s ($n=362$).
+The complete interim audit, including checkpoint paths, validation splits,
+sample sizes, training maturity, confidence intervals, and evaluator
+aggregation semantics, is stored in
+\texttt{paper/runs data/evaluation_summary.json}. The archived DDQN artifact
+contains 1{,}430 goals and 77 collisions in 1{,}500 episodes. The current
+locally reproducible artifacts include a 1{,}500-episode BC evaluation, a
+1{,}500-episode CRL evaluation, a 1{,}000-scenario Waymo BC evaluation,
+a 1{,}000-rollout R-MAPPO evaluation, and 100-rollout framework-native
+evaluations for both RLlib and Sample Factory. Continuous metrics are
+reported only where the corresponding evaluator emitted them; missing values
+are not imputed.
 
-PPO late windows: 153.53 / 153.78 / 152.90 at episodes 400k / 420k / 430k.
-R-MAPPO run A: 135.53 / 135.78 / 13.90; run B: 168.60 / 168.85 / 16.10 at the
-same episode indices. DDQN exploration windows at episodes 400k and 405k are
-55.94 and 46.94. The reported agent is the deterministic evaluation of
-\texttt{ddqn\_ep400000.pth}. The exploratory returns are the convergence
-trace; they are a different quantity from the held-out goal and collision
-rates.
-
-Selected test episodes are written by \texttt{evaluate.py} with
-\texttt{--trace\_dir} and drawn by \texttt{paper/analysis/plot\_traces.py}.
-Each figure shows the agent trajectory against the logged trajectory, the
-occupancy channel at the minimum ground-truth TTZ, speed against that TTZ,
-and the occluded fraction. The dump keeps two episodes of each outcome
-(goal, collision, timeout) so the panels cover a completed drive, a crash,
-and a horizon termination when the latter occurs.
+\results{Space reserved for the not-yet-completed per-scenario-type
+breakdowns, collision-penalty sweep, density study, occlusion ablation,
+independent-seed analysis, BC comparison, and interpretability plots.}
 
 \end{document}
