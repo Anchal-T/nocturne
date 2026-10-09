@@ -58,3 +58,13 @@ outputs/
 
 venv/
 .venv/
+
+# LaTeX build outputs, paper scratch workspace, and generated training log
+paper/main.aux
+paper/main.bbl
+paper/main.blg
+paper/main.log
+paper/main.out
+paper/main.pdf
+paper/workspace/
+paper/runs data/final training data.ini
