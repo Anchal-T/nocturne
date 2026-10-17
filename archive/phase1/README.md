@@ -57,7 +57,7 @@ Supporting fixes found while verifying:
   only syncs losses every `loss_sync_interval` steps. The test now runs a
   full sync interval.
 
-## Phase 1b (blocking, found after this record was written)
+## Phase 1b (implemented, found after this record was written)
 
 Reviewing the arm matrix against the code exposed a paper/code contract
 mismatch: `Scenario::OccupancyGrid` never receives the ray-cast visibility set,
@@ -80,6 +80,28 @@ Two further contract bugs were found while recovering the arm definitions:
 
 Plan, frozen arm matrix, and implementation list:
 `paper/workspace/phase2_arms_and_compute.md`.
+
+Implementation and verification (2026-10-17):
+
+- `Scenario::OccupancyGridVisible` filters actor stamps by the ray-cast id set;
+  road edges are always stamped. Wired through `occupancy_grid_visible`.
+- Config switches are orthogonal: `occupancy_grid.visibility_filter`,
+  `use_occlusion`, `occlusion_mask`, `history_frames`, `history_stride`, and
+  `reward.reward_ttz_source`. Observation TTZ and reward TTZ are computed
+  separately; `info` logs privileged, observed, and reward TTZ.
+- Grid-only history (`history_frames=3`, `history_stride=5`) yields the
+  1809-D C_hist observation; `grid_channels` is `3 * history_frames`
+  everywhere (train, BC, evaluator).
+- `examples/drl_collision_avoidance/observation_config.py` is the single
+  metadata contract. Every DDQN/BC checkpoint stores it; `evaluate.py` applies
+  it and refuses checkpoints that lack it.
+- `tests/test_observation_contract.py` (15 tests) covers dims, the A>=B grid
+  subset, the C++ filter, reward decoupling, mask geometry, history padding,
+  metadata round-trip/refusal, and agent save. Full suite: 58 passed (excluding
+  the two pre-existing environment-limited modules below).
+- All 8 arm configs smoke-tested at 300 steps; O and C_hist also at the
+  production 4x12/48-env layout (1000 steps, 17 s each). O evaluated on 2
+  test-half scenes through the real evaluator.
 
 ## Verification
 
@@ -128,8 +150,8 @@ The extension lands at the repo root as
   `paper/workspace/phase2_arms_and_compute.md`.
 - Compute/parallelism plan for the 24 training runs (10M steps, 3 seeds x
   8 arms): 2 concurrent jobs, ~5.3 days training + buffer (measured).
-- Phase 1b observation/reward-contract fixes (see above) must land before
-  training.
+- Phase 1b observation/reward-contract fixes: implemented 2026-10-17 (see
+  above); training can start once the arm configs are frozen with a git sha.
 - This record, the code changes above, and the Phase 0 purge are committed on
   branch `phase1-pipeline-fixes` (Phase 0 purge and Phase 1 fixes as separate
   commits).

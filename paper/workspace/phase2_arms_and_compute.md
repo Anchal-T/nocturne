@@ -1,6 +1,7 @@
 # Phase 2 — arm matrix and compute plan (frozen for implementation)
 
-Status: frozen 2026-10-17 after sign-off · Created 2026-10-17
+Status: frozen 2026-10-17 after sign-off; Phase 1b implemented and smoke-tested
+2026-10-17 · Created 2026-10-17
 Companion record: `archive/phase1/README.md` (pipeline fixes this plan builds on)
 
 Every number in the paper will be regenerated from these runs and nothing here
@@ -35,20 +36,19 @@ not a recovered original.
 
 The paper's method text says the ray-cast visibility model removes every
 object outside the view cone or occluded behind a nearer object before the
-observation is built. The code does not implement that contract yet:
+observation is built. Before Phase 1b the code did not implement that contract:
 
-- `occupancy_grid.use_occlusion` simultaneously (a) enables visibility
-  filtering of the TTZ/object data and (b) appends the 4 occlusion summary
-  features. Visibility and encoding are not independent switches.
-- The C++ fast grid (`Scenario::OccupancyGrid`) never receives the visibility
-  set; it stamps every vehicle/pedestrian/cyclist in the scenario. The grid is
-  therefore privileged — it contains occluded actors — in *both* current modes.
-- The reward uses `self._ttz_vehicle` / `self._ttz_pedestrian`, which are
-  computed inside `_build_observation` from the *observation* TTZ. Turning
-  visibility filtering on therefore silently changes the reward source too.
-- `train.py` hardcodes `grid_channels = 3`; there is no grid history.
+- `occupancy_grid.use_occlusion` simultaneously (a) enabled visibility
+  filtering of the TTZ/object data and (b) appended the 4 occlusion summary
+  features. Visibility and encoding were not independent switches.
+- The C++ fast grid (`Scenario::OccupancyGrid`) never received the visibility
+  set; it stamped every vehicle/pedestrian/cyclist in the scenario. The grid
+  was therefore privileged — it contained occluded actors — in *both* modes.
+- The reward reused the observation TTZ, so turning visibility filtering on
+  silently changed the reward source too.
+- `train.py` hardcoded `grid_channels = 3`; there was no grid history.
 
-Phase 1b items (blocking, implement before training):
+Phase 1b is now implemented (commit `phase1-pipeline-fixes`, 2026-10-17):
 
 1. **Visibility-consistent grid.** Extend `Scenario::OccupancyGrid` with an
    optional visible-id filter (the set already computed by
@@ -73,14 +73,34 @@ Phase 1b items (blocking, implement before training):
      `privileged` — the reward TTZ is computed independently of the
      observation source. `privileged` uses all actors; `visible` uses only
      ray-cast-visible actors. This removes today's coupling.
-3. **Checkpoint observation metadata.** `DDQNAgent.save` currently records
-   `obs_dim` but not the switches; `evaluate.py` infers `use_occlusion` from
-   dim 609 vs 613. Under 8 arms that is ambiguous (A and B are both 609).
-   Checkpoints must record `visibility_filter`, `use_occlusion`,
-   `occlusion_mask`, `history_frames`, `history_stride`, `reward_ttz_source`,
-   `obs_dim`, and `grid_channels`. The evaluator must take them from the
-   checkpoint (CLI override only for sanity checks) and refuse checkpoints
-   without them. Silent fallback would invalidate evidence.
+3. **Checkpoint observation metadata.** `DDQNAgent.save` now records
+   `observation_metadata` from
+   `examples/drl_collision_avoidance/observation_config.py` (the single
+   contract shared with BC); `evaluate.py` reads it and refuses checkpoints
+   without it (CLI override only for sanity checks). Keys: `obs_dim`,
+   `visibility_filter`, `use_occlusion`, `occlusion_mask`, `history_frames`,
+   `history_stride`, `reward_ttz_source`, `grid_rows`, `grid_cols`,
+   `grid_channels`. A and B are both 609-D, so inference would be silent
+   evidence corruption.
+
+Implementation evidence (2026-10-17):
+
+- C++ `Scenario::OccupancyGridVisible` filters actors by the ray-cast id set;
+  road edges stay. Exposed as `occupancy_grid_visible` and wired through
+  `_build_occupancy_grid`.
+- `_build_observation` computes observation TTZ from the visible set when
+  `visibility_filter` is on, and reward TTZ independently from
+  `reward_ttz_source`. `info` logs `ttz_vehicle` / `ttz_pedestrian` as the
+  privileged/physical TTZ, plus `*_observed` and `*_reward` variants, so the
+  reward ablation cannot be mistaken for a scene change.
+- Tests: `tests/test_observation_contract.py` (15 tests: dimensions, grid
+  subset, C++ filter, reward decoupling, mask geometry, history padding,
+  metadata round-trip/refusal, agent save). Full suite: 58 passed (excluding
+  the pre-existing headless `getConeImage` and missing-`matplotlib` tests).
+- Smokes: all 8 arm configs at 300 steps (609/613/809/813/1809 as expected);
+  O and C_hist at the production 4x12 layout (48 envs, 1000 steps, 17 s each)
+  with final checkpoints; evaluator ran O on 2 test-half scenes with metadata
+  enforcement.
 
 Dimension arithmetic: grid 3x20x10 = 600, ego 4, target 2, TTZ 3 (= 609);
 +4 stats = 613; +200-cell mask = 809; +stats+mask = 813; grid history k=3
@@ -230,12 +250,14 @@ python examples/drl_collision_avoidance/evaluate.py \
 
 ## 4. Order of operations
 
-1. Implement Phase 1b (§1) + tests: visibility-consistent grid; reward-source
-   decoupling; occlusion mask; grid history; arm configs round-trip through
-   checkpoint/load; obs dims match the table; evaluator refuses checkpoints
-   without observation metadata.
-2. Smoke-run every arm config for ~1k steps; verify obs dim, provenance,
-   and determinism.
+1. ~~Implement Phase 1b (§1) + tests.~~ **Done 2026-10-17.** C++ visible-id
+   grid filter; orthogonal config switches; reward-source decoupling;
+   occlusion mask; grid-only history; `observation_config.py` metadata in
+   every DDQN/BC checkpoint; evaluator refuses checkpoints without it.
+   `tests/test_observation_contract.py` = 15 tests; full suite 58 passed.
+2. ~~Smoke-run every arm config.~~ **Done 2026-10-17.** All 8 arms at 300
+   steps with the expected dims; O and C_hist at 4x12/48 envs, 1000 steps,
+   17 s each; O evaluated on 2 test-half scenes.
 3. Freeze configs, record git sha, launch wave 1 (2 runs, 2 GPUs).
 4. Twelve waves; evaluate each finished run on the test half.
 5. Phase 3/4: regenerate every table/figure from `paper/workspace/eval/*.json`.
