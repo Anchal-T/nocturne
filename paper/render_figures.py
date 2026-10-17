@@ -1,3 +1,8 @@
+# NOTE (2026-10-17): These figures came from the retired interim-audit
+# evidence. The training transcript was moved to archive/phase0/, and the
+# single-fixture pilot figure was removed from the paper; see
+# archive/phase0/model_manifest.json. Figure generation for the paper is
+# being replaced by the controlled study's evaluation JSONs.
 import json
 import math
 import re

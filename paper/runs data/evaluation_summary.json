@@ -17,7 +17,8 @@
     "caveats": [
       "Existing BC, DDQN, CRL, and R-MAPPO artifacts use the mini validation split unless otherwise noted.",
       "The framework-native evaluators aggregate episodes differently, so rates are not pooled across methods.",
-      "Several located checkpoints are smoke or validation checkpoints rather than completed training runs."
+      "Several located checkpoints are smoke or validation checkpoints rather than completed training runs.",
+      "The 'Archived DDQN result' row was evaluated by repeating one fixture scene (tests/large_file_tfrecord.json), not a held-out split."
     ]
   },
   "results": [
@@ -26,15 +27,16 @@
       "family": "DDQN",
       "evaluation_artifact": "paper/runs data/eval_baseline_fixed.json",
       "checkpoint": "/home/ubuntu/checkpoints/drl_collision_avoidance/ddqn_ep400000.pth",
-      "checkpoint_available_locally": false,
-      "dataset": "not recorded in artifact",
+      "local_checkpoint": "outputs/2026-03-11/20-29-53/checkpoints/drl_collision_avoidance/ddqn_ep400000.pth",
+      "checkpoint_available_locally": true,
+      "dataset": "tests/large_file_tfrecord.json",
       "n": 1500,
       "goal_rate": 0.9533333333333334,
       "collision_rate": 0.051333333333333335,
       "ade": 2.2415796941669894,
       "fde": 6.3975715658089936,
-      "training_status": "historical result artifact; checkpoint unavailable locally",
-      "comparability": "reported for provenance only"
+      "training_status": "historical result artifact; corresponding local run directory outputs/2026-03-11/20-29-53 (see archive/phase0/model_manifest.json)",
+      "comparability": "provenance only; one fixture scene repeated (tests/large_file_tfrecord.json); not a held-out evaluation"
     },
     {
       "method": "DDQN validation",

@@ -6,8 +6,9 @@
 % official conference style file (e.g. \usepackage{iclr2026_conference} or
 % \usepackage{icml2026}) -- the section structure is compatible with both.
 %
-% Interim checkpoint-audit results are included below. Planned experiments
-% remain marked with \results{...} so they are easy to find.
+% Interim checkpoint-audit results were removed on 2026-10-17 (audit trail:
+% archive/phase0/model_manifest.json). Planned experiments remain marked
+% with \results{...} so they are easy to find.
 % =========================================================================
 \documentclass{article}
 
@@ -70,15 +71,10 @@ behavior before a collision becomes unavoidable. A double dueling DQN is
 trained at scale with an asynchronous actor--learner architecture that runs
 unchanged from a single workstation to a Ray cluster. Beyond aggregate
 rates, we specify a safety--efficiency trade-off analysis and stratification
-protocol. An interim audit evaluates every checkpoint family currently
-available: a CRL checkpoint reaches 47.73\% of goals with 16.87\%
-collisions on the mini validation split, while the epoch-100 Waymo
-imitation checkpoint reaches 23.93\% of goals with 40.82\% collisions on
-the full-validation directory. RLlib PPO and Sample Factory APPO smoke
-checkpoints reach 8.00\% and 4.00\% of goals, respectively, on 100
-full-directory rollouts. These are descriptive checkpoint results rather than a
-final apples-to-apples benchmark because training maturity, split, and
-evaluator aggregation differ across families.
+protocol. A controlled multi-seed study with a uniform training budget and a
+deterministic evaluator on a held-out validation split is in progress; this
+draft reports the method and evaluation protocol rather than comparative
+results.
 \end{abstract}
 
 % =========================================================================
@@ -141,10 +137,11 @@ Our contributions are as follows:
   the safety--efficiency compromise an explicit, tunable design parameter
   rather than an implicit artifact.
   \item \textbf{A reproducible evaluation protocol.} We define safety,
-  task-success, trajectory-quality, and comfort metrics, report evaluation
-  sample sizes and Wilson intervals where episode-level counts are
-  available, and record checkpoint provenance, split, and evaluator
-  aggregation for every located model family (Section~\ref{sec:setup}).
+  task-success, trajectory-quality, and comfort metrics and report
+  evaluation sample sizes with Wilson intervals where episode-level
+  counts are available, together with the deterministic evaluation and
+  checkpoint-provenance requirements of a matched comparison
+  (Section~\ref{sec:setup}).
   \item \textbf{A scalable training system.} A modern value-based learner
   (double dueling DQN with noisy exploration, $n$-step returns, prioritized
   replay, and the Muon optimizer~\citep{jordan2024muon}) is trained with an
@@ -154,15 +151,13 @@ Our contributions are as follows:
   (Sections~\ref{sec:agent}--\ref{sec:system}).
 \end{itemize}
 
-The current evaluation is an interim checkpoint audit rather than a
-controlled comparison. It includes mini-split evaluations for BC, DDQN,
-CRL, and R-MAPPO, full-directory evaluations for Waymo BC, RLlib PPO, and
-Sample Factory APPO, and an archived DDQN result whose checkpoint is no
-longer available locally. Because the checkpoints differ in training
-maturity and the framework evaluators use different aggregation semantics,
-the results establish provenance and failure modes but do not support a
-claim of method superiority. The reward-penalty sweep, matched multi-seed
-comparison, density study, and occlusion ablation remain open experiments.
+The evaluation for this draft is being rebuilt end-to-end. An earlier
+interim audit of checkpoints then available in our repository mixed
+validation subsets, training maturity, and evaluator aggregation
+semantics, so its numbers could not support method comparisons and are no
+longer reported. The reward-penalty sweep, matched multi-seed comparison,
+density study, and occlusion ablation remain open experiments, marked with
+\results{...} throughout.
 
 The remainder of the paper is organized as follows. Section~\ref{sec:related}
 positions our work relative to safe RL, occlusion-aware planning, and
@@ -475,9 +470,7 @@ We use driving scenarios from the Waymo Open Motion
 Dataset~\citep{ettinger2021waymo} converted to Nocturne's format, split into
 train and held-out validation scenarios. The repository contains no distinct
 test split; accordingly, we call the reported split ``validation'' and do
-not label it as test data. The interim results use either the 100-file mini
-directory or the full-validation directory, as recorded per row in
-Table~\ref{tab:main}. Each episode replays one scenario for up to 80 steps at
+not label it as test data. Each episode replays one scenario for up to 80 steps at
 10\,Hz; non-ego road users follow their logged trajectories. Scenarios in
 which the ego is removed at goal or collision follow the standard Nocturne
 configuration.
@@ -499,15 +492,11 @@ and control chattering -- a known concern for discrete action spaces; and
 (vi) \emph{training throughput}: environment steps per second.
 
 \paragraph{Statistical protocol.}
-For rows with episode-level binary labels and integer counts we report 95\%
-Wilson score intervals; these intervals quantify evaluation-sample
-uncertainty, not training-seed uncertainty. Waymo BC reports scenario-level
-aggregates, while R-MAPPO and the framework-native evaluators report
-per-agent aggregates, so their rates are not pooled with the episode-level
-rows. We do not perform between-method significance tests because the
-current checkpoints, splits, and aggregation semantics are not matched.
-Independent training seeds, a common split, and a common evaluator are
-required before making comparative claims.
+For episode-level binary outcomes we report 95\% Wilson score intervals;
+these intervals quantify evaluation-sample uncertainty, not training-seed
+uncertainty. Comparative claims require matched checkpoints, a common
+held-out split, a common evaluator, and independent training seeds; until
+those are in place no between-method significance tests are reported.
 
 \paragraph{Stratified evaluation.}
 Aggregate rates hide where a policy fails. Our evaluation protocol stratifies
@@ -520,24 +509,16 @@ isolating performance in exactly the sensor-limited regime this paper
 targets.
 
 \paragraph{Baselines.}
-The interim audit covers the located artifacts rather than a matched
-baseline suite: discrete DDQN and BC checkpoints, contrastive RL (CRL),
-Waymo imitation learning, R-MAPPO, RLlib PPO, and Sample Factory APPO.
-The archived DDQN result is retained for provenance, but its checkpoint is
-not available locally. The current artifacts do not include the planned
-vanilla-DQN, AdamW, no-TTZ, or no-occlusion ablations, so those rows are not
-presented as measured comparisons.
+The controlled study evaluates the full model against a fixed matrix of
+matched arms on a common held-out split, together with a behavior-cloning
+baseline trained on the same observations. \results{Arm matrix, training
+budgets, and per-arm configuration.}
 
 \paragraph{Training details.}
-Training maturity varies substantially. The CRL checkpoint records
-400{,}001 completed episodes and 648{,}241 learner steps; the Waymo
-imitation checkpoint is from epoch 100; the RLlib checkpoint records one
-training iteration and 512 timesteps; and the Sample Factory checkpoint
-suffix records 480 environment steps. The BC and current DDQN validation
-checkpoints are smoke/validation artifacts with one and three learner steps,
-respectively. These provenance fields are recorded in
-\texttt{paper/runs data/evaluation_summary.json}; they are essential when
-interpreting the table.
+All runs in the controlled study share a common budget, network, and
+optimizer; the exact configuration is reported alongside the results.
+\results{Common budget (environment steps) and the per-arm training
+configuration table.}
 
 % =========================================================================
 \section{Results}
@@ -546,91 +527,32 @@ interpreting the table.
 \subsection{Training Dynamics}
 \label{sec:training-results}
 
-The archived DDQN console trace records a clear improvement in the
-exploration-policy return over that historical run. During episodes
-1{,}000--10{,}000, the ten
-reported 1{,}000-episode window averages have mean $-49.69 \pm 8.91$. By
-episodes 338{,}000--347{,}000, after exploration reached its
-$\epsilon=0.05$ floor, the corresponding ten window averages have mean
-$77.03 \pm 9.62$, an increase of 126.73 reward units. The highest logged
-window is 102.21 at episode 332{,}000, while the final logged window is 74.09
-at episode 347{,}000. Across all 17 supplied late-training windows
-(episodes 331{,}000--347{,}000), the mean is $76.23 \pm 22.89$; the larger
-spread is driven mainly by the 4.22 window at episode 331{,}000.
-
-That historical run also demonstrates stable collection throughput: frames per second
-increase from 228 at episode 1{,}000 to 283 in the late-training trace, the
-replay buffer reaches its $10^6$ capacity by episode 36{,}000, and the final
-record contains 11{,}757{,}888 environment steps and 22{,}955 learner updates.
-The printed \texttt{q}, \texttt{lag}, and \texttt{dropped} fields are queueing
-telemetry rather than Q-value estimates; all remain zero in synchronous mode.
-These training returns were collected under epsilon-greedy exploration and
-are therefore not substitutes for deterministic validation evaluation. The
-separate checkpoint audit below is reported independently and should not be
-interpreted as evidence that the archived training run is reproducible from
-the current workspace.
+\results{Learning curves for every arm and seed, generated from the
+TensorBoard event files of the controlled study: episode return,
+tuning-split goal and collision rates, and collection throughput, plotted
+with seed bands.}
 
 \subsection{Main Comparison}
 
 \begin{table}[t]
 \centering
-\caption{Interim checkpoint audit on validation scenarios. ``Mini'' denotes
-the 100-file validation directory; ``full-dir'' denotes the full validation
-directory, sampled at the $n$ shown.
-Rates are not directly comparable across rows because split, training
-maturity, and evaluator aggregation differ. Dashes denote unavailable
-metrics, not zero values.}
+\caption{Main comparison (pending). All cells will be generated from the
+evaluation JSONs of the controlled study: matched arms, identical training
+budgets, independent seeds, and one deterministic evaluation protocol on a
+held-out split.}
 \label{tab:main}
-\resizebox{\linewidth}{!}{%
-\begin{tabular}{lccccccc}
+\begin{tabular}{lccc}
 \toprule
-Method & $n$ & Split & Goal (\%) $\uparrow$ & Collision (\%) $\downarrow$ &
-Timeout (\%) $\downarrow$ & ADE (m) $\downarrow$ & FDE (m) $\downarrow$ \\
+Method & Goal rate (\%) $\uparrow$ & Collision rate (\%) $\downarrow$ & Notes \\
 \midrule
-Archived DDQN result & 1{,}500 & archived & 95.33 & 5.13 & -- &
-$2.24 \pm 2.13$ & $6.40 \pm 6.20$ \\
-DDQN validation & 1{,}500 & mini & 8.27 & 15.13 & 76.60 &
-735.92 & 4{,}237.12 \\
-BC & 1{,}500 & mini & 12.87 & 5.47 & 81.67 &
-402.23 & 2{,}467.96 \\
-CRL & 1{,}500 & mini & 47.73 & 16.87 & 35.40 & -- & -- \\
-Waymo BC & 1{,}000 & full-dir & 23.93 & 40.82 & -- &
-$5.24 \pm 2.34$ & $8.66 \pm 4.65$ \\
-R-MAPPO & 1{,}000 & mini & 11.60 & 22.30 & 35.80 & -- & -- \\
-RLlib PPO & 100 & full-dir & 8.00 & 73.00 & 19.00 & -- & -- \\
-Sample Factory APPO & 100 & full-dir & 4.00 & 81.00 & -- & 3.87 & 10.15 \\
+\results{Arm rows: full model and matched ablations; 3 seeds each} &
+\results{--} & \results{--} & \results{--} \\
 \bottomrule
-\end{tabular}}
+\end{tabular}
 \end{table}
 
-The archived DDQN artifact reports 1{,}430 goals and 77 collisions in
-1{,}500 episodes (95\% Wilson intervals of 94.15--96.29\% and
-4.13--6.37\%, respectively), but its checkpoint path points outside the
-current workspace and is not locally reproducible. The current DDQN
-validation checkpoint is a separate smoke artifact and should not be
-confused with that archived result. For the current locally available
-checkpoints, CRL has the highest mini-split goal rate (47.73\%), whereas
-Waymo BC has the lowest reported ADE/FDE among the full-directory rows with
-trajectory metrics; neither observation is a controlled method comparison.
-
-The table also exposes the dominant failure mode of the framework smoke
-checkpoints: RLlib PPO and Sample Factory APPO collide in 73\% and 81\% of
-their 100 full-directory rollouts, respectively. These rates are descriptive
-only; the RLlib checkpoint contains one training iteration and the Sample
-Factory checkpoint contains 480 environment steps. Detailed checkpoint
-paths, split names, and aggregation semantics are recorded in
-\texttt{paper/runs data/evaluation_summary.json}.
-
-\begin{figure*}[t]
-  \centering
-  \includegraphics[width=0.96\textwidth]{figures/evaluation_summary.png}
-  \caption{Archived DDQN result artifact. Left: goal
-  and collision event rates across 1{,}500 episodes; seven episodes contain
-  both event labels. Center and right: episode-level ADE and mean absolute
-  jerk distributions over the 1{,}089 valid multi-step traces. Dashed lines
-  mark means; missing one-step traces are not imputed.}
-  \label{fig:evaluation-summary}
-\end{figure*}
+\results{Main comparison analysis: paired arm contrasts on the held-out
+split with Wilson intervals; no cross-family pooling.}
 
 \subsection{The Safety--Efficiency Trade-off}
 \label{sec:tradeoff}
@@ -641,9 +563,9 @@ progress; too large, and it learns overly conservative behavior that fails
 to reach goals. We sweep
 $R_c \in \results{\{25, 50, 100, 200, 400\}}$ with all other
 coefficients fixed and plot the resulting (goal rate, collision rate)
-operating points once those runs are complete. No Pareto curve is drawn from
-the single available operating point, because doing so would fabricate a
-trade-off trend that has not been measured.
+operating points once those runs are complete. No Pareto curve is drawn
+before then, because doing so would fabricate a trade-off trend that has not
+been measured.
 
 \results{Analysis paragraph: shape of the frontier (is it steep near the
 low-collision end, i.e.\ cheap safety gains?), the knee point, whether the
@@ -654,30 +576,17 @@ safety-critical deployment.}
 \subsection{Collision Rate vs.\ Traffic Density and Occlusion}
 \label{sec:density}
 
-Some episode artifacts contain the number of vehicles, but the evaluation
-outputs do not expose a common density definition or consistent
-occlusion-severity trace across all model families. We therefore do not
-construct cross-method density or occlusion curves from these heterogeneous
-files. Figure~\ref{fig:curves} instead plots the available 1{,}000-episode
-moving-average reward and exploration schedule from the archived DDQN run.
-Goal and collision rates are taken only from deterministic checkpoint
-evaluations, never reconstructed from training reward.
+\results{Density and occlusion strata: collision rate versus number of road
+users and versus mean occluded view fraction for each arm, including the
+paired no-occlusion contrast. Goal and collision rates are taken only from
+deterministic checkpoint evaluations, never reconstructed from training
+reward.}
 
 \results{Analysis: how quickly each method degrades as agent count grows
 (slope comparison); whether the gap between full and no-occlusion variants
 widens in the high-occlusion stratum, which would directly support the
 claim that explicit occlusion-risk features drive robust behavior under
 partial observability; and any density $\times$ occlusion interaction.}
-
-\begin{figure}[t]
-  \centering
-  \includegraphics[width=\linewidth]{figures/training_curves.png}
-  \caption{Logged DDQN training dynamics. Each blue point is a reported
-  1{,}000-episode mean return and the dashed red curve is the epsilon-greedy
-  exploration schedule. Disconnected segments indicate intervals absent
-  from the supplied transcript and are intentionally not interpolated.}
-  \label{fig:curves}
-\end{figure}
 
 \subsection{Ablations}
 
@@ -705,10 +614,9 @@ $-$ occlusion features        & \results{--} & \results{--} & \results{--} \\
 
 \subsection{Scaling and Throughput}
 
-The supplied synchronous run improves from 228 to 283 environment frames
-per second and reports zero queue lag and dropped transitions. Because no
-matched asynchronous or multi-node runs were supplied, we do not draw a
-scaling curve or claim a parallel speedup.
+\results{Collection throughput and scaling across execution modes (sync,
+async, ray) under the common configuration, including queue telemetry and
+steps per second per hardware tier.}
 
 \subsection{Interpretability: What Does the Policy Attend To?}
 \label{sec:interpretability}
@@ -740,9 +648,8 @@ occlusion-aware caution should slow smoothly as occlusion pressure rises;
 the no-occlusion ablation should show no response.}
 
 These probes require checkpoint-gradient and counterfactual rollout data
-that are not present in the supplied artifacts. We therefore retain them as
-a preregistered analysis protocol but do not display a synthetic
-interpretability figure.
+from the controlled study's checkpoints; we retain them as a preregistered
+analysis protocol.
 
 \subsection{Qualitative Behavior}
 
@@ -798,18 +705,12 @@ logs: an
 observation design that makes occlusion risk explicit through ray-cast
 visibility filtering and dedicated occlusion-risk summaries, a TTZ-barrier
 shaped reward that provides a dense safety gradient before conflicts become
-unavoidable, and a provenance-aware evaluation protocol. The interim audit
-locates and evaluates DDQN, BC, CRL, Waymo imitation, R-MAPPO, RLlib PPO,
-and Sample Factory APPO checkpoints. It shows substantial variation in both
-goal and collision rates, but the variation cannot yet be attributed to the
-learning algorithms: the rows use different validation subsets, training
-maturity, and evaluator aggregation semantics. The archived DDQN artifact
-reports a 95.33\% goal rate and 5.13\% collision rate, while the current
-full-directory Waymo BC, RLlib PPO, and Sample Factory APPO rollouts report
-23.93\%/40.82\%, 8.00\%/73.00\%, and 4.00\%/81.00\%, respectively. A
-matched full-directory benchmark with completed checkpoints, independent seeds,
-reward-penalty sweeps, and occlusion ablations is required before drawing
-comparative or deployment conclusions.
+unavoidable, and a provenance-aware evaluation protocol. A controlled,
+multi-seed study with matched arms, identical budgets, and a deterministic
+evaluator on a held-out split is in progress; until it completes we
+withhold comparative numbers rather than report an interim checkpoint audit
+whose rows mixed training maturity, validation subsets, and evaluator
+semantics.
 
 % =========================================================================
 \bibliographystyle{plainnat}
@@ -858,20 +759,9 @@ TTZ clip                 & 20\,s              & Simulation $\Delta t$      & 0.1
 \section{Additional Results}
 \label{app:additional}
 
-The complete interim audit, including checkpoint paths, validation splits,
-sample sizes, training maturity, confidence intervals, and evaluator
-aggregation semantics, is stored in
-\texttt{paper/runs data/evaluation_summary.json}. The archived DDQN artifact
-contains 1{,}430 goals and 77 collisions in 1{,}500 episodes. The current
-locally reproducible artifacts include a 1{,}500-episode BC evaluation, a
-1{,}500-episode CRL evaluation, a 1{,}000-scenario Waymo BC evaluation,
-a 1{,}000-rollout R-MAPPO evaluation, and 100-rollout framework-native
-evaluations for both RLlib and Sample Factory. Continuous metrics are
-reported only where the corresponding evaluator emitted them; missing values
-are not imputed.
-
-\results{Space reserved for the not-yet-completed per-scenario-type
-breakdowns, collision-penalty sweep, density study, occlusion ablation,
-independent-seed analysis, BC comparison, and interpretability plots.}
+\results{Per-scenario-type breakdowns, collision-penalty sweep, density
+study, occlusion ablation, independent-seed analysis, BC comparison, and
+interpretability plots, generated from the controlled study's evaluation
+JSONs.}
 
 \end{document}

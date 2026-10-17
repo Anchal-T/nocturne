@@ -1,0 +1,1312 @@
+{
+  "generated_at": "2026-10-17T17:52:03.028414+00:00",
+  "generated_by": "scripts/make_model_manifest.py",
+  "repo": "/home/anchal/anchal/nocturne",
+  "repo_commit": "9a6a0c452b6aefe1cfab14e328681ce7509f7a21",
+  "purpose": "Audit of every model checkpoint referenced by the paper draft, created during the 2026-10-17 purge of invalid evidence. Maps each checkpoint family to the audit rows it backed and records its true training state.",
+  "status_legend": {
+    "archived_pilot": "Historical run behind a removed result row; evaluated outside any held-out split.",
+    "trained": "Completed training with saved weights; budget recorded in metadata/TensorBoard.",
+    "untrained_startup_save": "Weights saved at process start (train_steps=0, epsilon=1); the run never trained to a checkpoint.",
+    "failed_attempt": "Launch attempt that saved only startup weights.",
+    "smoke": "Smoke/validation artifact; not a completed training run.",
+    "aborted_no_weights": "Aborted run; TensorBoard logs only, no weight file saved.",
+    "full_training_other_family": "Completed training run outside the DDQN family (retired from the paper).",
+    "other_family": "Checkpoint family outside the DDQN family (retired from the paper)."
+  },
+  "groups": [
+    {
+      "id": "ddqn_archived_march_run",
+      "family": "DDQN (archived, 600-D observation)",
+      "role": "Source run of the archived 95.33%/5.13% result, evaluated on one repeated fixture scene.",
+      "status": "archived_pilot",
+      "status_note": "Old 20x10-grid observation without target/TTZ/occlusion extras, hidden [256,256,256,64]. The training transcript was moved out of paper/ on 2026-10-17.",
+      "paper_references": [
+        "main.tex tab:main row 'Archived DDQN result' (removed 2026-10-17)",
+        "paper/runs data/eval_baseline_fixed.json",
+        "paper/runs data/evaluation_summary.json"
+      ],
+      "dir": "outputs/2026-03-11/20-29-53/checkpoints/drl_collision_avoidance",
+      "external": false,
+      "files": [
+        {
+          "path": "/home/anchal/anchal/nocturne/outputs/2026-03-11/20-29-53/checkpoints/drl_collision_avoidance/ddqn_ep100000.pth",
+          "external": true,
+          "exists": true,
+          "size_bytes": 6894422,
+          "mtime": "2026-03-11T22:06:42.108160+00:00",
+          "sha256": "a0a88f2746ce8659969d4bfc65e3ebed4c414ba110a46193ad81e7d04d019b88",
+          "metadata": {
+            "grid_size": 600,
+            "grid_channels": 3,
+            "grid_rows": 20,
+            "grid_cols": 10,
+            "hidden_layers": [
+              256,
+              256,
+              256,
+              64
+            ],
+            "dueling": true,
+            "noisy": true,
+            "train_steps": 3680,
+            "epsilon": 0.05,
+            "use_muon": true
+          }
+        },
+        {
+          "path": "/home/anchal/anchal/nocturne/outputs/2026-03-11/20-29-53/checkpoints/drl_collision_avoidance/ddqn_ep200000.pth",
+          "external": true,
+          "exists": true,
+          "size_bytes": 6894422,
+          "mtime": "2026-03-12T00:18:38.619600+00:00",
+          "sha256": "f25e8f48bba379c1ed72226c43d5d7177ae06d81308a306dd47544bce4d4b3f0",
+          "metadata": {
+            "grid_size": 600,
+            "grid_channels": 3,
+            "grid_rows": 20,
+            "grid_cols": 10,
+            "hidden_layers": [
+              256,
+              256,
+              256,
+              64
+            ],
+            "dueling": true,
+            "noisy": true,
+            "train_steps": 8903,
+            "epsilon": 0.05,
+            "use_muon": true
+          }
+        },
+        {
+          "path": "/home/anchal/anchal/nocturne/outputs/2026-03-11/20-29-53/checkpoints/drl_collision_avoidance/ddqn_ep300000.pth",
+          "external": true,
+          "exists": true,
+          "size_bytes": 6894422,
+          "mtime": "2026-03-12T02:40:13.186584+00:00",
+          "sha256": "febf03fdb60f298bcd8c926e96537bde28de3e46b281f9077cf54705192c32d5",
+          "metadata": {
+            "grid_size": 600,
+            "grid_channels": 3,
+            "grid_rows": 20,
+            "grid_cols": 10,
+            "hidden_layers": [
+              256,
+              256,
+              256,
+              64
+            ],
+            "dueling": true,
+            "noisy": true,
+            "train_steps": 14342,
+            "epsilon": 0.05,
+            "use_muon": true
+          }
+        },
+        {
+          "path": "/home/anchal/anchal/nocturne/outputs/2026-03-11/20-29-53/checkpoints/drl_collision_avoidance/ddqn_ep400000.pth",
+          "external": true,
+          "exists": true,
+          "size_bytes": 6894422,
+          "mtime": "2026-03-12T04:58:55.061861+00:00",
+          "sha256": "b2a1f36bab78286dd75b24be0376547634f9ec9ebd3f1198d829e51f8c0a4fce",
+          "metadata": {
+            "grid_size": 600,
+            "grid_channels": 3,
+            "grid_rows": 20,
+            "grid_cols": 10,
+            "hidden_layers": [
+              256,
+              256,
+              256,
+              64
+            ],
+            "dueling": true,
+            "noisy": true,
+            "train_steps": 19685,
+            "epsilon": 0.05,
+            "use_muon": true
+          }
+        },
+        {
+          "path": "/home/anchal/anchal/nocturne/outputs/2026-03-11/20-29-53/checkpoints/drl_collision_avoidance/ddqn_ep500000.pth",
+          "external": true,
+          "exists": true,
+          "size_bytes": 6894422,
+          "mtime": "2026-03-12T07:18:56.162877+00:00",
+          "sha256": "31a090bea1badaa0d2e05afe0a310a35c1ac26adf48ac9929c253b6c23e98b21",
+          "metadata": {
+            "grid_size": 600,
+            "grid_channels": 3,
+            "grid_rows": 20,
+            "grid_cols": 10,
+            "hidden_layers": [
+              256,
+              256,
+              256,
+              64
+            ],
+            "dueling": true,
+            "noisy": true,
+            "train_steps": 25108,
+            "epsilon": 0.05,
+            "use_muon": true
+          }
+        },
+        {
+          "path": "/home/anchal/anchal/nocturne/outputs/2026-03-11/20-29-53/checkpoints/drl_collision_avoidance/ddqn_final.pth",
+          "external": true,
+          "exists": true,
+          "size_bytes": 6893281,
+          "mtime": "2026-03-12T07:18:57.430879+00:00",
+          "sha256": "00eb17b01b1fb81973a21ba20b77b40e2fcde159f76d911b7b496349b233dc51",
+          "metadata": {
+            "grid_size": 600,
+            "grid_channels": 3,
+            "grid_rows": 20,
+            "grid_cols": 10,
+            "hidden_layers": [
+              256,
+              256,
+              256,
+              64
+            ],
+            "dueling": true,
+            "noisy": true,
+            "train_steps": 25109,
+            "epsilon": 0.05,
+            "use_muon": true
+          }
+        }
+      ],
+      "tb_logs": {
+        "event_files": [
+          "events.out.tfevents.1773261027.iiitsgpu.2057084.0"
+        ],
+        "last_episode_completed": 500000,
+        "n_episode_points": 500000
+      }
+    },
+    {
+      "id": "ddqn_with_occlusion_1gpu_resume",
+      "family": "DDQN",
+      "role": "Trained with-occlusion model; matched-eval row 'DDQN + occlusion (resume)'.",
+      "status": "trained",
+      "status_note": "613-D observation with occlusion features. Last TensorBoard episode 63,334; final checkpoint train_steps=157,675, epsilon=0.05.",
+      "paper_references": [
+        "main.tex tab:main row 'DDQN + occlusion (resume)' via matched_eval (removed 2026-10-17)",
+        "paper/runs data/matched_eval/ddqn_with_occlusion_resume.json"
+      ],
+      "dir": "checkpoints/ddqn_with_occlusion_1gpu_resume",
+      "external": false,
+      "files": [
+        {
+          "path": "/home/anchal/anchal/nocturne/checkpoints/ddqn_with_occlusion_1gpu_resume/ddqn_ep10000.pth",
+          "external": true,
+          "exists": true,
+          "size_bytes": 78394018,
+          "mtime": "2026-09-19T12:33:56.012016+00:00",
+          "sha256": "48c139abf477fe755b31991bb4930a311c2efc3495618efd481a59aa2b1e6b7f",
+          "metadata": {
+            "obs_dim": 613,
+            "grid_size": 600,
+            "grid_channels": 3,
+            "grid_rows": 20,
+            "grid_cols": 10,
+            "hidden_layers": [
+              256,
+              256,
+              256,
+              256
+            ],
+            "dueling": true,
+            "noisy": true,
+            "mlp_depth": 16,
+            "train_steps": 137692,
+            "epsilon": 0.628026,
+            "use_muon": true,
+            "world_size": 1
+          }
+        },
+        {
+          "path": "/home/anchal/anchal/nocturne/checkpoints/ddqn_with_occlusion_1gpu_resume/ddqn_ep20000.pth",
+          "external": true,
+          "exists": true,
+          "size_bytes": 78394018,
+          "mtime": "2026-09-19T13:38:50.175289+00:00",
+          "sha256": "82a8185b5a508d2bb523d577fbd16c8020a30e6beef3ed5bff010bc7dee9d5a3",
+          "metadata": {
+            "obs_dim": 613,
+            "grid_size": 600,
+            "grid_channels": 3,
+            "grid_rows": 20,
+            "grid_cols": 10,
+            "hidden_layers": [
+              256,
+              256,
+              256,
+              256
+            ],
+            "dueling": true,
+            "noisy": true,
+            "mlp_depth": 16,
+            "train_steps": 142667,
+            "epsilon": 0.05,
+            "use_muon": true,
+            "world_size": 1
+          }
+        },
+        {
+          "path": "/home/anchal/anchal/nocturne/checkpoints/ddqn_with_occlusion_1gpu_resume/ddqn_ep30000.pth",
+          "external": true,
+          "exists": true,
+          "size_bytes": 78394018,
+          "mtime": "2026-09-19T14:56:28.823955+00:00",
+          "sha256": "9703ff87c439f23f92b0f8fac051bccb970c9a294f6983eca6b7c610a9b02282",
+          "metadata": {
+            "obs_dim": 613,
+            "grid_size": 600,
+            "grid_channels": 3,
+            "grid_rows": 20,
+            "grid_cols": 10,
+            "hidden_layers": [
+              256,
+              256,
+              256,
+              256
+            ],
+            "dueling": true,
+            "noisy": true,
+            "mlp_depth": 16,
+            "train_steps": 148621,
+            "epsilon": 0.05,
+            "use_muon": true,
+            "world_size": 1
+          }
+        },
+        {
+          "path": "/home/anchal/anchal/nocturne/checkpoints/ddqn_with_occlusion_1gpu_resume/ddqn_ep40000.pth",
+          "external": true,
+          "exists": true,
+          "size_bytes": 78394018,
+          "mtime": "2026-09-19T15:44:31.935371+00:00",
+          "sha256": "a0325259018a329f89b78a1e1582194f3c0b6f4654bd19bd327b286e4960603b",
+          "metadata": {
+            "obs_dim": 613,
+            "grid_size": 600,
+            "grid_channels": 3,
+            "grid_rows": 20,
+            "grid_cols": 10,
+            "hidden_layers": [
+              256,
+              256,
+              256,
+              256
+            ],
+            "dueling": true,
+            "noisy": true,
+            "mlp_depth": 16,
+            "train_steps": 151955,
+            "epsilon": 0.05,
+            "use_muon": true,
+            "world_size": 1
+          }
+        },
+        {
+          "path": "/home/anchal/anchal/nocturne/checkpoints/ddqn_with_occlusion_1gpu_resume/ddqn_ep50000.pth",
+          "external": true,
+          "exists": true,
+          "size_bytes": 78394018,
+          "mtime": "2026-09-19T16:20:46.241689+00:00",
+          "sha256": "361048a1367cf4c6fbb5fb3019ba6953c983816ef01899bde03ef73d4872084e",
+          "metadata": {
+            "obs_dim": 613,
+            "grid_size": 600,
+            "grid_channels": 3,
+            "grid_rows": 20,
+            "grid_cols": 10,
+            "hidden_layers": [
+              256,
+              256,
+              256,
+              256
+            ],
+            "dueling": true,
+            "noisy": true,
+            "mlp_depth": 16,
+            "train_steps": 154276,
+            "epsilon": 0.05,
+            "use_muon": true,
+            "world_size": 1
+          }
+        },
+        {
+          "path": "/home/anchal/anchal/nocturne/checkpoints/ddqn_with_occlusion_1gpu_resume/ddqn_ep60000.pth",
+          "external": true,
+          "exists": true,
+          "size_bytes": 78394018,
+          "mtime": "2026-09-19T16:55:46.849084+00:00",
+          "sha256": "764a22d8b13ab7e0e83b080b4cfd8f926b6d0cd407b7ef082b38415e4eb278da",
+          "metadata": {
+            "obs_dim": 613,
+            "grid_size": 600,
+            "grid_channels": 3,
+            "grid_rows": 20,
+            "grid_cols": 10,
+            "hidden_layers": [
+              256,
+              256,
+              256,
+              256
+            ],
+            "dueling": true,
+            "noisy": true,
+            "mlp_depth": 16,
+            "train_steps": 156598,
+            "epsilon": 0.05,
+            "use_muon": true,
+            "world_size": 1
+          }
+        },
+        {
+          "path": "/home/anchal/anchal/nocturne/checkpoints/ddqn_with_occlusion_1gpu_resume/ddqn_final.pth",
+          "external": true,
+          "exists": true,
+          "size_bytes": 78394018,
+          "mtime": "2026-09-19T17:09:00.526038+00:00",
+          "sha256": "3b3ad3668ed0e430991878be8c87b4571f701461725158f1fd89875769916843",
+          "metadata": {
+            "obs_dim": 613,
+            "grid_size": 600,
+            "grid_channels": 3,
+            "grid_rows": 20,
+            "grid_cols": 10,
+            "hidden_layers": [
+              256,
+              256,
+              256,
+              256
+            ],
+            "dueling": true,
+            "noisy": true,
+            "mlp_depth": 16,
+            "train_steps": 157675,
+            "epsilon": 0.05,
+            "use_muon": true,
+            "world_size": 1
+          }
+        }
+      ],
+      "tb_logs": {
+        "event_files": [
+          "events.out.tfevents.1789819452.iiitsgpu.764449.0"
+        ],
+        "last_episode_completed": 63334,
+        "n_episode_points": 63334
+      }
+    },
+    {
+      "id": "ddqn_with_occlusion_3gpu_async",
+      "family": "DDQN",
+      "role": "Trained with-occlusion model; matched-eval row 'DDQN + occlusion (async 70k)'.",
+      "status": "trained",
+      "status_note": "613-D observation with occlusion features. Last TensorBoard episode 76,604; ep70000 checkpoint train_steps=135,704.",
+      "paper_references": [
+        "main.tex tab:main row 'DDQN + occlusion (async 70k)' via matched_eval (removed 2026-10-17)",
+        "paper/runs data/matched_eval/ddqn_with_occlusion_async70k.json"
+      ],
+      "dir": "checkpoints/ddqn_with_occlusion_3gpu_async",
+      "external": false,
+      "files": [
+        {
+          "path": "/home/anchal/anchal/nocturne/checkpoints/ddqn_with_occlusion_3gpu_async/ddqn_ep10000.pth",
+          "external": true,
+          "exists": true,
+          "size_bytes": 78391970,
+          "mtime": "2026-09-18T19:12:35.858975+00:00",
+          "sha256": "09db7202f7816273edca06b50a0fe0a554acb514e1d71f519c4db6290e2a3950",
+          "metadata": {
+            "obs_dim": 613,
+            "grid_size": 600,
+            "grid_channels": 3,
+            "grid_rows": 20,
+            "grid_cols": 10,
+            "hidden_layers": [
+              256,
+              256,
+              256,
+              256
+            ],
+            "dueling": true,
+            "noisy": true,
+            "mlp_depth": 16,
+            "train_steps": 8479,
+            "epsilon": 0.05,
+            "use_muon": true,
+            "world_size": 3
+          }
+        },
+        {
+          "path": "/home/anchal/anchal/nocturne/checkpoints/ddqn_with_occlusion_3gpu_async/ddqn_ep20000.pth",
+          "external": true,
+          "exists": true,
+          "size_bytes": 78391970,
+          "mtime": "2026-09-18T21:05:33.797120+00:00",
+          "sha256": "9723b8a36057e8102b10fcb32a232d4ea6c586d7f28436a9f88f7641610323ea",
+          "metadata": {
+            "obs_dim": 613,
+            "grid_size": 600,
+            "grid_channels": 3,
+            "grid_rows": 20,
+            "grid_cols": 10,
+            "hidden_layers": [
+              256,
+              256,
+              256,
+              256
+            ],
+            "dueling": true,
+            "noisy": true,
+            "mlp_depth": 16,
+            "train_steps": 22803,
+            "epsilon": 0.05,
+            "use_muon": true,
+            "world_size": 3
+          }
+        },
+        {
+          "path": "/home/anchal/anchal/nocturne/checkpoints/ddqn_with_occlusion_3gpu_async/ddqn_ep30000.pth",
+          "external": true,
+          "exists": true,
+          "size_bytes": 78391970,
+          "mtime": "2026-09-18T23:47:16.051513+00:00",
+          "sha256": "4cafba218ad525c0ee6f7b2a10e67b16f2459559677d45397f493fb64d620f3c",
+          "metadata": {
+            "obs_dim": 613,
+            "grid_size": 600,
+            "grid_channels": 3,
+            "grid_rows": 20,
+            "grid_cols": 10,
+            "hidden_layers": [
+              256,
+              256,
+              256,
+              256
+            ],
+            "dueling": true,
+            "noisy": true,
+            "mlp_depth": 16,
+            "train_steps": 45153,
+            "epsilon": 0.05,
+            "use_muon": true,
+            "world_size": 3
+          }
+        },
+        {
+          "path": "/home/anchal/anchal/nocturne/checkpoints/ddqn_with_occlusion_3gpu_async/ddqn_ep40000.pth",
+          "external": true,
+          "exists": true,
+          "size_bytes": 78391970,
+          "mtime": "2026-09-19T02:20:52.160807+00:00",
+          "sha256": "2913463c74e54e9f06c1cd6ca1916e453e6776b445d827b84136ceb7d1bb24ec",
+          "metadata": {
+            "obs_dim": 613,
+            "grid_size": 600,
+            "grid_channels": 3,
+            "grid_rows": 20,
+            "grid_cols": 10,
+            "hidden_layers": [
+              256,
+              256,
+              256,
+              256
+            ],
+            "dueling": true,
+            "noisy": true,
+            "mlp_depth": 16,
+            "train_steps": 66925,
+            "epsilon": 0.05,
+            "use_muon": true,
+            "world_size": 3
+          }
+        },
+        {
+          "path": "/home/anchal/anchal/nocturne/checkpoints/ddqn_with_occlusion_3gpu_async/ddqn_ep50000.pth",
+          "external": true,
+          "exists": true,
+          "size_bytes": 78391970,
+          "mtime": "2026-09-19T04:47:25.960756+00:00",
+          "sha256": "c3ff1b381e4f8863b1cbb3e274ab999abf484c70ab10f9e12c9f982ee16d2995",
+          "metadata": {
+            "obs_dim": 613,
+            "grid_size": 600,
+            "grid_channels": 3,
+            "grid_rows": 20,
+            "grid_cols": 10,
+            "hidden_layers": [
+              256,
+              256,
+              256,
+              256
+            ],
+            "dueling": true,
+            "noisy": true,
+            "mlp_depth": 16,
+            "train_steps": 88016,
+            "epsilon": 0.05,
+            "use_muon": true,
+            "world_size": 3
+          }
+        },
+        {
+          "path": "/home/anchal/anchal/nocturne/checkpoints/ddqn_with_occlusion_3gpu_async/ddqn_ep60000.pth",
+          "external": true,
+          "exists": true,
+          "size_bytes": 78391970,
+          "mtime": "2026-09-19T07:30:36.421025+00:00",
+          "sha256": "2ee9b8860ee2e8624651f17de73cae3c170f846d2f5c94256374fb7ee7d5b6f8",
+          "metadata": {
+            "obs_dim": 613,
+            "grid_size": 600,
+            "grid_channels": 3,
+            "grid_rows": 20,
+            "grid_cols": 10,
+            "hidden_layers": [
+              256,
+              256,
+              256,
+              256
+            ],
+            "dueling": true,
+            "noisy": true,
+            "mlp_depth": 16,
+            "train_steps": 111433,
+            "epsilon": 0.05,
+            "use_muon": true,
+            "world_size": 3
+          }
+        },
+        {
+          "path": "/home/anchal/anchal/nocturne/checkpoints/ddqn_with_occlusion_3gpu_async/ddqn_ep70000.pth",
+          "external": true,
+          "exists": true,
+          "size_bytes": 78391970,
+          "mtime": "2026-09-19T10:17:17.043584+00:00",
+          "sha256": "2bfac1c85d1d9e97fc37e2ed14fdc26e289a76ced882ef46c10599d332810086",
+          "metadata": {
+            "obs_dim": 613,
+            "grid_size": 600,
+            "grid_channels": 3,
+            "grid_rows": 20,
+            "grid_cols": 10,
+            "hidden_layers": [
+              256,
+              256,
+              256,
+              256
+            ],
+            "dueling": true,
+            "noisy": true,
+            "mlp_depth": 16,
+            "train_steps": 135704,
+            "epsilon": 0.05,
+            "use_muon": true,
+            "world_size": 3
+          }
+        }
+      ],
+      "tb_logs": {
+        "event_files": [
+          "events.out.tfevents.1789754517.iiitsgpu.258369.0",
+          "events.out.tfevents.1789754553.iiitsgpu.260144.0"
+        ],
+        "last_episode_completed": 76604,
+        "n_episode_points": 76622
+      }
+    },
+    {
+      "id": "ddqn_with_occlusion_startup",
+      "family": "DDQN",
+      "role": "Source of matched-eval row 'DDQN + occlusion (Sep18)' \u2014 actually an untrained startup save.",
+      "status": "untrained_startup_save",
+      "status_note": "ddqn_final.pth has train_steps=0, epsilon=1.0 (weights saved at process start). The run was retried and aborted after ~1,136 episodes; no trained weights were saved.",
+      "paper_references": [
+        "main.tex tab:main row 'DDQN + occlusion (Sep18)' via matched_eval (removed 2026-10-17)",
+        "paper/runs data/matched_eval/ddqn_with_occlusion_sep18.json"
+      ],
+      "dir": "checkpoints/ddqn_with_occlusion",
+      "external": false,
+      "files": [
+        {
+          "path": "/home/anchal/anchal/nocturne/checkpoints/ddqn_with_occlusion/ddqn_emergency.pth",
+          "external": true,
+          "exists": true,
+          "size_bytes": 58632939,
+          "mtime": "2026-09-18T17:49:03.568166+00:00",
+          "sha256": "c1c7fcf876710b9235be1fa24139a06b0d6cffe8f80d43ccd1f85697a888c30c",
+          "metadata": {
+            "obs_dim": 613,
+            "grid_size": 600,
+            "grid_channels": 3,
+            "grid_rows": 20,
+            "grid_cols": 10,
+            "hidden_layers": [
+              256,
+              256,
+              256,
+              256
+            ],
+            "dueling": true,
+            "noisy": true,
+            "mlp_depth": 16,
+            "train_steps": 0,
+            "epsilon": 1.0,
+            "use_muon": true,
+            "world_size": 1
+          }
+        },
+        {
+          "path": "/home/anchal/anchal/nocturne/checkpoints/ddqn_with_occlusion/ddqn_final.pth",
+          "external": true,
+          "exists": true,
+          "size_bytes": 58632939,
+          "mtime": "2026-09-18T17:49:05.796179+00:00",
+          "sha256": "c1c7fcf876710b9235be1fa24139a06b0d6cffe8f80d43ccd1f85697a888c30c",
+          "metadata": {
+            "obs_dim": 613,
+            "grid_size": 600,
+            "grid_channels": 3,
+            "grid_rows": 20,
+            "grid_cols": 10,
+            "hidden_layers": [
+              256,
+              256,
+              256,
+              256
+            ],
+            "dueling": true,
+            "noisy": true,
+            "mlp_depth": 16,
+            "train_steps": 0,
+            "epsilon": 1.0,
+            "use_muon": true,
+            "world_size": 1
+          }
+        }
+      ],
+      "tb_logs": {
+        "event_files": [
+          "events.out.tfevents.1789753507.iiitsgpu.245622.0",
+          "events.out.tfevents.1789753650.iiitsgpu.247704.0"
+        ],
+        "last_episode_completed": 254,
+        "n_episode_points": 403
+      }
+    },
+    {
+      "id": "ddqn_without_occlusion_startup",
+      "family": "DDQN",
+      "role": "Source of matched-eval row 'minus occlusion' \u2014 the ablation was never trained.",
+      "status": "untrained_startup_save",
+      "status_note": "ddqn_final.pth has train_steps=0, epsilon=1.0 (weights saved at process start). No trained no-occlusion checkpoint exists anywhere in the workspace.",
+      "paper_references": [
+        "main.tex tab:main row 'minus occlusion' via matched_eval (removed 2026-10-17)",
+        "paper/runs data/matched_eval/ddqn_without_occlusion.json"
+      ],
+      "dir": "checkpoints/ddqn_without_occlusion",
+      "external": false,
+      "files": [
+        {
+          "path": "/home/anchal/anchal/nocturne/checkpoints/ddqn_without_occlusion/ddqn_emergency.pth",
+          "external": true,
+          "exists": true,
+          "size_bytes": 58583787,
+          "mtime": "2026-09-18T17:48:58.773138+00:00",
+          "sha256": "67575009cf6819894c59732b96a45781bf94f50ee945e3814d30a61a568d70c5",
+          "metadata": {
+            "obs_dim": 609,
+            "grid_size": 600,
+            "grid_channels": 3,
+            "grid_rows": 20,
+            "grid_cols": 10,
+            "hidden_layers": [
+              256,
+              256,
+              256,
+              256
+            ],
+            "dueling": true,
+            "noisy": true,
+            "mlp_depth": 16,
+            "train_steps": 0,
+            "epsilon": 1.0,
+            "use_muon": true,
+            "world_size": 1
+          }
+        },
+        {
+          "path": "/home/anchal/anchal/nocturne/checkpoints/ddqn_without_occlusion/ddqn_final.pth",
+          "external": true,
+          "exists": true,
+          "size_bytes": 58583787,
+          "mtime": "2026-09-18T17:49:01.429153+00:00",
+          "sha256": "67575009cf6819894c59732b96a45781bf94f50ee945e3814d30a61a568d70c5",
+          "metadata": {
+            "obs_dim": 609,
+            "grid_size": 600,
+            "grid_channels": 3,
+            "grid_rows": 20,
+            "grid_cols": 10,
+            "hidden_layers": [
+              256,
+              256,
+              256,
+              256
+            ],
+            "dueling": true,
+            "noisy": true,
+            "mlp_depth": 16,
+            "train_steps": 0,
+            "epsilon": 1.0,
+            "use_muon": true,
+            "world_size": 1
+          }
+        }
+      ],
+      "tb_logs": {
+        "event_files": [
+          "events.out.tfevents.1789753507.iiitsgpu.245623.0",
+          "events.out.tfevents.1789753650.iiitsgpu.247737.0"
+        ],
+        "last_episode_completed": 228,
+        "n_episode_points": 374
+      }
+    },
+    {
+      "id": "ddqn_with_occlusion_3gpu_failed",
+      "family": "DDQN",
+      "role": "Failed 3-GPU launch attempt.",
+      "status": "failed_attempt",
+      "status_note": "ddqn_final.pth world_size=3, train_steps=0; only startup weights were saved.",
+      "paper_references": [
+        "unreferenced by the paper"
+      ],
+      "dir": "checkpoints/ddqn_with_occlusion_3gpu",
+      "external": false,
+      "files": [
+        {
+          "path": "/home/anchal/anchal/nocturne/checkpoints/ddqn_with_occlusion_3gpu/ddqn_emergency.pth",
+          "external": true,
+          "exists": true,
+          "size_bytes": 57649581,
+          "mtime": "2026-09-18T17:59:02.251551+00:00",
+          "sha256": "cbaf1e35eb436394a2f0fe2ad1c1636f02958c73d0f74cc097a1f8d008265689",
+          "metadata": {
+            "obs_dim": 613,
+            "grid_size": 600,
+            "grid_channels": 3,
+            "grid_rows": 20,
+            "grid_cols": 10,
+            "hidden_layers": [
+              256,
+              256,
+              256,
+              256
+            ],
+            "dueling": true,
+            "noisy": true,
+            "mlp_depth": 16,
+            "train_steps": 0,
+            "epsilon": 1.0,
+            "use_muon": true,
+            "world_size": 3
+          }
+        },
+        {
+          "path": "/home/anchal/anchal/nocturne/checkpoints/ddqn_with_occlusion_3gpu/ddqn_final.pth",
+          "external": true,
+          "exists": true,
+          "size_bytes": 57649581,
+          "mtime": "2026-09-18T17:59:04.693558+00:00",
+          "sha256": "cbaf1e35eb436394a2f0fe2ad1c1636f02958c73d0f74cc097a1f8d008265689",
+          "metadata": {
+            "obs_dim": 613,
+            "grid_size": 600,
+            "grid_channels": 3,
+            "grid_rows": 20,
+            "grid_cols": 10,
+            "hidden_layers": [
+              256,
+              256,
+              256,
+              256
+            ],
+            "dueling": true,
+            "noisy": true,
+            "mlp_depth": 16,
+            "train_steps": 0,
+            "epsilon": 1.0,
+            "use_muon": true,
+            "world_size": 3
+          }
+        }
+      ],
+      "tb_logs": {
+        "event_files": [
+          "events.out.tfevents.1789754280.iiitsgpu.254736.0"
+        ],
+        "last_episode_completed": 218,
+        "n_episode_points": 218
+      }
+    },
+    {
+      "id": "ddqn_with_occlusion_retry_aborted",
+      "family": "DDQN",
+      "role": "Aborted retry of the with-occlusion run.",
+      "status": "aborted_no_weights",
+      "status_note": "Only TensorBoard logs (about 1,136 episodes); no weight file saved.",
+      "paper_references": [
+        "unreferenced by the paper"
+      ],
+      "dir": "checkpoints/ddqn_with_occlusion_retry",
+      "external": false,
+      "files": [],
+      "tb_logs": {
+        "event_files": [
+          "events.out.tfevents.1789753880.iiitsgpu.250784.0"
+        ],
+        "last_episode_completed": 1136,
+        "n_episode_points": 1136
+      }
+    },
+    {
+      "id": "ddqn_without_occlusion_retry_aborted",
+      "family": "DDQN",
+      "role": "Aborted retry of the no-occlusion run.",
+      "status": "aborted_no_weights",
+      "status_note": "Only TensorBoard logs; no weight file saved. No trained no-occlusion checkpoint exists.",
+      "paper_references": [
+        "unreferenced by the paper"
+      ],
+      "dir": "checkpoints/ddqn_without_occlusion_retry",
+      "external": false,
+      "files": [],
+      "tb_logs": {
+        "event_files": [
+          "events.out.tfevents.1789753881.iiitsgpu.250788.0"
+        ],
+        "last_episode_completed": 1037,
+        "n_episode_points": 1037
+      }
+    },
+    {
+      "id": "ddqn_validation_smoke",
+      "family": "DDQN",
+      "role": "Validation smoke checkpoint; matched-eval / audit row 'DDQN validation'.",
+      "status": "smoke",
+      "status_note": "ddqn_final.pth train_steps=3, noisy=False; not a completed training run.",
+      "paper_references": [
+        "main.tex tab:main row 'DDQN validation' (removed 2026-10-17)",
+        "paper/runs data/matched_eval/ddqn_ddp_validation.json"
+      ],
+      "dir": "checkpoints/drl_collision_avoidance",
+      "external": false,
+      "files": [
+        {
+          "path": "/home/anchal/anchal/nocturne/checkpoints/drl_collision_avoidance/ddqn_emergency.pth",
+          "external": true,
+          "exists": true,
+          "size_bytes": 21570989,
+          "mtime": "2026-09-01T17:39:37.561339+00:00",
+          "sha256": "5e5efd18087f1d605839125a4028ecca2b0625eb51287f04070d960074ded8ed",
+          "metadata": {
+            "obs_dim": 609,
+            "grid_size": 600,
+            "grid_channels": 3,
+            "grid_rows": 20,
+            "grid_cols": 10,
+            "hidden_layers": [
+              256,
+              256,
+              256,
+              256
+            ],
+            "dueling": true,
+            "noisy": false,
+            "mlp_depth": 16,
+            "train_steps": 0,
+            "epsilon": 1.0,
+            "use_muon": false,
+            "world_size": 2
+          }
+        },
+        {
+          "path": "/home/anchal/anchal/nocturne/checkpoints/drl_collision_avoidance/ddqn_final.pth",
+          "external": true,
+          "exists": true,
+          "size_bytes": 21570989,
+          "mtime": "2026-09-01T17:43:00.630842+00:00",
+          "sha256": "7e6e79bdbde3135a0bff4cec5e16235d523a2332e89e29700174f80b672f48ac",
+          "metadata": {
+            "obs_dim": 609,
+            "grid_size": 600,
+            "grid_channels": 3,
+            "grid_rows": 20,
+            "grid_cols": 10,
+            "hidden_layers": [
+              256,
+              256,
+              256,
+              256
+            ],
+            "dueling": true,
+            "noisy": false,
+            "mlp_depth": 16,
+            "train_steps": 3,
+            "epsilon": 0.999985,
+            "use_muon": false,
+            "world_size": 2
+          }
+        }
+      ],
+      "tb_logs": {
+        "event_files": [
+          "events.out.tfevents.1788284377.iiitsgpu.3447430.0",
+          "events.out.tfevents.1788284402.iiitsgpu.3447821.0",
+          "events.out.tfevents.1788284580.iiitsgpu.3449744.0"
+        ],
+        "last_episode_completed": 2,
+        "n_episode_points": 2
+      }
+    },
+    {
+      "id": "ddqn_ddp_validation_copy",
+      "family": "DDQN",
+      "role": "External copy of the DDQN validation smoke checkpoint referenced by the audit JSON.",
+      "status": "smoke",
+      "status_note": "Same artifact as checkpoints/drl_collision_avoidance/ddqn_final.pth by role; referred to by paper/runs data/evaluation_summary.json.",
+      "paper_references": [
+        "paper/runs data/evaluation_summary.json"
+      ],
+      "dir": ".",
+      "external": true,
+      "files": [
+        {
+          "path": "/home/anchal/tmp/ddqn_ddp_validation/./ddqn_final.pth",
+          "external": true,
+          "exists": true,
+          "size_bytes": 21570989,
+          "mtime": "2026-09-01T18:21:50.759966+00:00",
+          "sha256": "3494d6ff1b1750492f3696dcdda7cc201ec9de775a312cedc63aac87d79aa3ea",
+          "metadata": {
+            "obs_dim": 609,
+            "grid_size": 600,
+            "grid_channels": 3,
+            "grid_rows": 20,
+            "grid_cols": 10,
+            "hidden_layers": [
+              256,
+              256,
+              256,
+              256
+            ],
+            "dueling": true,
+            "noisy": false,
+            "mlp_depth": 16,
+            "train_steps": 3,
+            "epsilon": 0.999985,
+            "use_muon": false,
+            "world_size": 2
+          }
+        }
+      ]
+    },
+    {
+      "id": "bc_ddp_validation_smoke",
+      "family": "behavior cloning",
+      "role": "BC smoke checkpoint behind the audit row 'BC'.",
+      "status": "smoke",
+      "status_note": "train_steps=1 (validation smoke artifact).",
+      "paper_references": [
+        "main.tex tab:main row 'BC' (removed 2026-10-17)",
+        "paper/runs data/matched_eval/bc_validation.json"
+      ],
+      "dir": ".",
+      "external": true,
+      "files": [
+        {
+          "path": "/home/anchal/tmp/./bc_ddp_validation.pth",
+          "external": true,
+          "exists": true,
+          "size_bytes": 18725321,
+          "mtime": "2026-09-01T18:21:06.547845+00:00",
+          "sha256": "f1cffdc2a1e2125745f5a9d453e5ac96b9eb2791bf06d449b89c0127405810c5",
+          "metadata": {
+            "obs_dim": 609,
+            "grid_size": 600,
+            "grid_channels": 3,
+            "grid_rows": 20,
+            "grid_cols": 10,
+            "hidden_layers": [
+              256,
+              256,
+              256,
+              256
+            ],
+            "dueling": false,
+            "noisy": false,
+            "mlp_depth": 16,
+            "train_steps": 1,
+            "epsilon": 0.0,
+            "use_muon": false,
+            "world_size": 2
+          }
+        }
+      ]
+    },
+    {
+      "id": "crl_large_full",
+      "family": "contrastive RL",
+      "role": "Completed CRL checkpoint behind the audit row 'CRL'.",
+      "status": "full_training_other_family",
+      "status_note": "episodes_completed=400001, train_steps=648241; retired from the paper's table (other family, different split semantics).",
+      "paper_references": [
+        "main.tex tab:main row 'CRL' (removed 2026-10-17)",
+        "paper/runs data/matched_eval/crl_large.json"
+      ],
+      "dir": "checkpoints",
+      "external": true,
+      "files": [
+        {
+          "path": "/home/anchal/tmp/crl_large/checkpoints/crl_final.pth",
+          "external": true,
+          "exists": true,
+          "size_bytes": 42615705,
+          "mtime": "2026-09-10T23:39:32.811816+00:00",
+          "sha256": "1d2175ed34d774b6d6202dfdd2a05a35032b67045e7b883fa1793d5377511ddf",
+          "metadata": {
+            "_error": "ModuleNotFoundError: No module named 'examples'"
+          }
+        }
+      ]
+    },
+    {
+      "id": "waymo_bc_epoch100",
+      "family": "Waymo imitation learning",
+      "role": "Completed Waymo behavior-cloning checkpoint behind the audit row 'Waymo BC'.",
+      "status": "full_training_other_family",
+      "status_note": "Epoch-100 checkpoint; retired from the paper's table (other family, full-split scenario-level aggregation).",
+      "paper_references": [
+        "main.tex tab:main row 'Waymo BC' (removed 2026-10-17)"
+      ],
+      "dir": "train_logs/2026_09_05_19_41_29",
+      "external": true,
+      "files": [
+        {
+          "path": "/home/anchal/tmp/imitation_resume/train_logs/2026_09_05_19_41_29/model_100.pth",
+          "external": true,
+          "exists": true,
+          "size_bytes": 145313403,
+          "mtime": "2026-09-06T01:39:08.793344+00:00",
+          "sha256": "c32e86f69d61a03de4156c79e1ac3389b640f9e6491ed7c03a0d92575c72979e",
+          "metadata": {
+            "_error": "ModuleNotFoundError: No module named 'examples'"
+          }
+        }
+      ]
+    },
+    {
+      "id": "rmappo_multi_gpu_long",
+      "family": "PPO",
+      "role": "R-MAPPO checkpoints behind the audit row 'R-MAPPO'.",
+      "status": "other_family",
+      "status_note": "Training length not encoded in the result artifact; run2/models is empty. Row retired from the paper on 2026-10-17.",
+      "paper_references": [
+        "main.tex tab:main row 'R-MAPPO' (removed 2026-10-17)"
+      ],
+      "dir": ".",
+      "external": true,
+      "files": [
+        {
+          "path": "/home/anchal/tmp/ppo_multi_gpu_long_v2/./run1/models/actor.pt",
+          "external": true,
+          "exists": true,
+          "size_bytes": 475360,
+          "mtime": "2026-09-02T07:35:20.918641+00:00",
+          "sha256": "6dcad5851014fa701b87506f528f07df9f958bc1da309ab8d6effb2045d55e0c",
+          "metadata": {
+            "content": "state_dict",
+            "n_params": 116978
+          }
+        },
+        {
+          "path": "/home/anchal/tmp/ppo_multi_gpu_long_v2/./run3/models/actor.pt",
+          "external": true,
+          "exists": true,
+          "size_bytes": 475360,
+          "mtime": "2026-09-02T07:59:51.607354+00:00",
+          "sha256": "ef3e81567cccaf2423ba500b565cb72910b3776d63a81e15d022c38600ed0f3d",
+          "metadata": {
+            "content": "state_dict",
+            "n_params": 116978
+          }
+        },
+        {
+          "path": "/home/anchal/tmp/ppo_multi_gpu_long_v2/./run4/models/actor.pt",
+          "external": true,
+          "exists": true,
+          "size_bytes": 475360,
+          "mtime": "2026-09-03T01:57:35.184732+00:00",
+          "sha256": "9a76a41f9df5021c0802a4b073913b4af0b8b7135b3bfd589301270e844ff79d",
+          "metadata": {
+            "content": "state_dict",
+            "n_params": 116978
+          }
+        },
+        {
+          "path": "/home/anchal/tmp/ppo_multi_gpu_long_v2/./run1/models/critic.pt",
+          "external": true,
+          "exists": true,
+          "size_bytes": 311776,
+          "mtime": "2026-09-02T07:35:20.924641+00:00",
+          "sha256": "ec1ba7cd5d6944d1a49945e9a270442c9fe542e3678577ee3639de047a42ac85",
+          "metadata": {
+            "content": "state_dict",
+            "n_params": 76093
+          }
+        },
+        {
+          "path": "/home/anchal/tmp/ppo_multi_gpu_long_v2/./run3/models/critic.pt",
+          "external": true,
+          "exists": true,
+          "size_bytes": 311776,
+          "mtime": "2026-09-02T07:59:51.613354+00:00",
+          "sha256": "9b09677038d7ef6e0ce2a3d74388ef28cf4699840f8cc89a63cd162976d20fce",
+          "metadata": {
+            "content": "state_dict",
+            "n_params": 76093
+          }
+        },
+        {
+          "path": "/home/anchal/tmp/ppo_multi_gpu_long_v2/./run4/models/critic.pt",
+          "external": true,
+          "exists": true,
+          "size_bytes": 311776,
+          "mtime": "2026-09-03T01:57:35.190732+00:00",
+          "sha256": "68714abeb7d721ccd1e96d6541ae97d211a5124fe68bd29cc04cde5138ba5d10",
+          "metadata": {
+            "content": "state_dict",
+            "n_params": 76093
+          }
+        },
+        {
+          "path": "/home/anchal/tmp/ppo_multi_gpu_long_v2/./run1/models/trainer_state.pt",
+          "external": true,
+          "exists": true,
+          "size_bytes": 1511353,
+          "mtime": "2026-09-02T07:35:20.946641+00:00",
+          "sha256": "672ba561763cf35f38e0600d0367df0cf88c6fee02c866ab0240a6dc5a6387cd",
+          "metadata": {
+            "world_size": 2
+          }
+        },
+        {
+          "path": "/home/anchal/tmp/ppo_multi_gpu_long_v2/./run3/models/trainer_state.pt",
+          "external": true,
+          "exists": true,
+          "size_bytes": 1511353,
+          "mtime": "2026-09-02T07:59:51.635354+00:00",
+          "sha256": "af08e096ec0a95de6611882ebc101c798c197c8e0b265c6d2c70ddd7733d94c8",
+          "metadata": {
+            "world_size": 2
+          }
+        },
+        {
+          "path": "/home/anchal/tmp/ppo_multi_gpu_long_v2/./run4/models/trainer_state.pt",
+          "external": true,
+          "exists": true,
+          "size_bytes": 1511353,
+          "mtime": "2026-09-03T01:57:35.212731+00:00",
+          "sha256": "08c8797b1faae56f2f095e2455b2f32056dc0dacee4bcff06ec3114414095f28",
+          "metadata": {
+            "world_size": 2
+          }
+        }
+      ]
+    },
+    {
+      "id": "rllib_ppo_smoke",
+      "family": "RLlib PPO",
+      "role": "Framework smoke checkpoint behind the audit row 'RLlib PPO'.",
+      "status": "smoke",
+      "status_note": "training_iteration=1, timesteps_total=512; retired from the paper's table.",
+      "paper_references": [
+        "main.tex tab:main row 'RLlib PPO' (removed 2026-10-17)"
+      ],
+      "dir": "PPO/PPO_nocturne_a424a_00000_0_2026-09-01_18-19-16/checkpoint_000001",
+      "external": true,
+      "files": [
+        {
+          "path": "/home/anchal/tmp/rllib_ddp_results/PPO/PPO_nocturne_a424a_00000_0_2026-09-01_18-19-16/checkpoint_000001/checkpoint-1",
+          "external": true,
+          "exists": true,
+          "size_bytes": 11714936,
+          "mtime": "2026-09-01T18:19:26.440572+00:00",
+          "sha256": "96c3ea6dbcd5f5742f23b18459021762e2bdef423cede7e88b0c57a030dedab2",
+          "metadata": {
+            "_error": "RuntimeError: Invalid magic number; corrupt file?"
+          }
+        },
+        {
+          "path": "/home/anchal/tmp/rllib_ddp_results/PPO/PPO_nocturne_a424a_00000_0_2026-09-01_18-19-16/checkpoint_000001/checkpoint-1.tune_metadata",
+          "external": true,
+          "exists": true,
+          "size_bytes": 183,
+          "mtime": "2026-09-01T18:19:26.440572+00:00",
+          "sha256": "5300eb67c1ac6707479955ffe8a430f15796fb7e0bc81dfcadfc146d4a45c4ed"
+        }
+      ]
+    },
+    {
+      "id": "sf_appo_smoke",
+      "family": "Sample Factory/APPO",
+      "role": "Framework smoke checkpoint behind the audit row 'Sample Factory APPO'.",
+      "status": "smoke",
+      "status_note": "Checkpoint suffix records 480 environment steps; retired from the paper's table.",
+      "paper_references": [
+        "main.tex tab:main row 'Sample Factory APPO' (removed 2026-10-17)"
+      ],
+      "dir": "checkpoint_p0",
+      "external": true,
+      "files": [
+        {
+          "path": "/home/anchal/tmp/sf_results/sf_ddp_smoke2/checkpoint_p0/checkpoint_000000012_480.pth",
+          "external": true,
+          "exists": true,
+          "size_bytes": 5315501,
+          "mtime": "2026-09-01T18:15:26.345922+00:00",
+          "sha256": "7fc694b049f48cb818673bb1ac056f943129dec2ce99c080622f31a224976e00",
+          "metadata": {
+            "env_steps": 480
+          }
+        }
+      ]
+    }
+  ],
+  "summary": {
+    "groups": 16,
+    "model_files_present": 44,
+    "model_total_bytes": 1783893404,
+    "groups_by_status": {
+      "archived_pilot": 1,
+      "trained": 2,
+      "untrained_startup_save": 2,
+      "failed_attempt": 1,
+      "aborted_no_weights": 2,
+      "smoke": 5,
+      "full_training_other_family": 2,
+      "other_family": 1
+    }
+  }
+}
