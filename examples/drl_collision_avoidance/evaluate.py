@@ -299,6 +299,9 @@ def evaluate(checkpoint_path: str, scenario_path: Optional[str] = None,
              trace_path: Optional[str] = None) -> Dict[str, Any]:
     """Run the paired deterministic evaluation and return the results dict."""
     set_display_window()
+    # Evaluation is single-process CPU; keep four concurrent evaluations from
+    # each grabbing all 48 intra-op threads while training runs.
+    torch.set_num_threads(1)
 
     from examples.drl_collision_avoidance.collision_avoidance_env import (
         CollisionAvoidanceEnv,

@@ -42,6 +42,7 @@ export SAVE_INTERVAL="${SAVE_INTERVAL:-1000000}"
 EVAL_NUM_FILES="${EVAL_NUM_FILES:--1}"
 export PYTHON_BIN CHECKPOINT_ROOT LOG_ROOT TRAIN_SCENARIO_PATH
 mkdir -p "$LOG_ROOT" "$EVAL_ROOT" "$(dirname "$LAUNCHES_FILE")"
+echo "$$" > "$LOG_ROOT/driver.pid"
 
 # Test/resume overrides. WAVES_OVERRIDE uses '|' between waves, e.g.
 #   WAVES_OVERRIDE='A B|C C_vis' ARMS_OVERRIDE='A B C C_vis'
@@ -79,7 +80,8 @@ launch_eval() {
     return 0
   fi
   log "eval start $arm/$seed"
-  CUDA_VISIBLE_DEVICES="" OMP_NUM_THREADS=1 "$PYTHON_BIN" \
+  CUDA_VISIBLE_DEVICES="" OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 \
+    OPENBLAS_NUM_THREADS=1 "$PYTHON_BIN" \
     "$ROOT/examples/drl_collision_avoidance/evaluate.py" \
     --checkpoint "$CHECKPOINT_ROOT/$arm/seed_$seed/ddqn_final.pth" \
     --scenario_path "$EVAL_SCENARIO_PATH" \
@@ -103,14 +105,17 @@ run_train() {
     return 3
   fi
   log "train start $arm/$seed gpu=$gpu attempt=$attempt (free=${free}G)"
+  local started elapsed
+  started="$(date +%s)"
   "$ROOT/scripts/launch_controlled_study.sh" "$arm" "$seed" "$gpu" \
     > "$LOG_ROOT/console_${arm}_seed${seed}_attempt${attempt}.log" 2>&1
   local rc=$?
+  elapsed=$(( $(date +%s) - started ))
   if [ "$rc" -eq 0 ] && [ -s "$ckpt" ]; then
-    log "train done $arm/$seed"
+    log "train done $arm/$seed wall=${elapsed}s"
     return 0
   fi
-  log "train FAIL $arm/$seed rc=$rc attempt=$attempt"
+  log "train FAIL $arm/$seed rc=$rc attempt=$attempt wall=${elapsed}s"
   return 1
 }
 
