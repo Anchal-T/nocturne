@@ -1,85 +1,120 @@
-# Phase 2 — arm matrix and compute plan (proposal)
+# Phase 2 — arm matrix and compute plan (frozen for implementation)
 
-Status: proposal for review · Created 2026-10-17
+Status: frozen 2026-10-17 after sign-off · Created 2026-10-17
 Companion record: `archive/phase1/README.md` (pipeline fixes this plan builds on)
 
 Every number in the paper will be regenerated from these runs and nothing here
-is a result yet. The arm names A/B/C/D/O/C_vis/D_vis/C_hist are kept from the
-roadmap; their definitions below are mine, because no definition survives
-anywhere in the repo or history. Renaming is a one-string change per arm.
+is a result yet.
 
-## 1. Observation contract (must be fixed before any arm trains)
+## 0. Where the arm definitions come from
 
-The paper's method text says Nocturne's ray-cast visibility model "removes every
-object outside the view cone or occluded behind a nearer object" and the
-surviving objects are encoded into the observation. The code does not implement
-that contract yet:
+The roadmap pasted on 2026-10-17 is the only surviving source for the arm
+names. It does **not** define A/B/C/D/O; it says only "A, B, C, D, and O, as
+they exist today", and those variants do not exist in the code. A search of
+the repo (including untracked files), every git ref and the pre-purge paper,
+the Cursor plan directory, and the OpenCode session database found no other
+definition. The roadmap's only explicit constraints are:
 
-- `occupancy_grid.use_occlusion` toggles visibility filtering of the TTZ/object
-  data and appends the 4 occlusion summary features.
+- `C_vis` / `D_vis` = C and D with `reward.reward_ttz_source=visible`;
+  `{C, C_vis, D, D_vis}` form a 2x2 of occlusion summaries x reward source.
+- `C_hist` = memory baseline, occlusion summaries **off**, grid history **on**
+  (`history_frames=3`, `history_stride=5`, i.e. 1 s).
+- H1 = cost of partial observability, O vs A.
+- H2 = summaries cut hidden-partner collisions.
+- H5 = summaries help beyond memory, D vs `C_hist`.
+
+The matrix below is the minimal reconstruction that satisfies all of these:
+A is the privileged-observation upper bound; B is the realistic-perception
+baseline; C (features) and D (spatial mask) are the two occlusion-summary
+encodings; O is their union (813-D, confirmed); `C_vis`/`D_vis` change only the
+reward source; `C_hist` swaps explicit summaries for grid history. Letters are
+kept for continuity with the roadmap. This is a documented design decision,
+not a recovered original.
+
+## 1. Observation and reward contract (must be fixed before any arm trains)
+
+The paper's method text says the ray-cast visibility model removes every
+object outside the view cone or occluded behind a nearer object before the
+observation is built. The code does not implement that contract yet:
+
+- `occupancy_grid.use_occlusion` simultaneously (a) enables visibility
+  filtering of the TTZ/object data and (b) appends the 4 occlusion summary
+  features. Visibility and encoding are not independent switches.
 - The C++ fast grid (`Scenario::OccupancyGrid`) never receives the visibility
   set; it stamps every vehicle/pedestrian/cyclist in the scenario. The grid is
   therefore privileged — it contains occluded actors — in *both* current modes.
-- Consequence: the current "no-occlusion" arm is not the paper's ablation, and
-  the current "occlusion" arm still cheats through the grid.
+- The reward uses `self._ttz_vehicle` / `self._ttz_pedestrian`, which are
+  computed inside `_build_observation` from the *observation* TTZ. Turning
+  visibility filtering on therefore silently changes the reward source too.
+- `train.py` hardcodes `grid_channels = 3`; there is no grid history.
 
-Phase 1b items (blocking, to implement before training):
+Phase 1b items (blocking, implement before training):
 
 1. **Visibility-consistent grid.** Extend `Scenario::OccupancyGrid` with an
-   optional visible-id filter (sets already computed by
+   optional visible-id filter (the set already computed by
    `_match_visible_to_vehicles`); the same ray-cast result feeds TTZ. When the
    filter is on, no actor information in the observation comes from occluded
    objects; when off, the arm is explicitly privileged.
-2. **Config switches** (disjoint from arm labels):
-   - `occupancy_grid.visibility_filter` (bool) — filter grid + TTZ to ray-cast
-     visible actors.
-   - `occupancy_grid.use_occlusion` (bool) — append the 4 summary stats
-     (existing switch).
-   - `occupancy_grid.occlusion_mask` (bool) — append a spatial occlusion mask
-     channel (0/1 grid cell: azimuth inside a merged blocked interval with the
-     cell range beyond that interval's blocker distance — same interval sweep
-     `_compute_occlusion_features` already performs; ~200 cells of numpy).
-   - `subscriber.frame_stack` (int, default 1) — wrapper-level stacking of the
-     last k raw observations, zero-padded at episode start.
-     `subscriber.n_frames_stacked` currently only affects the legacy BaseEnv
-     path, not the DRL wrapper.
+2. **Config switches** (orthogonal; arm labels are not switches):
+   - `occupancy_grid.visibility_filter` (bool) — filter grid + observation
+     TTZ/object features to ray-cast visible actors.
+   - `occupancy_grid.use_occlusion` (bool) — append the 4 summary stats.
+   - `occupancy_grid.occlusion_mask` (bool) — append a 200-cell spatial
+     occlusion mask (0/1 per grid cell: azimuth inside a merged blocked
+     interval and range beyond that interval's blocker distance).
+   - `occupancy_grid.history_frames` (int, default 1) and
+     `occupancy_grid.history_stride` (int, default 1) — grid-only history.
+     Keep a deque of past grids sampled every `history_stride` sim steps,
+     current grid first, zero-padded at episode start. `grid_channels =
+     3 * history_frames`. This replaces the earlier full-observation
+     `subscriber.frame_stack` idea and matches the roadmap (3 frames,
+     stride 5 = 1 s).
+   - `reward.reward_ttz_source` in `{privileged, visible}`, default
+     `privileged` — the reward TTZ is computed independently of the
+     observation source. `privileged` uses all actors; `visible` uses only
+     ray-cast-visible actors. This removes today's coupling.
 3. **Checkpoint observation metadata.** `DDQNAgent.save` currently records
-   `obs_dim` but not the observation switches; `evaluate.py` infers
-   `use_occlusion` from dim 609 vs 613. Under 8 arms that is ambiguous (A and B
-   are both 609; C and C_vis both 613). Checkpoints must record
-   `visibility_filter`, `use_occlusion`, `occlusion_mask`, `frame_stack`, and
-   the evaluator must take them from the checkpoint (CLI override for sanity
-   checks only). Silent fallback would invalidate evidence.
+   `obs_dim` but not the switches; `evaluate.py` infers `use_occlusion` from
+   dim 609 vs 613. Under 8 arms that is ambiguous (A and B are both 609).
+   Checkpoints must record `visibility_filter`, `use_occlusion`,
+   `occlusion_mask`, `history_frames`, `history_stride`, `reward_ttz_source`,
+   `obs_dim`, and `grid_channels`. The evaluator must take them from the
+   checkpoint (CLI override only for sanity checks) and refuse checkpoints
+   without them. Silent fallback would invalidate evidence.
 
-Dimension arithmetic: grid 3×20×10 = 600, ego 4, target 2, TTZ 3 (= 609);
-+4 stats = 613; +200-cell mask channel = 809; +stats = 813; history ×k (k=3 ⇒
-1839 for C_hist).
+Dimension arithmetic: grid 3x20x10 = 600, ego 4, target 2, TTZ 3 (= 609);
++4 stats = 613; +200-cell mask = 809; +stats+mask = 813; grid history k=3
+(stats off) = 3x600 + 4 + 2 + 3 = **1809**.
 
-## 2. Arm matrix (8 arms × 3 seeds)
+## 2. Arm matrix (8 arms x 3 seeds)
 
-All arms: identical dueling-noisy DDQN, identical reward, identical 20-action
-table, identical budget (10M env steps). They differ only in the observation,
-through the four switches of §1.
+All arms: identical dueling-noisy DDQN, identical reward (except the explicit
+reward-source switch in `C_vis`/`D_vis`), identical 20-action table, identical
+budget (10M env steps). They differ only in the observation and reward-source
+switches above. All arms use the privileged reward except `C_vis`/`D_vis`.
 
-| Arm | Context (grid + TTZ) | Occlusion encoding | History | obs_dim | Question it answers |
+| Arm | Observation context | Occlusion encoding | Grid history | obs_dim | Question it answers |
 |---|---|---|---|---|---|
-| A | privileged (all actors) | — | 1 | 609 | Upper bound: what perfect actor knowledge buys. |
-| B | ray-cast visible | — | 1 | 609 | Primary control: cost of realistic perception (paper's no-occlusion ablation). |
-| C | privileged | 4-D summary stats | 1 | 613 | Do stats help when actors are already fully visible? (leak/sanity check) |
-| C_vis | ray-cast visible | 4-D summary stats | 1 | 613 | Compact model = draft's 613-D "ours". |
-| C_hist | ray-cast visible | 4-D summary stats | 3 | 1839 | Is explicit occlusion better than generic memory? |
-| D | privileged | spatial mask | 1 | 809 | Spatial encoding under perfect perception. |
-| D_vis | ray-cast visible | spatial mask | 1 | 809 | Spatial encoding under realistic perception. |
+| A | privileged (all actors) | — | 1 | 609 | Upper bound; H1 anchor. |
+| B | ray-cast visible | — | 1 | 609 | Realistic-perception baseline. |
+| C | ray-cast visible | 4-D summary stats | 1 | 613 | Compact summaries. |
+| C_vis | ray-cast visible | 4-D summary stats | 1 | 613 | C + visible reward; H4. |
+| D | ray-cast visible | spatial mask | 1 | 809 | Spatial encoding; H5 anchor. |
+| D_vis | ray-cast visible | spatial mask | 1 | 809 | D + visible reward; H4. |
 | O | ray-cast visible | 4-D stats + mask | 1 | 813 | Ours: combined encoding. |
+| C_hist | ray-cast visible | none (summaries off) | 3 / stride 5 | 1809 | Memory baseline; H5. |
 
 Core contrasts:
 
 - **O vs B** — main claim: occlusion encoding under realistic perception.
-- **A vs B** — perception gap: cost of only seeing what is visible.
-- **C_vis vs C, D_vis vs D** — does each encoding matter more/only when
-  perception is realistic?
-- **C_hist vs C_vis** — generic temporal memory vs explicit occlusion.
-- **O vs C_vis, O vs D_vis** — combined vs single encoding.
+- **A vs B** — perception gap; with O vs A it measures the cost of partial
+  observability (H1).
+- **C vs B, D vs B, O vs B** — do summaries cut hidden-partner collisions
+  (H2)?
+- **C_vis vs C, D_vis vs D** — does the reward source change the value of the
+  summaries (H4; the roadmap's 2x2)?
+- **D vs C_hist** — spatial summaries vs generic grid memory (H5).
+- **O vs C, O vs D** — combined vs single encoding.
 
 Out of scope (per roadmap decisions): IQN/CVaR, any SOTA goal-rate claim, and
 the draft's depth/optimizer ablation rows (they need their own budget decision;
@@ -93,9 +128,10 @@ selection. Evaluation uses the final checkpoint.
 
 ### 3.1 Hardware (verified 2026-10-17)
 
-- 4 × Tesla K80 (11 GB, sm_37), all idle; torch 1.12.1+cu102 sees all four,
+- 4 x Tesla K80 (11 GB, sm_37), all idle; torch 1.12.1+cu102 sees all four,
   matmul verified on `cuda:0`.
-- 48 vCPU, 251 GB RAM.
+- 48 vCPU, 251 GB RAM. The K80s run near 0% utilization: training is
+  CPU/simulation-bound.
 - No X11/Xvfb; training runs headless (already the case).
 
 ### 3.2 Per-run layout (pinned)
@@ -108,19 +144,32 @@ selection. Evaluation uses the final checkpoint.
 
 ### 3.3 Parallelism
 
-- 4 concurrent jobs, one per GPU (`CUDA_VISIBLE_DEVICES`), `OMP_NUM_THREADS=1`.
-- Footprint per job: 4 env worker processes + 1 learner + 1 main ≈ 6 processes;
-  4 jobs ≈ 24 of 48 cores (headroom for evaluation and other work).
-- 24 runs = 6 waves of 4. Resume is not needed (fixed budget), but checkpoints
-  are retained.
+- **2 concurrent training jobs**, one per GPU (`CUDA_VISIBLE_DEVICES`),
+  `OMP_NUM_THREADS=1`. Aggregate throughput is flat above 2 jobs (see 3.4), so
+  4-way concurrency only increases per-run wall time and starves evaluation.
+- Footprint per job: 4 env worker processes + 1 learner + 1 main ~= 6
+  processes; 2 jobs ~= 12 of 48 cores, leaving room for 4-6 parallel
+  evaluations on the remaining cores.
+- 12 waves of 2 runs. Re-probe if the external load (other users) changes.
 
-### 3.4 Throughput
+### 3.4 Throughput (measured 2026-10-17)
 
-- Calibration run (200k steps, exact layout above) started 2026-10-17:
-  measured throughput **TBD** env-steps/s per job from the run logs after
-  warmup.
-- Per-run time = 10M / (R × 3600) h; total wall clock ≈ 6 waves × per-run time
-  (worst case, with 4-way parallelism). Fill in once R is measured.
+| Mode | Per-job | Aggregate | Notes |
+|---|---|---|---|
+| Solo 200k-step calibration | 436/s incl. startup; 515-570/s steady | 515-570/s | 200,016 steps in 457.8 s |
+| 2-way probe, 60k steps/job | 248-303/s (last 150 s) | **~536/s** (sum of last-150 s); 551/s sum of per-job averages | Wave wall 238 s |
+| 4-way probe, 60k steps/job | 74-203/s (last 150 s) | ~509/s (last 150 s); 511/s sum of per-job averages | One job degraded by external load |
+
+Aggregate throughput is essentially flat from 1 to 4 jobs: the host CPU, not
+the GPUs, is the bottleneck. Pick 2-way.
+
+- Per-run time at ~265 steps/s per job = 10M / 265 ~= 37,700 s ~= 10.5 h.
+- 24 runs / 2 concurrent = 12 waves x 10.5 h ~= **126 h (5.3 days)** of
+  training, worst case with today's external load. Add ~10% buffer for
+  evaluation overlap and restarts: **~5.8 days**.
+- Evaluations (6,102 test scenes per run) run on the spare cores while the
+  next wave trains; they are not on the critical path unless a wave is
+  delayed.
 
 ### 3.5 Launch template
 
@@ -132,26 +181,27 @@ python -m examples.drl_collision_avoidance.train \
   drl.max_env_steps=10000000 drl.min_runtime_seconds=0 \
   drl.num_workers=4 drl.num_envs_per_worker=12 drl.num_envs=48 \
   drl.vec_env_mode=sync drl.train_freq=128 drl.batch_size=512 \
-  occupancy_grid.visibility_filter=$VIS occupancy_grid.use_occlusion=$OCC \
-  occupancy_grid.occlusion_mask=$MASK subscriber.frame_stack=$STACK \
+  occupancy_grid.visibility_filter=$VIS occupancy_grid.use_occlusion=$STATS \
+  occupancy_grid.occlusion_mask=$MASK occupancy_grid.history_frames=$HF \
+  occupancy_grid.history_stride=$HS reward.reward_ttz_source=$REW \
   hydra.run.dir=logs/$ARM/seed_$SEED
 ```
 
-Arm → flags (transcription table for the launcher once approved):
+Arm -> flags (transcription table for the launcher):
 
-| Arm | visibility_filter | use_occlusion | occlusion_mask | frame_stack |
-|---|---|---|---|---|
-| A | false | false | false | 1 |
-| B | true | false | false | 1 |
-| C | false | true | false | 1 |
-| C_vis | true | true | false | 1 |
-| C_hist | true | true | false | 3 |
-| D | false | false | true | 1 |
-| D_vis | true | false | true | 1 |
-| O | true | true | true | 1 |
+| Arm | visibility_filter | use_occlusion (stats) | occlusion_mask | history_frames | history_stride | reward_ttz_source |
+|---|---|---|---|---|---|---|
+| A | false | false | false | 1 | 1 | privileged |
+| B | true | false | false | 1 | 1 | privileged |
+| C | true | true | false | 1 | 1 | privileged |
+| C_vis | true | true | false | 1 | 1 | visible |
+| D | true | false | true | 1 | 1 | privileged |
+| D_vis | true | false | true | 1 | 1 | visible |
+| O | true | true | true | 1 | 1 | privileged |
+| C_hist | true | false | false | 3 | 5 | privileged |
 
 Planned launcher: `scripts/launch_controlled_study.sh <arm> <seed> <gpu>`
-(created after review), one line per job appended to
+(created after Phase 1b lands), one line per job appended to
 `paper/workspace/launches.txt` with the exact command + git sha.
 
 ### 3.6 Evaluation (accepted evidence only)
@@ -166,7 +216,7 @@ python examples/drl_collision_avoidance/evaluate.py \
 ```
 
 - Full test half = 6,102 scenes, one paired ego per scene, no subsampling.
-- Eval is single-process CPU; 4–6 evals in parallel after a wave completes,
+- Eval is single-process CPU; 4-6 evals in parallel after a wave completes,
   overlapped with the next wave where cores allow.
 - Provenance JSONs in `paper/workspace/eval/` are the only inputs to Phase 4
   tables/figures.
@@ -180,20 +230,34 @@ python examples/drl_collision_avoidance/evaluate.py \
 
 ## 4. Order of operations
 
-1. Implement Phase 1b (§1) + tests: arm configs round-trip through
-   checkpoint/load; obs dims match the table; mask deterministic; evaluator
-   refuses checkpoints without observation metadata.
-2. Smoke-run every arm config for ~1k steps; verify obs dim, provenance.
-3. Freeze configs, record git sha, launch wave 1 (4 arms × 4 GPUs).
-4. Six waves; evaluate each finished run on the test half.
+1. Implement Phase 1b (§1) + tests: visibility-consistent grid; reward-source
+   decoupling; occlusion mask; grid history; arm configs round-trip through
+   checkpoint/load; obs dims match the table; evaluator refuses checkpoints
+   without observation metadata.
+2. Smoke-run every arm config for ~1k steps; verify obs dim, provenance,
+   and determinism.
+3. Freeze configs, record git sha, launch wave 1 (2 runs, 2 GPUs).
+4. Twelve waves; evaluate each finished run on the test half.
 5. Phase 3/4: regenerate every table/figure from `paper/workspace/eval/*.json`.
 
-## 5. Needs sign-off before freezing
+## 5. Sign-off (resolved 2026-10-17)
 
-1. The arm definitions above (esp. `_vis` = ray-cast-visible context vs
-   privileged; `_hist` = 3-frame stack).
-2. "Ours" = O (stats + mask, 813-D) vs the draft's 613-D stats-only model. If
-   O must stay the 613-D model, then O := C_vis, and the mask family (D/O)
-   becomes a secondary experiment — but the 8-arm matrix then needs one more
-   distinct arm.
-3. Seeds 42/123/456 and "final checkpoint is the evaluated one".
+1. **Arm definitions.** No original definition exists (search of repo, all git
+   history, pre-purge paper, Cursor plans, and session database). The matrix
+   above is the minimal reconstruction of the roadmap's explicit constraints
+   (§0) and is frozen. Letters are kept for continuity.
+2. **"Ours" = O (stats + mask, 813-D).** Confirmed. The 613-D stats-only model
+   is arm C.
+3. **Seeds 42/123/456 and final-checkpoint evaluation.** Confirmed.
+
+Changes from the first draft, all forced by the recovered roadmap text:
+
+- `_vis` now changes the **reward source** (`reward_ttz_source=visible`), not
+  the observation visibility. C/D already use ray-cast-visible observations.
+- `C_hist` is **grid-only history with summaries off** (1809-D), not a
+  3x full-observation stack (1839-D).
+- A is the only privileged-observation arm; B/C/D/O/C_hist all use the
+  visibility filter.
+
+Phase 1b implementation starts only after this frozen matrix; any later change
+requires a new commit and a new git sha in `launches.txt`.

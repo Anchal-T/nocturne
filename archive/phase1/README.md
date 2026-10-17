@@ -64,9 +64,21 @@ mismatch: `Scenario::OccupancyGrid` never receives the ray-cast visibility set,
 so the occupancy grid contains occluded actors in *every* current mode. The
 paper's method text requires visibility filtering of grid + TTZ, with only the
 occlusion summary features toggling. Fixing this (visibility filter in the C++
-grid, explicit `visibility_filter` / `occlusion_mask` / `frame_stack` switches,
-observation metadata in checkpoints and the evaluator) is a precondition for
-Phase 2 training. Plan and implementation list:
+grid, explicit `visibility_filter` / `occlusion_mask` / `history_frames` +
+`history_stride` switches, observation metadata in checkpoints and the
+evaluator) is a precondition for Phase 2 training.
+
+Two further contract bugs were found while recovering the arm definitions:
+
+- The reward reuses the observation TTZ, so enabling visibility filtering
+  silently changes the reward source. The roadmap's `C_vis`/`D_vis` arms
+  require an independent `reward.reward_ttz_source` switch
+  (`privileged` vs `visible`).
+- `train.py` hardcodes `grid_channels = 3`. The memory baseline (`C_hist`)
+  needs grid-only history (3 frames, stride 5), so `grid_channels` must be
+  `3 * history_frames` and the env must keep the grid deque.
+
+Plan, frozen arm matrix, and implementation list:
 `paper/workspace/phase2_arms_and_compute.md`.
 
 ## Verification
@@ -109,11 +121,15 @@ The extension lands at the repo root as
 ## Open items
 
 - Arm-matrix definitions (A/B/C/D/O/C_vis/D_vis/C_hist) did not exist anywhere
-  in the repo or history; a concrete 8-arm proposal now lives in
-  `paper/workspace/phase2_arms_and_compute.md` (pending review).
+  in the repo, git history, pre-purge paper, Cursor plans, or session database.
+  The roadmap itself only says "as they exist today" and explicitly defines
+  `C_vis`/`D_vis` (visible reward) and `C_hist` (summaries off, grid history
+  3/stride 5); the frozen reconstruction is in
+  `paper/workspace/phase2_arms_and_compute.md`.
 - Compute/parallelism plan for the 24 training runs (10M steps, 3 seeds x
-  8 arms) is proposed in the same document; throughput calibration is running.
-- Phase 1b observation-contract fixes (see above) must land before training.
+  8 arms): 2 concurrent jobs, ~5.3 days training + buffer (measured).
+- Phase 1b observation/reward-contract fixes (see above) must land before
+  training.
 - This record, the code changes above, and the Phase 0 purge are committed on
   branch `phase1-pipeline-fixes` (Phase 0 purge and Phase 1 fixes as separate
   commits).
