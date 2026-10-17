@@ -164,29 +164,37 @@ selection. Evaluation uses the final checkpoint.
 
 ### 3.3 Parallelism
 
-- **2 concurrent training jobs**, one per GPU (`CUDA_VISIBLE_DEVICES`),
-  `OMP_NUM_THREADS=1`. Aggregate throughput is flat above 2 jobs (see 3.4), so
-  4-way concurrency only increases per-run wall time and starves evaluation.
-- Footprint per job: 4 env worker processes + 1 learner + 1 main ~= 6
-  processes; 2 jobs ~= 12 of 48 cores, leaving room for 4-6 parallel
-  evaluations on the remaining cores.
-- 12 waves of 2 runs. Re-probe if the external load (other users) changes.
+- **4 concurrent training jobs**, one per GPU (`CUDA_VISIBLE_DEVICES`),
+  `OMP_NUM_THREADS=1`. The 2026-10-17 21:11 re-probe (load average ~22)
+  measured 826-967 steps/s per job, ~3,500 steps/s aggregate, so 4-way is
+  now clearly better than 2-way. The earlier 2-way decision was taken under
+  a heavier external load; see 3.4.
+- Footprint: 4 jobs x ~6 processes = 24 of 48 cores, leaving room for 2-4
+  parallel evaluations. The driver pipelines evaluations behind the next
+  training wave.
+- 6 waves of 4 runs (two arms groups per seed). Re-probe only if throughput
+  collapses; the driver is resumable.
 
 ### 3.4 Throughput (measured 2026-10-17)
 
 | Mode | Per-job | Aggregate | Notes |
 |---|---|---|---|
 | Solo 200k-step calibration | 436/s incl. startup; 515-570/s steady | 515-570/s | 200,016 steps in 457.8 s |
-| 2-way probe, 60k steps/job | 248-303/s (last 150 s) | **~536/s** (sum of last-150 s); 551/s sum of per-job averages | Wave wall 238 s |
+| 2-way probe, 60k steps/job | 248-303/s (last 150 s) | ~536/s (last 150 s); 551/s sum of per-job averages | Heavier external load |
 | 4-way probe, 60k steps/job | 74-203/s (last 150 s) | ~509/s (last 150 s); 511/s sum of per-job averages | One job degraded by external load |
+| **4-way probe, 30k steps/job, O arm, 21:11** | **826-967/s** | **~3,493/s** (sum of per-job averages); 3,129/s wave incl. startup | Current load; O = 813-D |
 
-Aggregate throughput is essentially flat from 1 to 4 jobs: the host CPU, not
-the GPUs, is the bottleneck. Pick 2-way.
+The 21:11 re-probe shows 4-way is now ~6-7x the earlier aggregate: the host
+CPU is no longer saturated by other users. Pick 4-way. The earlier 2-way
+decision was correct for that load but is superseded.
 
-- Per-run time at ~265 steps/s per job = 10M / 265 ~= 37,700 s ~= 10.5 h.
-- 24 runs / 2 concurrent = 12 waves x 10.5 h ~= **126 h (5.3 days)** of
-  training, worst case with today's external load. Add ~10% buffer for
-  evaluation overlap and restarts: **~5.8 days**.
+- Planning number: **2,000 steps/s aggregate** (conservative; the probe saw
+  ~3,500). 24 runs x 10M = 240M steps.
+- At 2,000/s: 120,000 s = **33 h**. At the probe rate (~3,000/s planning):
+  **~22 h**.
+- 6 waves of 4 runs; each run ~3.4-5.6 h. Budget **~1.5 days** including
+  evaluation overlap and restarts. If external load returns, the worst case
+  is the earlier ~5 days; the driver is resumable and checkpoints per run.
 - Evaluations (6,102 test scenes per run) run on the spare cores while the
   next wave trains; they are not on the critical path unless a wave is
   delayed.
@@ -243,10 +251,13 @@ python examples/drl_collision_avoidance/evaluate.py \
 
 ### 3.7 Storage layout
 
-- `checkpoints/<arm>/seed_<seed>/` — `ddqn_final.pth` (+ periodic saves).
-- `logs/<arm>/seed_<seed>/` — hydra + tensorboard.
-- `paper/workspace/eval/<arm>_seed<seed>.json` (+ `.steps.jsonl`).
-- `paper/workspace/launches.txt` — exact command per run.
+- `checkpoints/controlled_study/<arm>/seed_<seed>/` — `ddqn_final.pth`
+  (periodic saves disabled; final-only evaluation).
+- `logs/controlled_study/<arm>/seed_<seed>/` — hydra + tensorboard.
+- `paper/workspace/eval/<arm>_seed<seed>.json` (+ `.steps.jsonl`) — includes
+  `provenance.checkpoint.observation_metadata`, `split=test`, `split_seed=0`.
+- `paper/workspace/launches.txt` — exact command per run + git sha.
+- `logs/controlled_study/driver.log` — resumable wave/eval status.
 
 ## 4. Order of operations
 
@@ -258,8 +269,14 @@ python examples/drl_collision_avoidance/evaluate.py \
 2. ~~Smoke-run every arm config.~~ **Done 2026-10-17.** All 8 arms at 300
    steps with the expected dims; O and C_hist at 4x12/48 envs, 1000 steps,
    17 s each; O evaluated on 2 test-half scenes.
-3. Freeze configs, record git sha, launch wave 1 (2 runs, 2 GPUs).
-4. Twelve waves; evaluate each finished run on the test half.
+3. Freeze configs and launch: `JOBS=4 nohup setsid
+   scripts/run_controlled_study.sh >/dev/null 2>&1 &`. The driver records
+   the exact command + git sha per run in `paper/workspace/launches.txt`,
+   trains 6 waves of 4, retries a failed run once, and launches each
+   final-checkpoint test-half evaluation behind the next training wave.
+4. Six waves (3 seeds x two arm groups); verify every JSON reports
+   `split=test`, `split_seed=0`, the hash-split file count, and the applied
+   observation metadata before any table is generated.
 5. Phase 3/4: regenerate every table/figure from `paper/workspace/eval/*.json`.
 
 ## 5. Sign-off (resolved 2026-10-17)
