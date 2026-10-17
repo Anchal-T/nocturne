@@ -211,6 +211,8 @@ def _apply_checkpoint_observation_settings(cfg, checkpoint_path,
             'accepted evidence.')
         grid_cfg['use_occlusion'] = bool(use_occlusion)
 
+    return metadata
+
 
 def _finite_ttz_min(values):
     finite = [v for v in values if v < 100]
@@ -304,8 +306,8 @@ def evaluate(checkpoint_path: str, scenario_path: Optional[str] = None,
 
     cfg = load_config(scenario_path=scenario_path,
                       scenario_split=scenario_split, num_files=-1)
-    _apply_checkpoint_observation_settings(cfg, checkpoint_path,
-                                           use_occlusion)
+    checkpoint_obs_metadata = _apply_checkpoint_observation_settings(
+        cfg, checkpoint_path, use_occlusion)
     cfg['deterministic_eval'] = True
     cfg['seed'] = int(seed)
     # One scene is visited exactly once per run; a long-lived Simulation
@@ -536,6 +538,7 @@ def evaluate(checkpoint_path: str, scenario_path: Optional[str] = None,
                 'size_bytes': os.path.getsize(checkpoint_path),
                 'mtime': os.path.getmtime(checkpoint_path),
                 'metadata': _checkpoint_metadata(checkpoint_path),
+                'observation_metadata': checkpoint_obs_metadata,
             },
             'scenario': {
                 'path': os.path.abspath(scenario_dir),
