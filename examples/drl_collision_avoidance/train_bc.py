@@ -21,6 +21,9 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 from cfgs.config import set_display_window
 from examples.drl_collision_avoidance.collision_avoidance_env import CollisionAvoidanceEnv
 from examples.drl_collision_avoidance.dqn_modules.q_network import QNetwork
+from examples.drl_collision_avoidance.observation_config import (
+    observation_metadata,
+)
 from examples.drl_collision_avoidance.scenario_utils import load_config
 from nocturne.utils.distributed import (
     all_reduce_scalar,
@@ -124,7 +127,7 @@ def step_continuous_action(env, accel, steer):
 
 def train_bc(observations, actions, obs_dim, n_actions, grid_size, grid_channels,
              grid_rows, grid_cols, hidden_layers, mlp_depth, epochs, batch_size,
-             lr, save_path, dist_info=None):
+             lr, save_path, observation_meta=None, dist_info=None):
     """Train BC classifier."""
     from nocturne.utils.distributed import DistInfo
     dist_info = dist_info or DistInfo()
@@ -212,6 +215,7 @@ def train_bc(observations, actions, obs_dim, n_actions, grid_size, grid_channels
             'grid_channels': grid_channels,
             'grid_rows': grid_rows,
             'grid_cols': grid_cols,
+            'observation_metadata': observation_meta,
             'dueling': False,
             'noisy': False,
             'mlp_depth': mlp_depth,
@@ -257,19 +261,24 @@ def main():
             actions = np.zeros((1,), dtype=np.int64)
 
         grid_cfg = cfg['occupancy_grid']
-        grid_channels = 3
-        grid_rows = int(grid_cfg['rows'])
-        grid_cols = int(grid_cfg['cols'])
+        metadata = observation_metadata(cfg)
+        grid_channels = metadata['grid_channels']
+        grid_rows = metadata['grid_rows']
+        grid_cols = metadata['grid_cols']
         grid_size = grid_channels * grid_rows * grid_cols
         obs_dim = int(observations.shape[1]) if local_n > 0 else 0
         obs_dim = int(all_reduce_scalar(float(obs_dim), dist_info.device, op="max"))
+        if local_n > 0 and obs_dim != metadata['obs_dim']:
+            raise ValueError(
+                f'BC observations have dim {obs_dim} but the configured '
+                f'observation switches imply {metadata["obs_dim"]}.')
         n_actions = len(CollisionAvoidanceEnv(cfg).action_table)
 
         hidden_layers = list(cfg['drl']['hidden_layers'])
         train_bc(observations, actions, obs_dim, n_actions, grid_size, grid_channels,
                  grid_rows, grid_cols, hidden_layers, int(cfg['drl']['mlp_depth']),
                  args.epochs, args.batch_size, args.lr, args.save_path,
-                 dist_info=dist_info)
+                 observation_meta=metadata, dist_info=dist_info)
     finally:
         cleanup_distributed()
 

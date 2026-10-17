@@ -47,6 +47,9 @@ import torch
 from omegaconf import OmegaConf
 
 from cfgs.config import set_display_window
+from examples.drl_collision_avoidance.observation_config import (
+    observation_metadata,
+)
 from nocturne.utils.distributed import (
     cleanup_distributed,
     init_distributed,
@@ -604,11 +607,18 @@ def _build_agent(cfg_dict, drl_cfg, obs_dim, n_actions, num_envs: int = 1,
     from examples.drl_collision_avoidance.dqn_modules.ddqn_agent import DDQNAgent, DDQNAgentConfig
 
     grid_cfg = cfg_dict['occupancy_grid']
-    grid_channels = 3
+    grid_channels = 3 * max(1, int(grid_cfg.get('history_frames', 1)))
     grid_rows = grid_cfg['rows']
     grid_cols = grid_cfg['cols']
     grid_size = grid_channels * grid_rows * grid_cols
     device = _resolve_training_device(cfg_dict, drl_cfg)
+
+    metadata = observation_metadata(cfg_dict)
+    if int(obs_dim) != int(metadata['obs_dim']):
+        raise ValueError(
+            f"Environment obs_dim={obs_dim} does not match the configured "
+            f"observation switches (expected {metadata['obs_dim']}). Check "
+            "occupancy_grid.* and reward.reward_ttz_source.")
 
     # Inject num_envs so the replay buffer allocates per-env n-step buffers.
     drl_cfg_with_envs = dict(drl_cfg)
@@ -622,8 +632,10 @@ def _build_agent(cfg_dict, drl_cfg, obs_dim, n_actions, num_envs: int = 1,
         grid_cols=grid_cols,
         device=device,
     )
-    return DDQNAgent(obs_dim=obs_dim, n_actions=n_actions, config=agent_cfg,
-                     dist_info=dist_info)
+    agent = DDQNAgent(obs_dim=obs_dim, n_actions=n_actions, config=agent_cfg,
+                      dist_info=dist_info)
+    agent.observation_metadata = metadata
+    return agent
 
 
 def _print_training_header(num_workers, num_envs_per_worker, num_envs, vec_env_cls, train_in_bg, obs_dim, n_actions):

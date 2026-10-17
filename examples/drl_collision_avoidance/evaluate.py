@@ -156,29 +156,60 @@ def _checkpoint_obs_dim(checkpoint_path: str) -> Optional[int]:
     return None
 
 
+def _checkpoint_observation_metadata(checkpoint_path: str) -> Dict[str, Any]:
+    checkpoint = _torch_load_cpu(checkpoint_path)
+    if not isinstance(checkpoint, dict):
+        raise RuntimeError(
+            f'Checkpoint {checkpoint_path} is not a dictionary; cannot read '
+            'observation metadata.')
+    metadata = checkpoint.get('observation_metadata')
+    if not isinstance(metadata, dict):
+        raise RuntimeError(
+            f'Checkpoint {checkpoint_path} has no observation_metadata. '
+            'Refusing to infer the observation switches from obs_dim: A and '
+            'B are both 609-D and the guess would silently change the arm.')
+    required = (
+        'obs_dim', 'visibility_filter', 'use_occlusion', 'occlusion_mask',
+        'history_frames', 'history_stride', 'reward_ttz_source',
+        'grid_rows', 'grid_cols', 'grid_channels',
+    )
+    missing = [key for key in required if key not in metadata]
+    if missing:
+        raise RuntimeError(
+            f'Checkpoint {checkpoint_path} observation_metadata is missing '
+            f'{", ".join(missing)}.')
+    ckpt_obs_dim = checkpoint.get('obs_dim')
+    if ckpt_obs_dim is not None and int(ckpt_obs_dim) != int(
+            metadata['obs_dim']):
+        raise RuntimeError(
+            f'Checkpoint {checkpoint_path} stores obs_dim={ckpt_obs_dim} but '
+            f'observation_metadata says {metadata["obs_dim"]}.')
+    return metadata
+
+
 def _apply_checkpoint_observation_settings(cfg, checkpoint_path,
                                            use_occlusion):
     grid_cfg = cfg['occupancy_grid']
+    metadata = _checkpoint_observation_metadata(checkpoint_path)
+
+    grid_cfg['visibility_filter'] = bool(metadata['visibility_filter'])
+    grid_cfg['use_occlusion'] = bool(metadata['use_occlusion'])
+    grid_cfg['occlusion_mask'] = bool(metadata['occlusion_mask'])
+    grid_cfg['history_frames'] = int(metadata['history_frames'])
+    grid_cfg['history_stride'] = int(metadata['history_stride'])
+    cfg.setdefault('reward', {})['reward_ttz_source'] = str(
+        metadata['reward_ttz_source'])
+
     if use_occlusion is not None:
-        grid_cfg['use_occlusion'] = bool(use_occlusion)
-        return
-
-    ckpt_obs_dim = _checkpoint_obs_dim(checkpoint_path)
-    if ckpt_obs_dim is None:
-        return
-
-    grid_size = 3 * int(grid_cfg['rows']) * int(grid_cfg['cols'])
-    no_occ_dim = grid_size + 4 + 2 + 3
-    occ_dim = no_occ_dim + 4
-    if ckpt_obs_dim == occ_dim:
-        grid_cfg['use_occlusion'] = True
-    elif ckpt_obs_dim == no_occ_dim:
-        grid_cfg['use_occlusion'] = False
-    else:
+        # Sanity-check override only. It changes obs_dim when the stats flag
+        # differs from the checkpoint, so the network will normally fail to
+        # load; that failure is intentional.
         print(
-            f'WARNING: checkpoint obs_dim={ckpt_obs_dim} does not match '
-            f'expected no-occlusion ({no_occ_dim}) or occlusion ({occ_dim}) '
-            'dimensions.')
+            'WARNING: overriding checkpoint use_occlusion='
+            f'{bool(use_occlusion)} (checkpoint: '
+            f'{bool(metadata["use_occlusion"])}); this is a sanity check, not '
+            'accepted evidence.')
+        grid_cfg['use_occlusion'] = bool(use_occlusion)
 
 
 def _finite_ttz_min(values):
@@ -216,8 +247,17 @@ def _env_metadata(env, cfg) -> Dict[str, Any]:
             'forward_dist': float(grid_cfg['forward_dist']),
             'backward_dist': float(grid_cfg['backward_dist']),
             'lateral_dist': float(grid_cfg['lateral_dist']),
+            'visibility_filter': bool(
+                grid_cfg.get('visibility_filter', False)),
             'use_occlusion': bool(grid_cfg.get('use_occlusion', False)),
+            'occlusion_mask': bool(grid_cfg.get('occlusion_mask', False)),
+            'history_frames': int(grid_cfg.get('history_frames', 1)),
+            'history_stride': int(grid_cfg.get('history_stride', 1)),
+            'grid_channels': int(getattr(env, 'grid_channels', 0)),
+            'obs_dim': int(getattr(env, 'obs_dim', 0)),
         },
+        'reward_ttz_source': str(
+            cfg.get('reward', {}).get('reward_ttz_source', 'privileged')),
         'subscriber': {
             'view_dist': float(cfg['subscriber']['view_dist']),
             'view_angle': float(cfg['subscriber']['view_angle']),
@@ -288,6 +328,13 @@ def evaluate(checkpoint_path: str, scenario_path: Optional[str] = None,
     print(f'Split        : {split} (seed={split_seed}) -> '
           f'{len(eval_files)} of {len(all_files)} files')
     print(f'Occlusion    : {cfg["occupancy_grid"].get("use_occlusion", False)}')
+    print(
+        'Obs contract : '
+        f'visibility_filter={cfg["occupancy_grid"].get("visibility_filter", False)} '
+        f'occlusion_mask={cfg["occupancy_grid"].get("occlusion_mask", False)} '
+        f'history={cfg["occupancy_grid"].get("history_frames", 1)}/'
+        f'{cfg["occupancy_grid"].get("history_stride", 1)} '
+        f'reward_ttz={cfg.get("reward", {}).get("reward_ttz_source", "privileged")}')
 
     np.random.seed(seed)
     random.seed(seed)

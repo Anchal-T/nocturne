@@ -146,6 +146,9 @@ class DDQNAgent:
         self.grid_rows = config.grid_rows
         self.grid_cols = config.grid_cols
         self.grid_channels = config.grid_channels
+        # Observation/reward switches, set by train.py. Included in every
+        # checkpoint so the evaluator never has to infer them from obs_dim.
+        self.observation_metadata = None
         self.dueling = bool(config.dueling)
         self.noisy = bool(config.noisy)
         # Set by set_eval_mode(): disables noise sampling and epsilon-greedy
@@ -950,6 +953,7 @@ class DDQNAgent:
                 "grid_channels": self.grid_channels,
                 "grid_rows": self.grid_rows,
                 "grid_cols": self.grid_cols,
+                "observation_metadata": self.observation_metadata,
                 "dueling": online_base.dueling,
                 "noisy": online_base.noisy,
                 "mlp_depth": int(online_base.mlp_depth),

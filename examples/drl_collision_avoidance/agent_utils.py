@@ -6,7 +6,8 @@ from examples.drl_collision_avoidance.dqn_modules.ddqn_agent import DDQNAgent, D
 def build_cpu_agent(cfg: Dict[str, Any], obs_dim: int, n_actions: int) -> DDQNAgent:
     """Build a DDQNAgent on CPU for evaluation/visualization."""
     grid_cfg = cfg['occupancy_grid']
-    grid_channels = 3
+    history_frames = max(1, int(grid_cfg.get('history_frames', 1)))
+    grid_channels = 3 * history_frames
     grid_rows = int(grid_cfg['rows'])
     grid_cols = int(grid_cfg['cols'])
     grid_size = grid_channels * grid_rows * grid_cols
