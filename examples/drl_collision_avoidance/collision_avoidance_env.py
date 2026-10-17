@@ -87,6 +87,12 @@ class CollisionAvoidanceEnv(gym.Env):
         self.ttz_reward_scale = rew_cfg["ttz_reward_scale"]
         self.offroad_penalty = rew_cfg["offroad_penalty"]
         self.heading_scale = rew_cfg["heading_scale"]
+        self.reward_ttz_source = str(
+            rew_cfg.get("reward_ttz_source", "privileged")).lower()
+        if self.reward_ttz_source not in ("privileged", "visible"):
+            raise ValueError(
+                "reward.reward_ttz_source must be 'privileged' or 'visible', "
+                f"got {self.reward_ttz_source!r}")
 
         act_cfg = cfg["action_map"]
         throttle_levels = act_cfg["throttle_levels"]
@@ -98,12 +104,26 @@ class CollisionAvoidanceEnv(gym.Env):
         self.use_occlusion = grid_cfg.get("use_occlusion", False)
         self.occlusion_view_angle = grid_cfg.get("occlusion_view_angle", math.pi)
 
+        # Observation/reward contract switches. These are orthogonal: the arm
+        # matrix in paper/workspace/phase2_arms_and_compute.md is defined by
+        # their combination.
+        self.visibility_filter = bool(grid_cfg.get("visibility_filter", False))
+        self.use_occlusion_stats = bool(grid_cfg.get("use_occlusion", False))
+        self.occlusion_mask_enabled = bool(
+            grid_cfg.get("occlusion_mask", False))
+        self.history_frames = max(1, int(grid_cfg.get("history_frames", 1)))
+        self.history_stride = max(1, int(grid_cfg.get("history_stride", 1)))
+        self.grid_channels = GRID_CHANNELS * self.history_frames
+
         self.base_env = BaseEnv(cfg)
         self.cfg = cfg
 
         obs_dim = self.grid_channels * self.grid_rows * self.grid_cols + 4 + 2 + 3
-        if self.use_occlusion:
-            obs_dim += 4  # occlusion features
+        if self.use_occlusion_stats:
+            obs_dim += 4  # occlusion summary features
+        if self.occlusion_mask_enabled:
+            obs_dim += self.grid_rows * self.grid_cols  # spatial mask
+        self.obs_dim = obs_dim
         self.observation_space = Box(
             low=-np.inf, high=np.inf, shape=(obs_dim,), dtype=np.float32
         )
@@ -115,6 +135,13 @@ class CollisionAvoidanceEnv(gym.Env):
         self._max_steps = cfg["drl"]["max_episode_steps"]
         self._ttz_vehicle: float = NO_CONFLICT_TTZ
         self._ttz_pedestrian: float = NO_CONFLICT_TTZ
+        self._obs_ttz_vehicle: float = NO_CONFLICT_TTZ
+        self._obs_ttz_pedestrian: float = NO_CONFLICT_TTZ
+        self._reward_ttz_vehicle: float = NO_CONFLICT_TTZ
+        self._reward_ttz_pedestrian: float = NO_CONFLICT_TTZ
+        self._grid_history = []
+        self._grid_cell_azimuth, self._grid_cell_range = \
+            self._build_grid_cell_geometry()
         self._road_edge_pts = np.empty((0, 2), dtype=np.float32)
         self._visible_set = None
         self.last_reset_info: Dict[str, Any] = self._empty_reset_info()
@@ -145,6 +172,7 @@ class CollisionAvoidanceEnv(gym.Env):
         super().reset(seed=seed)
         eval_mode = self.base_env._eval_mode
         self.last_reset_info = self._empty_reset_info()
+        self._grid_history = []
         obs_dict: Dict = {}
         for _ in range(MAX_RESET_ATTEMPTS):
             obs_dict, _ = self.base_env.reset(build_obs=False)
@@ -232,8 +260,15 @@ class CollisionAvoidanceEnv(gym.Env):
         truncated = truncated_dict.get(self._ego_id, False) or self._step_count >= self._max_steps
 
         info = dict(info_dict.get(self._ego_id, {}))
+        # Privileged/physical TTZ is the evaluation metric; observed and
+        # reward sources are logged separately so the reward ablation cannot
+        # be mistaken for a change in the underlying scene.
         info["ttz_vehicle"] = self._ttz_vehicle
         info["ttz_pedestrian"] = self._ttz_pedestrian
+        info["ttz_vehicle_observed"] = self._obs_ttz_vehicle
+        info["ttz_pedestrian_observed"] = self._obs_ttz_pedestrian
+        info["ttz_vehicle_reward"] = self._reward_ttz_vehicle
+        info["ttz_pedestrian_reward"] = self._reward_ttz_pedestrian
         info["step_count"] = self._step_count
         info["goal_dist"] = self._get_goal_dist()
 
@@ -249,6 +284,26 @@ class CollisionAvoidanceEnv(gym.Env):
         pass
 
     # --- Road-edge caching ---
+
+    def _build_grid_cell_geometry(self):
+        """Cell-center azimuth and range in the ego frame.
+
+        Matches the grid indexing in ``Scenario::OccupancyGrid`` and
+        ``_build_occupancy_grid_py``: row 0 is the forward edge, column 0 is
+        the left edge in the ego frame.
+        """
+        rows, cols = self.grid_rows, self.grid_cols
+        cell_long = (self.forward_dist + self.backward_dist) / rows
+        cell_lat = (2.0 * self.lateral_dist) / cols
+        r = np.arange(rows, dtype=np.float32)[:, None]
+        c = np.arange(cols, dtype=np.float32)[None, :]
+        lx = self.forward_dist - (r + 0.5) * cell_long
+        ly = -self.lateral_dist + (c + 0.5) * cell_lat
+        lx = np.broadcast_to(lx, (rows, cols))
+        ly = np.broadcast_to(ly, (rows, cols))
+        azimuth = np.arctan2(ly, lx).astype(np.float32)
+        cell_range = np.hypot(lx, ly).astype(np.float32)
+        return azimuth, cell_range
 
     def _cache_road_edges(self):
         """Cache world-frame road-edge geometry points once per scenario.
@@ -351,35 +406,99 @@ class CollisionAvoidanceEnv(gym.Env):
         if ego_veh is None:
             self._ttz_vehicle = NO_CONFLICT_TTZ
             self._ttz_pedestrian = NO_CONFLICT_TTZ
+            self._obs_ttz_vehicle = NO_CONFLICT_TTZ
+            self._obs_ttz_pedestrian = NO_CONFLICT_TTZ
+            self._reward_ttz_vehicle = NO_CONFLICT_TTZ
+            self._reward_ttz_pedestrian = NO_CONFLICT_TTZ
             return np.zeros(self.observation_space.shape, dtype=np.float32)
 
+        # Visibility is needed by the observation filter, the occlusion
+        # encoding, and (optionally) the reward source.
+        need_visibility = (
+            self.visibility_filter
+            or self.use_occlusion_stats
+            or self.occlusion_mask_enabled
+            or self.reward_ttz_source == "visible"
+        )
         visible_set = None
         visible_objects = None
-        if self.use_occlusion:
+        if need_visibility:
             visible_objects = self._query_visible_objects(ego_veh)
             visible_set = self._match_visible_to_vehicles(ego_veh, visible_objects)
-
         self._visible_set = visible_set
 
-        # Single C++ call to fetch all object states (id, x, y, speed,
-        # heading, type) as a batched (N, 6) array, then split by type and
-        # apply visibility / ego-exclusion filters in vectorized numpy.
-        # Replaces 3 separate Python loops over C++ object lists (each doing
-        # 4 pybind property reads per object).
+        obs_set = visible_set if self.visibility_filter else None
         veh_data, ped_data, cyc_data = self._extract_all_objects(
-            ego_id=self._ego_id, visible_set=visible_set,
+            ego_id=self._ego_id, visible_set=obs_set,
         )
 
-        grid = self._build_occupancy_grid(ego_veh, veh_data, ped_data, cyc_data)
+        grid = self._build_occupancy_grid(
+            ego_veh, veh_data, ped_data, cyc_data, visible_set=obs_set,
+        )
         ego_state = self._get_ego_state(ego_veh)
         target_info = self._get_target_info(ego_veh)
-        ttz_info = self._get_ttz_info(ego_veh, veh_data, ped_data, cyc_data)
+        ttz_info, obs_ttz_veh, obs_ttz_ped = self._compute_ttz_info(
+            ego_veh, veh_data, ped_data, cyc_data,
+        )
+        self._obs_ttz_vehicle = obs_ttz_veh
+        self._obs_ttz_pedestrian = obs_ttz_ped
 
-        parts = [grid.flatten(), ego_state, target_info, ttz_info]
-        if self.use_occlusion:
+        # Physical (privileged) TTZ is always computed for logging so metrics
+        # stay comparable across arms; the reward uses the configured source.
+        if obs_set is None:
+            all_veh, all_ped, all_cyc = veh_data, ped_data, cyc_data
+        else:
+            all_veh, all_ped, all_cyc = self._extract_all_objects(
+                ego_id=self._ego_id, visible_set=None,
+            )
+        _, priv_ttz_veh, priv_ttz_ped = self._compute_ttz_info(
+            ego_veh, all_veh, all_ped, all_cyc,
+        )
+        self._ttz_vehicle = priv_ttz_veh
+        self._ttz_pedestrian = priv_ttz_ped
+
+        if self.reward_ttz_source == "visible":
+            if obs_set is not None:
+                self._reward_ttz_vehicle = obs_ttz_veh
+                self._reward_ttz_pedestrian = obs_ttz_ped
+            else:
+                rew_veh, rew_ped, rew_cyc = self._extract_all_objects(
+                    ego_id=self._ego_id, visible_set=visible_set,
+                )
+                _, rew_ttz_veh, rew_ttz_ped = self._compute_ttz_info(
+                    ego_veh, rew_veh, rew_ped, rew_cyc,
+                )
+                self._reward_ttz_vehicle = rew_ttz_veh
+                self._reward_ttz_pedestrian = rew_ttz_ped
+        else:
+            self._reward_ttz_vehicle = priv_ttz_veh
+            self._reward_ttz_pedestrian = priv_ttz_ped
+
+        obs_grid = self._stack_grid_history(grid)
+        parts = [obs_grid.flatten(), ego_state, target_info, ttz_info]
+        if self.use_occlusion_stats:
             parts.append(self._compute_occlusion_features(visible_objects))
+        if self.occlusion_mask_enabled:
+            parts.append(self._compute_occlusion_mask(visible_objects))
 
         return np.concatenate(parts).astype(np.float32)
+
+    def _stack_grid_history(self, grid: np.ndarray) -> np.ndarray:
+        """Return the current grid followed by up to k-1 past snapshots.
+
+        The deque is updated only every ``history_stride`` steps; the current
+        grid is always the first frame. Missing past frames are zero-padded.
+        """
+        if self.history_frames == 1:
+            return grid
+        past = list(self._grid_history[: self.history_frames - 1])
+        while len(past) < self.history_frames - 1:
+            past.append(np.zeros_like(grid))
+        stacked = np.concatenate([grid] + past, axis=0)
+        if self._step_count % self.history_stride == 0:
+            self._grid_history.insert(0, grid.copy())
+            del self._grid_history[self.history_frames - 1:]
+        return stacked
 
     # --- Visibility / Occlusion ---
 
@@ -446,59 +565,94 @@ class CollisionAvoidanceEnv(gym.Env):
                     result[key].add(oid)
         return result
 
-    def _compute_occlusion_features(self, objects: np.ndarray) -> np.ndarray:
-        """Compute 4 occlusion summary features from pre-queried visible objects."""
+    def _merged_blocked_intervals(self, objects):
+        """Merge angular blocker intervals, keeping each interval's distance.
+
+        Returns ``(merged, valid_count, blocker_count)`` where ``merged`` is a
+        list of ``(start_azimuth, end_azimuth, blocker_distance)``.
+        """
         half_view = self.occlusion_view_angle * 0.5
         intervals = []
-        nearest_blocker = 999.0
-        blocker_count = 0
         valid_count = 0
+        if objects is None:
+            return intervals, 0, 0
         for row in objects:
             if row[0] <= 0:
                 continue
             valid_count += 1
             dist = max(float(row[1]), 1e-3)
             azimuth = float(row[2])
-            radius = 0.5 * math.hypot(max(float(row[3]), 0.0), max(float(row[4]), 0.0))
+            radius = 0.5 * math.hypot(max(float(row[3]), 0.0),
+                                      max(float(row[4]), 0.0))
             angular_half = min(math.atan2(radius, dist), half_view)
             start = max(-half_view, azimuth - angular_half)
             end = min(half_view, azimuth + angular_half)
             if end > start:
-                intervals.append((start, end))
-                nearest_blocker = min(nearest_blocker, dist)
-                blocker_count += 1
+                intervals.append((start, end, dist))
 
         if not intervals:
-            return np.zeros(4, dtype=np.float32)
+            return intervals, valid_count, 0
 
-        intervals.sort()
-        occluded_length = 0.0
-        s, e = intervals[0]
-        for ns, ne in intervals[1:]:
+        intervals.sort(key=lambda item: item[0])
+        merged = []
+        s, e, d = intervals[0]
+        for ns, ne, nd in intervals[1:]:
             if ns <= e:
                 e = max(e, ne)
+                d = min(d, nd)
             else:
-                occluded_length += e - s
-                s, e = ns, ne
-        occluded_length += e - s
+                merged.append((s, e, d))
+                s, e, d = ns, ne, nd
+        merged.append((s, e, d))
+        return merged, valid_count, len(intervals)
+
+    def _compute_occlusion_features(self, objects: np.ndarray) -> np.ndarray:
+        """Compute 4 occlusion summary features from pre-queried visible objects."""
+        merged, valid_count, blocker_count = self._merged_blocked_intervals(
+            objects)
+        if not merged:
+            return np.zeros(4, dtype=np.float32)
+
+        occluded_length = sum(e - s for s, e, _ in merged)
+        nearest_blocker = min(d for _, _, d in merged)
 
         view_dist = max(self.forward_dist, self.lateral_dist) + 5.0
         occ_frac = occluded_length / max(self.occlusion_view_angle, 1e-6)
         nearest_norm = nearest_blocker / max(view_dist, 1e-6)
         density = blocker_count / max(valid_count, 1)
         pressure = occ_frac * (1.0 - nearest_norm)
-        return np.array([occ_frac, nearest_norm, density, pressure], dtype=np.float32)
+        return np.array([occ_frac, nearest_norm, density, pressure],
+                        dtype=np.float32)
+
+    def _compute_occlusion_mask(self, objects: np.ndarray) -> np.ndarray:
+        """Binary spatial occlusion mask aligned with the occupancy grid.
+
+        A cell is 1 when its azimuth falls inside a merged blocked interval
+        and its range is beyond that interval's nearest blocker. Static road
+        edges are not considered occluders.
+        """
+        mask = np.zeros((self.grid_rows, self.grid_cols), dtype=np.float32)
+        merged, _, _ = self._merged_blocked_intervals(objects)
+        if not merged:
+            return mask.flatten()
+        azimuth = self._grid_cell_azimuth
+        cell_range = self._grid_cell_range
+        for start, end, blocker_dist in merged:
+            mask[(azimuth >= start) & (azimuth <= end) &
+                 (cell_range > blocker_dist)] = 1.0
+        return mask.flatten()
 
     # --- Vectorized occupancy grid ---
 
     def _build_occupancy_grid(self, ego_veh, veh_data=None,
-                              ped_data=None, cyc_data=None) -> np.ndarray:
+                              ped_data=None, cyc_data=None,
+                              visible_set=None) -> np.ndarray:
         # Fast path: C++ occupancy grid stamping. Eliminates per-step numpy
         # allocations and the Python scatter-max loop. Falls back to the
         # Python implementation if the C++ method is unavailable.
         if self._use_cpp_grid:
             try:
-                grid = self.base_env.scenario.occupancy_grid(
+                kwargs = dict(
                     ego=ego_veh,
                     rows=self.grid_rows,
                     cols=self.grid_cols,
@@ -510,6 +664,15 @@ class CollisionAvoidanceEnv(gym.Env):
                     road_edge_weight=self.road_edge_weight,
                     ego_id=self._ego_id if self._ego_id is not None else -1,
                 )
+                if self.visibility_filter:
+                    visible_ids = []
+                    if visible_set is not None:
+                        for key in ("vehicles", "peds", "cyclists"):
+                            visible_ids.extend(visible_set.get(key, ()))
+                    grid = self.base_env.scenario.occupancy_grid_visible(
+                        visible_ids=visible_ids, **kwargs)
+                else:
+                    grid = self.base_env.scenario.occupancy_grid(**kwargs)
                 if grid is not None:
                     return np.ascontiguousarray(grid, dtype=np.float32)
             except (AttributeError, TypeError):
@@ -662,8 +825,13 @@ class CollisionAvoidanceEnv(gym.Env):
 
     # --- Vectorized TTZ ---
 
-    def _get_ttz_info(self, ego_veh, veh_data=None, ped_data=None,
-                      cyc_data=None) -> np.ndarray:
+    def _compute_ttz_info(self, ego_veh, veh_data=None, ped_data=None,
+                          cyc_data=None):
+        """Return (3 TTZ observation features, min_vehicle_ttz, min_ped_ttz).
+
+        Pure: does not mutate reward/logging state, so the observation and the
+        reward can be computed from different visibility sets.
+        """
         ego_pos = ego_veh.position
         ego_speed = max(ego_veh.speed, 0.1)
 
@@ -700,17 +868,24 @@ class CollisionAvoidanceEnv(gym.Env):
             if len(ttz) > 0:
                 min_ttz_ped = min(min_ttz_ped, float(np.min(ttz)))
 
-        self._ttz_vehicle = min_ttz_veh
-        self._ttz_pedestrian = min_ttz_ped
-
-        return np.array(
+        features = np.array(
             [
                 min(min_ttz_veh, TTZ_OBS_CLIP),
                 min(min_ttz_ped, TTZ_OBS_CLIP),
-                np.clip(min_ttz_veh - min_ttz_ped, -TTZ_OBS_CLIP, TTZ_OBS_CLIP),
+                np.clip(min_ttz_veh - min_ttz_ped,
+                        -TTZ_OBS_CLIP, TTZ_OBS_CLIP),
             ],
             dtype=np.float32,
         )
+        return features, min_ttz_veh, min_ttz_ped
+
+    # Backward-compatible wrapper for callers that only need the features.
+    # New code should call _compute_ttz_info and choose the reward source.
+    def _get_ttz_info(self, ego_veh, veh_data=None, ped_data=None,
+                      cyc_data=None) -> np.ndarray:
+        features, _, _ = self._compute_ttz_info(
+            ego_veh, veh_data, ped_data, cyc_data)
+        return features
 
     def _compute_ttz_batch(self, px, py, obj_speeds, obj_headings,
                            ego_pos, ego_speed, ego_heading):
@@ -814,7 +989,8 @@ class CollisionAvoidanceEnv(gym.Env):
                 heading_err = abs(self._get_heading_error(ego_veh))
                 reward += self.heading_scale * (1.0 - heading_err / math.pi)
 
-            min_ttz = min(self._ttz_vehicle, self._ttz_pedestrian)
+            min_ttz = min(self._reward_ttz_vehicle,
+                          self._reward_ttz_pedestrian)
             if min_ttz < self.ttz_safe_threshold and min_ttz > 0:
                 reward -= self.ttz_reward_scale * (self.ttz_safe_threshold - min_ttz)
 

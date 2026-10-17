@@ -140,6 +140,28 @@ void DefineScenario(py::module& m) {
           py::arg("lateral_dist"), py::arg("vehicle_weight"),
           py::arg("vru_weight"), py::arg("road_edge_weight"),
           py::arg("ego_id") = -1)
+      .def(
+          "occupancy_grid_visible",
+          [](const Scenario& scenario, const Object& ego, int64_t rows,
+             int64_t cols, float forward_dist, float backward_dist,
+             float lateral_dist, float vehicle_weight, float vru_weight,
+             float road_edge_weight, const std::vector<int64_t>& visible_ids,
+             int64_t ego_id) {
+            py::gil_scoped_release release;
+            const auto result = scenario.OccupancyGridVisible(
+                ego, rows, cols, forward_dist, backward_dist, lateral_dist,
+                vehicle_weight, vru_weight, road_edge_weight, ego_id,
+                visible_ids);
+            py::gil_scoped_acquire acquire;
+            return utils::AsNumpyArray(result);
+          },
+          "Return (3, rows, cols) float32 occupancy grid with only the "
+          "given visible actor ids stamped; road edges are always stamped.",
+          py::arg("ego"), py::arg("rows"), py::arg("cols"),
+          py::arg("forward_dist"), py::arg("backward_dist"),
+          py::arg("lateral_dist"), py::arg("vehicle_weight"),
+          py::arg("vru_weight"), py::arg("road_edge_weight"),
+          py::arg("visible_ids"), py::arg("ego_id") = -1)
       .def("expert_position", &Scenario::ExpertPosition)
       .def("expert_heading", &Scenario::ExpertHeading)
       .def("expert_speed", &Scenario::ExpertSpeed)

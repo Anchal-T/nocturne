@@ -13,6 +13,7 @@
 #include <string>
 #include <tuple>
 #include <unordered_map>
+#include <unordered_set>
 #include <variant>
 #include <vector>
 
@@ -280,6 +281,16 @@ class Scenario : public sf::Drawable {
       float vehicle_weight, float vru_weight, float road_edge_weight,
       int64_t ego_id) const;
 
+  // Same as OccupancyGrid, but only stamps actors whose id is in
+  // `visible_ids`. Road edges are static and always stamped. Used to make the
+  // observation visibility-consistent (the ray-cast set is the same one that
+  // filters the TTZ/object features).
+  NdArray<float> OccupancyGridVisible(
+      const Object& ego, int64_t rows, int64_t cols,
+      float forward_dist, float backward_dist, float lateral_dist,
+      float vehicle_weight, float vru_weight, float road_edge_weight,
+      int64_t ego_id, const std::vector<int64_t>& visible_ids) const;
+
   NdArray<float> FlattenedVisibleState(const Object& src, float view_dist,
                                        float view_angle,
                                        float head_angle = 0.0f) const;
@@ -316,6 +327,13 @@ class Scenario : public sf::Drawable {
   std::vector<const TrafficLight*> VisibleTrafficLights(
       const Object& src, float view_dist, float view_angle,
       float head_angle = 0.0f) const;
+
+  NdArray<float> OccupancyGridImpl(
+      const Object& ego, int64_t rows, int64_t cols,
+      float forward_dist, float backward_dist, float lateral_dist,
+      float vehicle_weight, float vru_weight, float road_edge_weight,
+      int64_t ego_id,
+      const std::unordered_set<int64_t>* visible_ids) const;
 
   // Draws the objects contained in `drawables` on the render target `target`.
   // The view `view` is applied to the target before drawing the objects, and

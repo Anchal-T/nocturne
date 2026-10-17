@@ -641,11 +641,12 @@ void Scenario::RestoreSnapshot() {
   object_bvh_.Reset(objects_);
 }
 
-NdArray<float> Scenario::OccupancyGrid(
+NdArray<float> Scenario::OccupancyGridImpl(
     const Object& ego, int64_t rows, int64_t cols,
     float forward_dist, float backward_dist, float lateral_dist,
     float vehicle_weight, float vru_weight, float road_edge_weight,
-    int64_t ego_id) const {
+    int64_t ego_id,
+    const std::unordered_set<int64_t>* visible_ids) const {
   NdArray<float> grid({3, rows, cols}, 0.0f);
   float* grid_data = grid.DataPtr();
 
@@ -666,6 +667,10 @@ NdArray<float> Scenario::OccupancyGrid(
 
   auto stamp_vehicle = [&](const Object& obj) {
     if (obj.id() == ego_id) return;
+    if (visible_ids != nullptr &&
+        visible_ids->find(obj.id()) == visible_ids->end()) {
+      return;
+    }
     const float dx = obj.position().x() - ego_x;
     const float dy = obj.position().y() - ego_y;
     const float lx = dx * cos_h + dy * sin_h;
@@ -696,6 +701,10 @@ NdArray<float> Scenario::OccupancyGrid(
   };
 
   auto stamp_simple = [&](const Object& obj, float weight) {
+    if (visible_ids != nullptr &&
+        visible_ids->find(obj.id()) == visible_ids->end()) {
+      return;
+    }
     const float dx = obj.position().x() - ego_x;
     const float dy = obj.position().y() - ego_y;
     const float lx = dx * cos_h + dy * sin_h;
@@ -737,6 +746,28 @@ NdArray<float> Scenario::OccupancyGrid(
   }
 
   return grid;
+}
+
+NdArray<float> Scenario::OccupancyGrid(
+    const Object& ego, int64_t rows, int64_t cols,
+    float forward_dist, float backward_dist, float lateral_dist,
+    float vehicle_weight, float vru_weight, float road_edge_weight,
+    int64_t ego_id) const {
+  return OccupancyGridImpl(ego, rows, cols, forward_dist, backward_dist,
+                           lateral_dist, vehicle_weight, vru_weight,
+                           road_edge_weight, ego_id, nullptr);
+}
+
+NdArray<float> Scenario::OccupancyGridVisible(
+    const Object& ego, int64_t rows, int64_t cols,
+    float forward_dist, float backward_dist, float lateral_dist,
+    float vehicle_weight, float vru_weight, float road_edge_weight,
+    int64_t ego_id, const std::vector<int64_t>& visible_ids) const {
+  const std::unordered_set<int64_t> visible_set(visible_ids.begin(),
+                                                visible_ids.end());
+  return OccupancyGridImpl(ego, rows, cols, forward_dist, backward_dist,
+                           lateral_dist, vehicle_weight, vru_weight,
+                           road_edge_weight, ego_id, &visible_set);
 }
 
 NdArray<float> Scenario::FlattenedVisibleState(const Object& src,

@@ -162,7 +162,21 @@ occupancy_grid:
     vru_weight: 2.0
     vehicle_weight: 1.0
     road_edge_weight: 3.0
+    # Visibility-consistent observation. visibility_filter removes actors
+    # outside the ray-cast view cone or occluded behind a nearer actor before
+    # they reach the grid and the TTZ/object features. When false the arm is
+    # explicitly privileged.
+    visibility_filter: false
+    # Append the 4 occlusion summary features (occ fraction, nearest blocker,
+    # density, pressure). Independent of visibility_filter.
     use_occlusion: false
+    # Append a rows*cols binary spatial occlusion mask channel.
+    occlusion_mask: false
+    # Grid-only history: keep the current grid first plus up to
+    # history_frames-1 snapshots sampled every history_stride sim steps.
+    # grid_channels becomes 3 * history_frames in the network.
+    history_frames: 1
+    history_stride: 1
     occlusion_view_angle: 3.14159
 
 reward:
@@ -174,6 +188,9 @@ reward:
     ttz_reward_scale: 0.5
     offroad_penalty: 50.0
     heading_scale: 0.3
+    # TTZ used by the reward: privileged (all actors, physical truth) or
+    # visible (ray-cast set only). Independent of the observation source.
+    reward_ttz_source: privileged
 
 action_map:
     # Throttle levels are longitudinal accelerations (m/s^2); steer levels are
