@@ -176,5 +176,11 @@ reward:
     heading_scale: 0.3
 
 action_map:
-    throttle_levels: [-1.0, 0.0, 2.0]
+    # Throttle levels are longitudinal accelerations (m/s^2); steer levels are
+    # steering angles (rad). The grid is their Cartesian product:
+    # 4 throttle levels x 5 steer levels = 20 discrete actions. -4.0 adds a
+    # hard-braking level on top of the original [-1.0, 0.0, 2.0].
+    # Note: accel_lower_bound/upper_bound above describe the continuous
+    # BaseEnv action space and are independent of this discrete table.
+    throttle_levels: [-4.0, -1.0, 0.0, 2.0]
     steer_levels: [-0.7, -0.2, 0.0, 0.2, 0.7]

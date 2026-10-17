@@ -32,7 +32,11 @@ def test_ddqn_forward_and_train():
         ns = np.random.randn(obs_dim).astype(np.float32)
         agent.store_transition(s, np.random.randint(15), np.random.randn(), ns, 0.0)
 
-    loss = agent.train_step()
+    # train_step only returns a host loss every loss_sync_interval gradient
+    # steps (loss D2H syncs are batched), so run a full sync interval.
+    loss = None
+    for _ in range(agent._loss_sync_interval):
+        loss = agent.train_step()
     assert loss is not None
     print(f'[PASS] DDQN forward + train  (Q shape={q.shape}, loss={loss:.4f})')
 

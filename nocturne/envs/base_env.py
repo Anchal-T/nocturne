@@ -8,6 +8,7 @@ from typing import Any, Dict, Sequence, Union
 from collections import OrderedDict, defaultdict, deque
 from itertools import islice
 import json
+import math
 import os
 
 from gymnasium import Env
@@ -101,6 +102,15 @@ class BaseEnv(Env):
         # pybind11 Simulation instances do not allow arbitrary Python
         # attributes, so cache state belongs to the Python environment.
         self._simulation_from_cache = False
+
+        # Deterministic evaluation mode. The evaluator forces an explicit,
+        # ordered scene per reset; ego choice is a pure function of the scene
+        # (no random draws), and a scene without a controllable vehicle is
+        # reported instead of silently substituted. Every episode is then a
+        # (scene, ego) pair that is identical across model arms.
+        self._eval_mode = bool(cfg.get('deterministic_eval', False))
+        self._eval_file_override = None
+        self._eval_scene_status = 'ok'
 
         obs_dict, _ = self.reset()
         self.observation_space = Box(low=-np.inf,
@@ -384,6 +394,10 @@ class BaseEnv(Env):
 
     def _pick_scenario_file(self):
         """Choose the next scenario, using the pool when it is enabled."""
+        if self._eval_file_override is not None:
+            filename = self._eval_file_override
+            self._eval_file_override = None
+            return filename
         if not self.files:
             raise RuntimeError("no scenario files remain")
         if self._pool_size <= 0:
@@ -524,6 +538,7 @@ class BaseEnv(Env):
         """See superclass."""
         self.t = 0
         self.step_num = 0
+        self._eval_scene_status = 'ok'
 
         enough_vehicles = False
         # we don't want to initialize scenes with 0 actors after satisfying
@@ -574,9 +589,18 @@ class BaseEnv(Env):
                 '''############################################
                     Remove vehicles at goal
                 ############################################'''
+                # The removal threshold must match the success criterion used
+                # in step(): when position_target is enabled, a vehicle left
+                # in the scene within position_target_tolerance of its goal
+                # would register goal_achieved on the very first step,
+                # producing a trivial episode.
+                rew_cfg = self.cfg['rew_cfg']
+                if rew_cfg.get('position_target', False):
+                    goal_tolerance = rew_cfg['position_target_tolerance']
+                else:
+                    goal_tolerance = rew_cfg['goal_tolerance']
                 norm = np.linalg.norm(goal_pos - obj_pos)
-                if norm < self.cfg['rew_cfg'][
-                        'goal_tolerance'] or veh_obj.getCollided():
+                if norm < goal_tolerance or veh_obj.getCollided():
                     self.scenario.removeVehicle(veh_obj)
                 '''############################################
                     Set all vehicles with unachievable goals to be experts
@@ -589,7 +613,21 @@ class BaseEnv(Env):
             ############################################'''
             # ensure that we have no more than max_num_vehicles are controlled
             temp_vehicles = self.scenario.getObjectsThatMoved()
-            np.random.shuffle(temp_vehicles)
+            if self._eval_mode:
+                # Deterministic ego preference: the candidate with the
+                # largest remaining goal distance (ties broken by vehicle id)
+                # so that the same scene always yields the same ego. Random
+                # shuffling here is what makes the old evaluator compare
+                # different episodes across arms.
+                def _goal_distance(veh):
+                    pos = veh.getPosition()
+                    goal = veh.getGoalPosition()
+                    return math.hypot(goal.x - pos.x, goal.y - pos.y)
+
+                temp_vehicles.sort(
+                    key=lambda veh: (-_goal_distance(veh), veh.getID()))
+            else:
+                np.random.shuffle(temp_vehicles)
             curr_index = 0
             self.controlled_vehicles = []
             self.expert_controlled_vehicles = []
@@ -630,6 +668,12 @@ class BaseEnv(Env):
             # or else we might be stuck in an infinite loop
             if len(self.all_vehicle_ids) > 0 or len(self.files) == 1:
                 enough_vehicles = True
+            elif self._eval_mode:
+                # Deterministic eval: never silently substitute a different
+                # scene. Report this (scene, no-ego) pair instead; the
+                # evaluator records it as invalid for every arm.
+                self._eval_scene_status = 'no_controlled_vehicles'
+                enough_vehicles = True
             else:
                 # Blacklist this file so we never retry it; remove from the
                 # working set so the next pick is guaranteed different.
@@ -648,11 +692,19 @@ class BaseEnv(Env):
         # we have no controlled vehicles
         # just grab a vehicle even if it hasn't moved so that we have something
         # to return obs for even if it's not controlled
-        # NOTE: this case only occurs during our eval procedure where we set the
-        # self.files list to be length 1. Otherwise, the while loop above will repeat
-        # until a file is found.
+        # NOTE: this case occurs during our eval procedure (self.files length 1
+        # or deterministic_eval forcing a single scene). Otherwise, the while
+        # loop above repeats until a file with controllable vehicles is found.
         if len(self.all_vehicle_ids) == 0:
-            self.controlled_vehicles = [self.scenario.getVehicles()[0]]
+            fallback_vehicles = self.scenario.getVehicles()
+            if not fallback_vehicles:
+                if self._eval_mode:
+                    self._eval_scene_status = 'no_vehicles'
+                    return {}, {}
+                raise RuntimeError(
+                    f"Scenario {self.file} contains no vehicles and no "
+                    "log objects that moved.")
+            self.controlled_vehicles = [fallback_vehicles[0]]
             self.all_vehicle_ids = [
                 veh.getID() for veh in self.controlled_vehicles
             ]

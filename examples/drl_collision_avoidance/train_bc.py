@@ -33,6 +33,12 @@ from nocturne.utils.distributed import (
     wrap_ddp,
 )
 
+# BaseEnv.reset() advances the simulation by this many expert-controlled steps
+# before handing control back, so the observation at loop index t corresponds
+# to scenario time start_time + CONTEXT_STEPS + t. Expert actions must be
+# queried at that same time index.
+CONTEXT_STEPS = 10
+
 
 def discretize_expert_action(accel, steer, action_table):
     """Map continuous (accel, steer) to nearest discrete action index."""
@@ -63,8 +69,14 @@ def collect_data(cfg, num_episodes, dist_rank=0):
             continue
 
         for t in range(max_steps):
-            # Get expert action at current timestep
-            expert_action = env.base_env.scenario.getExpertAction(ego_veh, start_time + t)
+            # Get expert action at the current simulation time. The
+            # observation from reset() already corresponds to
+            # start_time + CONTEXT_STEPS (the warmup steps), so the action
+            # label for loop index t must use the same offset — querying
+            # start_time + t would pair each observation with the expert
+            # action from 10 timesteps earlier.
+            expert_action = env.base_env.scenario.getExpertAction(
+                ego_veh, start_time + CONTEXT_STEPS + t)
             if expert_action is None:
                 break
 

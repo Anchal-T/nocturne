@@ -148,6 +148,9 @@ class DDQNAgent:
         self.grid_channels = config.grid_channels
         self.dueling = bool(config.dueling)
         self.noisy = bool(config.noisy)
+        # Set by set_eval_mode(): disables noise sampling and epsilon-greedy
+        # action selection so evaluation is deterministic and paired.
+        self.eval_mode = False
         self.use_muon = bool(config.use_muon)
         self.grad_accum_steps = max(1, int(config.grad_accum_steps))
         self.max_grad_norm = float(config.max_grad_norm)
@@ -374,6 +377,11 @@ class DDQNAgent:
 
     def _autocast_context(self):
         """Return an AMP context compatible with torch 1.12 and newer."""
+        if not self._use_amp:
+            # torch 1.12 still validates the CPU autocast dtype inside the
+            # context even with enabled=False, which crashes for fp16. AMP is
+            # only enabled on CUDA anyway, so skip the context entirely.
+            return nullcontext()
         if hasattr(torch, "amp") and hasattr(torch.amp, "autocast"):
             return torch.amp.autocast(
                 device_type=self.device.type,
@@ -388,11 +396,15 @@ class DDQNAgent:
     def _set_eval_network_modes(self, target: nn.Module, inference: nn.Module) -> None:
         target.eval()
         inference.eval()
-        if self.noisy:
+        if self.noisy and not self.eval_mode:
             self._set_noisy_layers_training(inference, True)
 
     def _reset_inference_noise_if_needed(self) -> None:
-        if self.noisy:
+        # During training the inference net samples fresh NoisyNet epsilon on
+        # every forward pass. In eval mode the noisy layers run in eval mode
+        # (mean weights), so resampling would only consume RNG state and has
+        # no effect on the output — skip it for determinism.
+        if self.noisy and not self.eval_mode:
             self._unwrap_module(self.inference_net).reset_noise()
 
     def _capture_inference_graph(self):
@@ -431,6 +443,22 @@ class DDQNAgent:
         for submodule in DDQNAgent._unwrap_module(module).modules():
             if isinstance(submodule, NoisyLinear):
                 submodule.train(training)
+
+    def set_eval_mode(self) -> None:
+        """Switch the agent to deterministic greedy evaluation.
+
+        NoisyLinear.forward() adds sampled noise only while the layer is in
+        training mode, so putting every network in eval mode makes noisy
+        policies use their mean weights. Epsilon-greedy is disabled by zeroing
+        epsilon as well. Call this after ``load()`` (which re-syncs the
+        inference net) and before selecting actions.
+        """
+        self.eval_mode = True
+        self.epsilon = 0.0
+        self.online_net.eval()
+        self.target_net.eval()
+        self.inference_net.eval()
+        self._set_noisy_layers_training(self.inference_net, False)
 
     # --- Action Selection ---
 
@@ -916,6 +944,7 @@ class DDQNAgent:
                 "train_steps": self.train_steps,
                 "epsilon": self.epsilon,
                 "obs_dim": self.obs_dim,
+                "n_actions": int(self.n_actions),
                 "hidden_layers": online_base.hidden_layers,
                 "grid_size": online_base.grid_size,
                 "grid_channels": self.grid_channels,
@@ -979,6 +1008,14 @@ class DDQNAgent:
             raise KeyError(
                 "Checkpoint is missing required architecture fields: "
                 f"{', '.join(missing_keys)}."
+            )
+
+        ckpt_n_actions = checkpoint.get("n_actions")
+        if ckpt_n_actions is not None and int(ckpt_n_actions) != self.n_actions:
+            raise ValueError(
+                f"Checkpoint was trained with {int(ckpt_n_actions)} actions but "
+                f"the environment exposes {self.n_actions}. Refusing to load: "
+                "the action table (throttle x steer levels) must match."
             )
 
         ckpt_hl = checkpoint["hidden_layers"]

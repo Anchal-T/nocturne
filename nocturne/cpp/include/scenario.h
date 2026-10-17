@@ -399,8 +399,16 @@ class Scenario : public sf::Drawable {
   // SaveSnapshot(); consumed by RestoreSnapshot(). Stores per-object:
   // position, heading, speed, acceleration, steering, head_angle,
   // expert_control, manual_control, collided, collision_type.
+  //
+  // It also holds a shared_ptr to each object and whether the object was in
+  // moving_objects_ at save time. RemoveObject() erases objects from
+  // objects_/vehicles_/pedestrians_/cyclists_/moving_objects_, so without
+  // these handles a restore could only rewind the state of objects that were
+  // still present — vehicles removed during an episode would be lost from
+  // the cached Simulation forever.
   struct ObjectSnapshot {
-    int64_t id;
+    std::shared_ptr<Object> object;
+    bool moving;
     float x, y;
     float heading, speed, acceleration, steering, head_angle;
     bool expert_control, manual_control, collided;

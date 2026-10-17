@@ -117,14 +117,47 @@ class CollisionAvoidanceEnv(gym.Env):
         self._ttz_pedestrian: float = NO_CONFLICT_TTZ
         self._road_edge_pts = np.empty((0, 2), dtype=np.float32)
         self._visible_set = None
+        self.last_reset_info: Dict[str, Any] = self._empty_reset_info()
         # Use the C++ occupancy_grid method when available; falls back to
         # the Python implementation on first AttributeError/TypeError.
         self._use_cpp_grid: bool = True
 
+    def _empty_reset_info(self) -> Dict[str, Any]:
+        return {
+            'scene_file': None,
+            'ego_id': None,
+            'valid': False,
+            'reason': 'reset_failed',
+            'initial_goal_dist': None,
+            'n_vehicles': 0,
+        }
+
+    def set_eval_scene(self, scene_file: str) -> None:
+        """Force the next reset() to load ``scene_file``.
+
+        Used with ``cfg['deterministic_eval'] = True`` to pin every episode
+        to an explicit (scene, ego) pair, so all evaluated arms are compared
+        on exactly the same episodes.
+        """
+        self.base_env._eval_file_override = scene_file
+
     def reset(self, *, seed=None, options=None) -> tuple:
         super().reset(seed=seed)
+        eval_mode = self.base_env._eval_mode
+        self.last_reset_info = self._empty_reset_info()
+        obs_dict: Dict = {}
         for _ in range(MAX_RESET_ATTEMPTS):
             obs_dict, _ = self.base_env.reset(build_obs=False)
+            if eval_mode and self.base_env._eval_scene_status != 'ok':
+                # The forced scene produced no controllable ego. Report it as
+                # invalid rather than silently substituting another scene.
+                self.last_reset_info['scene_file'] = self.base_env.file
+                self.last_reset_info['reason'] = \
+                    self.base_env._eval_scene_status
+                return (
+                    np.zeros(self.observation_space.shape, dtype=np.float32),
+                    self.last_reset_info,
+                )
             if not obs_dict:
                 continue
             ego_id = next(iter(obs_dict))
@@ -134,10 +167,25 @@ class CollisionAvoidanceEnv(gym.Env):
                 self._step_count = 0
                 self._prev_goal_dist = self._get_goal_dist()
                 self._cache_road_edges()
-                return self._build_observation(), {}
+                self.last_reset_info.update(
+                    scene_file=self.base_env.file,
+                    ego_id=ego_id,
+                    valid=True,
+                    reason=None,
+                    initial_goal_dist=float(self._prev_goal_dist),
+                    n_vehicles=len(vehicle_ids),
+                )
+                return self._build_observation(), self.last_reset_info
 
         ego_id = self._find_any_ego_id(obs_dict)
         if ego_id is None:
+            if eval_mode:
+                self.last_reset_info['scene_file'] = self.base_env.file
+                self.last_reset_info['reason'] = 'no_ego_id'
+                return (
+                    np.zeros(self.observation_space.shape, dtype=np.float32),
+                    self.last_reset_info,
+                )
             raise RuntimeError(
                 f"Failed to initialize environment after {MAX_RESET_ATTEMPTS} reset attempts."
             )
@@ -145,7 +193,15 @@ class CollisionAvoidanceEnv(gym.Env):
         self._step_count = 0
         self._prev_goal_dist = self._get_goal_dist()
         self._cache_road_edges()
-        return self._build_observation(), {}
+        self.last_reset_info.update(
+            scene_file=self.base_env.file,
+            ego_id=ego_id,
+            valid=True,
+            reason=None,
+            initial_goal_dist=float(self._prev_goal_dist),
+            n_vehicles=len(self.base_env.scenario.getVehicles()),
+        )
+        return self._build_observation(), self.last_reset_info
 
     def _find_any_ego_id(self, obs_dict):
         if obs_dict:

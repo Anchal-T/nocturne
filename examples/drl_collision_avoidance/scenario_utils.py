@@ -1,7 +1,8 @@
 import hashlib
+import json
 import os
 import subprocess
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from omegaconf import OmegaConf
 
@@ -124,4 +125,41 @@ def load_config(
         cfg_dict[key] = value
 
     return apply_scenario_path_defaults(cfg_dict, default_split=scenario_split)
+
+
+def load_valid_files(scenario_path: str,
+                     num_files: int = -1) -> List[str]:
+    """Return the sorted scenario file list recorded in valid_files.json."""
+    valid_files_path = os.path.join(scenario_path, 'valid_files.json')
+    with open(valid_files_path) as f:
+        names = sorted(json.load(f).keys())
+    if num_files is not None and num_files != -1:
+        names = names[:int(num_files)]
+    return names
+
+
+def hash_split_files(files: List[str], split_seed: int = 0,
+                     half: str = 'test') -> List[str]:
+    """Deterministically split a file list into train/test halves by hash.
+
+    A file lands in the 'test' half when the first byte of
+    ``sha256(f"{split_seed}:{name}")`` is even, and in the 'train' half
+    otherwise. ``half='all'`` returns the input unchanged. Because the rule
+    only depends on (split_seed, file name), every arm and every evaluation
+    run recomputes exactly the same split.
+    """
+    half = str(half).lower()
+    if half not in ('train', 'test', 'all'):
+        raise ValueError(
+            f"half must be one of 'train', 'test', 'all'; got {half!r}")
+    if half == 'all':
+        return list(files)
+    want_even = half == 'test'
+    selected = []
+    for name in files:
+        digest = hashlib.sha256(f'{int(split_seed)}:{name}'.encode()).digest()
+        is_even = digest[0] % 2 == 0
+        if is_even == want_even:
+            selected.append(name)
+    return selected
 

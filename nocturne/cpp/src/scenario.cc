@@ -10,6 +10,8 @@
 #include <limits>
 #include <memory>
 #include <type_traits>
+#include <unordered_map>
+#include <unordered_set>
 
 #include "geometry/aabb_interface.h"
 #include "geometry/geometry_utils.h"
@@ -568,11 +570,18 @@ NdArray<float> Scenario::RoadEdgePoints() const {
 void Scenario::SaveSnapshot() {
   snapshot_time_ = current_time_;
   snapshot_.clear();
-  snapshot_.reserve(vehicles_.size() + pedestrians_.size() + cyclists_.size() +
-                     objects_.size());
-  auto save_obj = [this](const Object* obj) {
+  snapshot_.reserve(objects_.size());
+  // objects_ is the union of vehicles_/pedestrians_/cyclists_, so iterating
+  // it alone captures every object exactly once.
+  std::unordered_set<const Object*> moving_ids;
+  moving_ids.reserve(moving_objects_.size());
+  for (const auto& obj : moving_objects_) {
+    moving_ids.insert(obj.get());
+  }
+  for (const auto& obj : objects_) {
     snapshot_.push_back({
-        obj->id(),
+        obj,
+        moving_ids.count(obj.get()) > 0,
         obj->position().x(), obj->position().y(),
         obj->heading(), obj->speed(),
         obj->acceleration(), obj->steering(), obj->head_angle(),
@@ -580,43 +589,56 @@ void Scenario::SaveSnapshot() {
         obj->collided(),
         static_cast<int>(obj->collision_type()),
     });
-  };
-  for (const auto& obj : vehicles_) save_obj(obj.get());
-  for (const auto& obj : pedestrians_) save_obj(obj.get());
-  for (const auto& obj : cyclists_) save_obj(obj.get());
-  for (const auto& obj : objects_) save_obj(obj.get());
+  }
 }
 
 void Scenario::RestoreSnapshot() {
   if (snapshot_.empty()) return;
   current_time_ = snapshot_time_;
-  // Build a lookup from object id -> snapshot entry.
-  std::unordered_map<int64_t, const ObjectSnapshot*> lookup;
-  lookup.reserve(snapshot_.size());
+  // Rebuild every object container from the snapshot. RemoveObject() erases
+  // objects from these vectors, so a restore must reinsert the objects that
+  // were removed during the episode (the snapshot keeps them alive).
+  objects_.clear();
+  vehicles_.clear();
+  pedestrians_.clear();
+  cyclists_.clear();
+  moving_objects_.clear();
+  objects_.reserve(snapshot_.size());
   for (const auto& snap : snapshot_) {
-    lookup[snap.id] = &snap;
-  }
-  auto restore_vec = [&](auto& vec) {
-    for (auto& obj : vec) {
-      auto it = lookup.find(obj->id());
-      if (it == lookup.end()) continue;
-      const auto* snap = it->second;
-      obj->set_position(snap->x, snap->y);
-      obj->set_heading(snap->heading);
-      obj->set_speed(snap->speed);
-      obj->set_acceleration(snap->acceleration);
-      obj->set_steering(snap->steering);
-      obj->set_head_angle(snap->head_angle);
-      obj->set_expert_control(snap->expert_control);
-      obj->set_manual_control(snap->manual_control);
-      obj->set_collided(snap->collided);
-      obj->set_collision_type(static_cast<CollisionType>(snap->collision_type));
+    const auto& obj = snap.object;
+    obj->set_position(snap.x, snap.y);
+    obj->set_heading(snap.heading);
+    obj->set_speed(snap.speed);
+    obj->set_acceleration(snap.acceleration);
+    obj->set_steering(snap.steering);
+    obj->set_head_angle(snap.head_angle);
+    obj->set_expert_control(snap.expert_control);
+    obj->set_manual_control(snap.manual_control);
+    obj->set_collided(snap.collided);
+    obj->set_collision_type(static_cast<CollisionType>(snap.collision_type));
+    objects_.push_back(obj);
+    if (snap.moving) {
+      moving_objects_.push_back(obj);
     }
-  };
-  restore_vec(vehicles_);
-  restore_vec(pedestrians_);
-  restore_vec(cyclists_);
-  restore_vec(objects_);
+    switch (obj->Type()) {
+      case ObjectType::kVehicle: {
+        vehicles_.push_back(std::static_pointer_cast<Vehicle>(obj));
+        break;
+      }
+      case ObjectType::kPedestrian: {
+        pedestrians_.push_back(std::static_pointer_cast<Pedestrian>(obj));
+        break;
+      }
+      case ObjectType::kCyclist: {
+        cyclists_.push_back(std::static_pointer_cast<Cyclist>(obj));
+        break;
+      }
+      default: {
+        break;
+      }
+    }
+  }
+  object_bvh_.Reset(objects_);
 }
 
 NdArray<float> Scenario::OccupancyGrid(
