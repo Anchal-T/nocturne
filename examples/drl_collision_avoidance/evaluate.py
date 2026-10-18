@@ -76,10 +76,18 @@ def _git_state() -> Dict[str, Any]:
         head = subprocess.check_output(
             ['git', 'rev-parse', 'HEAD'], cwd=REPO_ROOT,
             stderr=subprocess.DEVNULL, text=True).strip()
-        dirty = bool(subprocess.check_output(
+        status = subprocess.check_output(
             ['git', 'status', '--porcelain'], cwd=REPO_ROOT,
-            stderr=subprocess.DEVNULL, text=True).strip())
-        return {'git_head': head, 'git_dirty': dirty}
+            stderr=subprocess.DEVNULL, text=True).strip()
+        lines = status.splitlines() if status else []
+        return {
+            'git_head': head,
+            'git_dirty': bool(lines),
+            # Record the paths so an auditor can distinguish stale untracked
+            # artifacts from a modified evaluator or environment.
+            'git_status': lines[:100],
+            'git_status_truncated': len(lines) > 100,
+        }
     except Exception as exc:  # pragma: no cover - best effort only
         return {'git_head': None, 'git_dirty': None, 'git_error': str(exc)}
 
