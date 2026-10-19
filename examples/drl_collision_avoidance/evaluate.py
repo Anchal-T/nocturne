@@ -467,7 +467,14 @@ def evaluate(checkpoint_path: str, scenario_path: Optional[str] = None,
                 if done:
                     break
 
-            timed_out = bool(truncated) and not bool(terminated)
+            # At the horizon the environment sets both truncated and terminated
+            # (collision_avoidance_env.step), so the last step's flags cannot
+            # separate a timeout from other endings. Count a timeout only when
+            # the loop ran to the horizon without a goal, collision, or edge
+            # collision.
+            horizon = cfg['drl']['max_episode_steps']
+            timed_out = (t + 1 >= horizon and not goal and not collided
+                         and not edge_collision)
             ade = None
             fde = None
             jerk = None
