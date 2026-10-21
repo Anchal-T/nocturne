@@ -27,6 +27,7 @@ CHECKPOINT_ROOT="${CHECKPOINT_ROOT:-$ROOT/checkpoints/controlled_study}"
 LOG_ROOT="${LOG_ROOT:-$ROOT/logs/controlled_study}"
 MAX_ENV_STEPS="${MAX_ENV_STEPS:-10000000}"
 SAVE_INTERVAL="${SAVE_INTERVAL:-1000000}"
+TRAIN_FREQ="${TRAIN_FREQ:-128}"
 LAUNCHES_FILE="${LAUNCHES_FILE:-$ROOT/paper/workspace/launches.txt}"
 
 case "$ARM" in
@@ -66,7 +67,7 @@ CMD=(
   "drl.num_envs_per_worker=12"
   "drl.num_envs=48"
   "drl.vec_env_mode=sync"
-  "drl.train_freq=128"
+  "drl.train_freq=$TRAIN_FREQ"
   "drl.batch_size=512"
   "drl.save_interval=$SAVE_INTERVAL"
   "occupancy_grid.visibility_filter=$VIS"
