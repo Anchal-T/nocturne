@@ -57,3 +57,9 @@ GEMINI.md
 outputs/
 
 venv/
+paper/runs data/
+paper/workspace/eval/
+paper/workspace/analysis/
+paper/workspace/launches.txt
+paper/ppt_training_data.csv
+paper/ppt_content.md

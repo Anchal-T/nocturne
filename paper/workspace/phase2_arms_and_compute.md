@@ -165,10 +165,10 @@ selection. Evaluation uses the final checkpoint.
 ### 3.3 Parallelism
 
 - **4 concurrent training jobs**, one per GPU (`CUDA_VISIBLE_DEVICES`),
-  `OMP_NUM_THREADS=1`. The 2026-10-17 21:11 re-probe (load average ~22)
-  measured 826-967 steps/s per job, ~3,500 steps/s aggregate, so 4-way is
-  now clearly better than 2-way. The earlier 2-way decision was taken under
-  a heavier external load; see 3.4.
+  `OMP_NUM_THREADS=1`. The 2026-10-17 21:11 valid-dir probe measured
+  826-967 steps/s per job, but the real 1,001-scene training wave measured
+  237-331 steps/s per job (~1,086 steps/s aggregate). Four-way is still
+  ~2x the earlier loaded 2-way aggregate; see 3.4.
 - Footprint: 4 jobs x ~6 processes = 24 of 48 cores, leaving room for 2-4
   parallel evaluations. The driver pipelines evaluations behind the next
   training wave.
@@ -182,22 +182,22 @@ selection. Evaluation uses the final checkpoint.
 | Solo 200k-step calibration | 436/s incl. startup; 515-570/s steady | 515-570/s | 200,016 steps in 457.8 s |
 | 2-way probe, 60k steps/job | 248-303/s (last 150 s) | ~536/s (last 150 s); 551/s sum of per-job averages | Heavier external load |
 | 4-way probe, 60k steps/job | 74-203/s (last 150 s) | ~509/s (last 150 s); 511/s sum of per-job averages | One job degraded by external load |
-| **4-way probe, 30k steps/job, O arm, 21:11** | **826-967/s** | **~3,493/s** (sum of per-job averages); 3,129/s wave incl. startup | Current load; O = 813-D |
+| 4-way smoke, 30k steps/job, valid dir, 4 files, O | 826-967/s | ~3,493/s (sum of per-job averages); 3,129/s wave incl. startup | 21:11; **not representative of the 1,001-scene train dir** |
+| **4-way real wave 1, train dir, 1,001 scenes** | **A 237, B 268, C 250, C_vis 331/s** | **~1,086/s** | First ~150 s, 33-49k steps/job; production condition |
 
-The 21:11 re-probe shows 4-way is now ~6-7x the earlier aggregate: the host
-CPU is no longer saturated by other users. Pick 4-way. The earlier 2-way
-decision was correct for that load but is superseded.
+The 21:11 probe used four validation files and overestimated production
+throughput: the real 1,001-scene training directory is heavier per reset.
+The production wave-1 rate is ~1,086 steps/s aggregate, still ~2x the earlier
+loaded 2-way measurement. Pick 4-way.
 
-- Planning number: **2,000 steps/s aggregate** (conservative; the probe saw
-  ~3,500). 24 runs x 10M = 240M steps.
-- At 2,000/s: 120,000 s = **33 h**. At the probe rate (~3,000/s planning):
-  **~22 h**.
-- 6 waves of 4 runs; each run ~3.4-5.6 h. Budget **~1.5 days** including
-  evaluation overlap and restarts. If external load returns, the worst case
-  is the earlier ~5 days; the driver is resumable and checkpoints per run.
+- Planning number: **1,000 steps/s aggregate**. 24 runs x 10M = 240M steps.
+- At 1,086/s: 221,000 s = **~61 h**. At 1,000/s: 240,000 s = **~67 h**.
+- 6 waves of 4 runs; each run ~8.4-11.7 h. Budget **~2.5-3 days** including
+  evaluation overlap and restarts. At the earlier loaded 2-way rate the study
+  would take ~5.3 days; 4-way is still the right choice.
 - Evaluations (6,102 test scenes per run) run on the spare cores while the
   next wave trains; they are not on the critical path unless a wave is
-  delayed.
+  delayed. The driver's per-run wall times refine this estimate.
 
 ### 3.5 Launch template
 
