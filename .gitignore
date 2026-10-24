@@ -63,3 +63,11 @@ paper/workspace/analysis/
 paper/workspace/launches.txt
 paper/ppt_training_data.csv
 paper/ppt_content.md
+paper/.venv/
+paper/workspace/
+paper/main.aux
+paper/main.bbl
+paper/main.blg
+paper/main.log
+paper/main.out
+paper/main.pdf
